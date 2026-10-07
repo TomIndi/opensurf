@@ -33,7 +33,15 @@ import {
   UserCmd,
 } from '../physics/playertypes';
 import type { UiApi } from './api';
-import { BindTable, binds as globalBinds, codeToKeyName, mouseButtonToKeyName, wheelToKeyName } from './binds';
+import {
+  BindTable,
+  KEY_NAMES,
+  binds as globalBinds,
+  codeToKeyName,
+  keyNameToCodes,
+  mouseButtonToKeyName,
+  wheelToKeyName,
+} from './binds';
 
 // ------------------------------------------------------------------------------------------ kbuttons
 
@@ -524,6 +532,16 @@ export interface InputDeviceDeps {
   autotest: boolean;
 }
 
+/** KeyboardEvent codes of every bindable keyboard key except Escape (for navigator.keyboard.lock). */
+export function lockableKeyCodes(): string[] {
+  const out: string[] = [];
+  for (const k of KEY_NAMES) {
+    if (k === 'escape') continue;
+    for (const c of keyNameToCodes(k)) if (!out.includes(c)) out.push(c);
+  }
+  return out;
+}
+
 type LockableCanvas = HTMLCanvasElement & {
   requestPointerLock(options?: { unadjustedMovement?: boolean }): Promise<void> | void;
 };
@@ -575,6 +593,25 @@ export class InputDevice {
     });
     on(window, 'blur', () => this.releaseAll());
     on(c, 'contextmenu', (e: MouseEvent) => e.preventDefault());
+    // mouse4/mouse5 are history back/forward in browsers: never navigate away mid-game
+    on(window, 'auxclick', (e: MouseEvent) => {
+      if ((e.button === 3 || e.button === 4) && this.deps.isPlaying()) e.preventDefault();
+    });
+    // fullscreen: the Keyboard Lock API lets the game receive Ctrl+W & co. (duck + forward!) instead of the browser
+    on(document, 'fullscreenchange', () => this.updateKeyboardLock());
+  }
+
+  /** In fullscreen, lock every bindable key except Escape (Escape keeps leaving fullscreen / the pointer). */
+  private updateKeyboardLock(): void {
+    const kb = (globalThis.navigator as { keyboard?: { lock?: (codes?: string[]) => Promise<void>; unlock?: () => void } } | undefined)?.keyboard;
+    if (!kb || typeof kb.lock !== 'function') return;
+    try {
+      if (typeof document !== 'undefined' && document.fullscreenElement) {
+        void kb.lock(lockableKeyCodes()).catch(() => undefined);
+      } else kb.unlock?.();
+    } catch {
+      /* not allowed */
+    }
   }
 
   detach(): void {
@@ -674,6 +711,8 @@ export class InputDevice {
   private onMouseUp(e: MouseEvent): void {
     const key = mouseButtonToKeyName(e.button);
     if (key) this.deps.dispatcher.keyUp(key);
+    // the side buttons navigate on release in Chromium; cancel that while playing
+    if ((e.button === 3 || e.button === 4) && this.deps.isPlaying()) e.preventDefault();
   }
 
   private onWheel(e: WheelEvent): void {

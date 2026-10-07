@@ -79,8 +79,6 @@ export const UI_CVARS: Def[] = [
   { name: 'cl_crosshaircolor_b', def: '50', flags: A, min: 0, max: 255 },
   { name: 'cl_crosshairalpha', def: '200', flags: A, min: 0, max: 255 },
   { name: 'cl_crosshairusealpha', def: '1', flags: A },
-  // UI-owned extra (CS:GO's T-shaped crosshair)
-  { name: 'cl_crosshair_t', def: '0', flags: A, help: 'T-style crosshair (no top line)' },
   // video
   { name: 'mat_fullbright', def: '0', flags: A },
   { name: 'r_drawzones', def: '1', flags: A },
@@ -102,6 +100,16 @@ export const UI_CVARS: Def[] = [
   { name: 'surf_speedometer_color', def: '1', flags: A },
   { name: 'surf_chat_sounds', def: '1', flags: A },
 ];
+
+/**
+ * Cvars owned by the UI itself (not in the documented set). Registered in the Ui constructor — before the game
+ * executes the saved config — so their saved values are restored.
+ */
+export const UI_OWNED_CVARS: Def[] = [{ name: 'cl_crosshair_t', def: '0', flags: A, help: 'T-style crosshair (no top line)' }];
+
+export function registerUiOwnedCvars(): void {
+  for (const d of UI_OWNED_CVARS) registerCvar({ name: d.name, default: d.def, flags: d.flags, min: d.min, max: d.max, help: d.help });
+}
 
 /** Registers documented cvars that nobody registered yet (no-op for existing ones). */
 export function ensureUiCvars(): void {

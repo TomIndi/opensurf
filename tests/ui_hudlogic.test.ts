@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { TimerHud } from '../src/game/api';
-import { courseText, FpsMeter, FrameStats, netGraphText, SpeedTrend, splitView, timerView } from '../src/ui/hudlogic';
+import { courseText, FpsMeter, FrameStats, HoldLatch, netGraphText, SpeedTrend, splitView, timerView } from '../src/ui/hudlogic';
 import { PHASE_SPANS, phaseText, rawProgress, rescaleProgress } from '../src/ui/loadprogress';
 import { clipNear } from '../src/ui/menubg';
 import { hashString, mapThumbSvg, paletteFor, prng } from '../src/ui/thumbs';
@@ -106,6 +106,20 @@ describe('fps meter', () => {
     expect(updated).toBe(1);
     expect(m.fps).toBeCloseTo(144, 0);
     expect(m.tick(5)).toBe(false);
+  });
+});
+
+describe('showkeys hold latch', () => {
+  it('keeps one-frame taps visible for the hold time', () => {
+    const l = new HoldLatch(90);
+    expect(l.update(false, 0)).toBe(false);
+    expect(l.update(true, 100)).toBe(true);
+    expect(l.update(false, 107)).toBe(true);
+    expect(l.update(false, 189)).toBe(true);
+    expect(l.update(false, 191)).toBe(false);
+    l.update(true, 300);
+    l.reset();
+    expect(l.update(false, 301)).toBe(false);
   });
 });
 

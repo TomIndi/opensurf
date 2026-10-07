@@ -72,6 +72,8 @@ describe('map filtering', () => {
     expect(names(filterMaps(maps, F({ tiers: new Set([1, 6]), type: 'linear' })))).toEqual(['surf_abyss', 'surf_mesa_fixed']);
     expect(filterMaps(maps, F({ zonesOnly: true })).every((e) => e.hasZones)).toBe(true);
     expect(names(filterMaps(maps, F({ cachedOnly: true, cached: new Set(['surf_kitsune']) })))).toEqual(['surf_kitsune']);
+    expect(names(filterMaps(maps, F({ completedOnly: true, completed: new Set(['surf_10x', 'surf_abyss']) })))).toEqual(['surf_10x', 'surf_abyss']);
+    expect(filterMaps(maps, F({ completedOnly: true })).length).toBe(0);
   });
 
   it('puts exact and prefix matches first when searching', () => {

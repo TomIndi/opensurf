@@ -4,7 +4,7 @@ import type { GameApi, SoundApi } from '../game/api';
 import { BUILTIN_MAPS, type BuiltinMapInfo } from '../map/builtin/index';
 import { type CatalogEntry, loadCatalog, tierColor } from '../maps/catalog';
 import { deleteCachedMap, driveViewUrl, listCachedMaps } from '../maps/downloader';
-import { getCompletions, getPersonalBest } from '../game/records';
+import { getCompletions, getPersonalBest, getRecords } from '../game/records';
 import { clear, h, storageGet, storageSet } from './dom';
 import { mapNameEl, tierPill } from './mapui';
 import { formatTime, formatTimeShort, mapTypeName, prettyMapName, tierName } from './format';
@@ -156,6 +156,14 @@ export class MapBrowser {
       return b;
     };
     this.countEl = h('span.result-count');
+    const randomBtn = h('button.chip.random-chip', { attrs: { type: 'button', title: 'Pick a random map from the current filter' } }, icon('dice'), 'Random');
+    randomBtn.addEventListener('click', () => {
+      const items = this.list.getItems();
+      if (!items.length) return;
+      let i = Math.floor(Math.random() * items.length);
+      if (items.length > 1 && i === this.list.selectedIndex) i = (i + 1) % items.length;
+      this.list.select(i, true);
+    });
     const toolbar = h(
       'div.all-toolbar',
       null,
@@ -171,6 +179,12 @@ export class MapBrowser {
         this.filter.zonesOnly = on;
         this.applyFilter(true);
       }),
+      toggle('Completed', 'timer', (on) => {
+        this.filter.completedOnly = on;
+        this.filter.completed = completedSet(this.catalog);
+        this.applyFilter(true);
+      }),
+      randomBtn,
       this.countEl,
     );
     this.list = new VirtualList<CatalogEntry>({
@@ -287,7 +301,8 @@ export class MapBrowser {
     } catch {
       /* no IndexedDB */
     }
-    if (this.filter.cachedOnly) this.applyFilter(false);
+    if (this.filter.completedOnly) this.filter.completed = completedSet(this.catalog);
+    if (this.filter.cachedOnly || this.filter.completedOnly) this.applyFilter(false);
     else this.list.refresh();
     this.renderFeatured();
     const sel = this.list.selectedIndex;
@@ -656,6 +671,17 @@ export class MapBrowser {
 }
 
 /** The local personal best on the main course (records are best-effort: never let them break the browser). */
+/** Lower-case names of catalog maps with a local personal best on any course. */
+function completedSet(catalog: readonly CatalogEntry[]): Set<string> {
+  const out = new Set<string>();
+  try {
+    for (const e of catalog) if (getRecords(e.name, 0).length) out.add(e.name.toLowerCase());
+  } catch {
+    /* records unavailable */
+  }
+  return out;
+}
+
 function personalBest(name: string): { time: number; completions: number } | null {
   try {
     const pb = getPersonalBest(name, 0);

@@ -161,3 +161,20 @@ export function netGraphText(fps: number, frameVarMs: number, tickrate: number):
   const tick = tickrate.toFixed(1).padStart(5);
   return `fps: ${f}  var: ${frameVarMs.toFixed(1)} ms  ping: 0 ms\nloss:   0%  choke:  0%\ntick:${tick}  up: ${Math.round(tickrate)}/s  cmd: ${Math.round(tickrate)}/s\nlocal server`;
 }
+
+/**
+ * Keeps a momentary signal visible for a minimum time (showkeys: one-frame wheel jumps, per-frame mouse turn
+ * direction that drops to 0 on frames without mouse movement).
+ */
+export class HoldLatch {
+  private until = -Infinity;
+  constructor(private readonly holdMs = 90) {}
+  /** `now` in ms. Returns the displayed state. */
+  update(active: boolean, now: number): boolean {
+    if (active) this.until = now + this.holdMs;
+    return active || now < this.until;
+  }
+  reset(): void {
+    this.until = -Infinity;
+  }
+}

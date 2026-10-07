@@ -12,7 +12,7 @@ import { console_, registerCommand } from '../core/cvars';
 import type { ChatSegment, GameApi, HudState, LoadProgress, SoundApi, UiApi } from '../game/api';
 import { getCatalogEntry } from '../maps/catalog';
 import { Chat } from './chat';
-import { cvarBool, cvarNum, ensureUiCvars } from './cvardefs';
+import { cvarBool, cvarNum, ensureUiCvars, registerUiOwnedCvars } from './cvardefs';
 import { DevConsole } from './devconsole';
 import { h, isTextInput } from './dom';
 import { Hud } from './hud';
@@ -56,14 +56,26 @@ export class Ui implements UiApi {
   constructor(root: HTMLElement, private readonly sound: SoundApi) {
     this.root = root;
     root.classList.add('surf-ui');
+    // UI-only cvars exist before the game runs the saved config (documented cvars are the game's: see attachGame)
+    registerUiOwnedCvars();
+    // automated sessions (?autotest=1) play without pointer lock: no "click to capture" prompt
+    try {
+      if (/[?&]autotest=(1|true|yes)\b/i.test(location.search)) this.lockHintEnabled = false;
+    } catch {
+      /* no location */
+    }
 
     const toast = (msg: string, kind?: ToastKind) => this.toast(msg, kind);
     const confirm = (title: string, text: string, ok: string) => this.confirm(title, text, ok);
 
     this.hud = new Hud();
     this.chatBox = new Chat({
-      // surf servers have a single team: team chat goes through say() as well
-      onSay: (text) => this.game?.say(text),
+      onSay: (text, team) => {
+        if (!this.game) return;
+        // GameApi.say has no team flag: messagemode2 goes through the say_team command when the game has it
+        if (team && console_.hasCommand('say_team')) this.game.executeCommand(`say_team "${text.replace(/"/g, "''")}"`);
+        else this.game.say(text);
+      },
       onOpenChange: (open) => {
         if (!open) this.relockIfPlaying();
       },
@@ -366,8 +378,9 @@ export class Ui implements UiApi {
   private resumeGame(): void {
     this.sound.play('ui_click');
     this.game?.resume();
-    // resume happens on a click/key (user gesture): capture the mouse if the game didn't already
-    setTimeout(() => this.relockIfPlaying(), 30);
+    // Resume happens on a click/key (a user gesture): capture the mouse right away (game.resume() doesn't).
+    // Deferred a tick so a game that does lock in resume() wins; requestLock() skips if already locked.
+    setTimeout(() => this.relockIfPlaying(), 0);
   }
 
   private cancelLoading(): void {

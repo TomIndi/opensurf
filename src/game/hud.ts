@@ -118,6 +118,7 @@ export interface HudSource {
   visible: boolean;
   mapName: string;
   tier: number | null;
+  /** The view (eye) position, as CS:GO's cl_showpos and getpos show it. */
   origin: Vec3;
   velocity: Vec3;
   angles: QAngle;

@@ -146,8 +146,7 @@
 }
 
 .surf-ui .loading-step.skipped {
-  opacity: 0.35;
-  text-decoration: line-through;
+  display: none;
 }
 
 @keyframes step-pulse {

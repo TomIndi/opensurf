@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { console_, FCVAR_CHEAT, FCVAR_HIDDEN, registerCommand, registerCvar } from '../src/core/cvars';
 import { isSilent, queryBinds, runSilently } from '../src/ui/conutil';
-import { customPhysicsActive, ensureUiCvars, persistConfigNow, PHYSICS_CVARS, setCvar, UI_CVARS } from '../src/ui/cvardefs';
+import { customPhysicsActive, ensureUiCvars, persistConfigNow, PHYSICS_CVARS, registerUiOwnedCvars, setCvar, UI_CVARS, UI_OWNED_CVARS } from '../src/ui/cvardefs';
 import { suggestionsFor } from '../src/ui/devconsole';
 import { HUD_COLOR_NAMES, HUD_COLORS } from '../src/ui/hud';
 
@@ -30,6 +30,13 @@ describe('UI cvar definitions match docs/ARCHITECTURE.md', () => {
     expect(console_.getCvar('surf_showkeys')!.value).toBe('1');
     expect(console_.getCvar('cl_crosshairgap')!.value).toBe('1');
     expect(console_.getCvar('hud_scaling')!.value).toBe('0.85');
+  });
+
+  it('UI-owned cvars are separate from the documented (game-owned) ones', () => {
+    const doc = new Set(UI_CVARS.map((d) => d.name));
+    for (const d of UI_OWNED_CVARS) expect(doc.has(d.name)).toBe(false);
+    registerUiOwnedCvars();
+    expect(console_.getCvar('cl_crosshair_t')!.value).toBe('0');
   });
 
   it('setCvar honours FCVAR_CHEAT like the console', () => {

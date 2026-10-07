@@ -154,6 +154,14 @@ async function main(): Promise<void> {
         ui.mainMenu.setPage('play', false);
         ui.browser.show('local', false);
         break;
+      case 'loading-builtin': {
+        game.disconnect();
+        game.state = 'loading';
+        ui.loading.setMap('surf_cascade', 2, 'staged', true);
+        ui.setLoading({ phase: 'geometry', message: 'Generating map' });
+        ui.setLoading({ phase: 'textures', message: 'Building textures 12 / 40', loaded: 12, total: 40 });
+        break;
+      }
       case 'loading':
       case 'loading-error': {
         game.disconnect();

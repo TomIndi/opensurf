@@ -46,6 +46,7 @@ export const ICONS = {
   copy: wrap('<rect x="8.5" y="8.5" width="11.5" height="11.5" rx="1.5"/><path d="M15.5 8.5V5.5A1.5 1.5 0 0 0 14 4H5.5A1.5 1.5 0 0 0 4 5.5V14a1.5 1.5 0 0 0 1.5 1.5h3"/>'),
   stage: wrap('<path d="M4 19h4v-5h4V9.5h4V5h4"/>'),
   timer: wrap('<circle cx="12" cy="13.5" r="7.5"/><path d="M12 9.5v4l2.5 2M9.5 2.5h5"/>'),
+  dice: wrap('<rect x="4" y="4" width="16" height="16" rx="3.5"/><path d="M9 9h.01M15 9h.01M12 12h.01M9 15h.01M15 15h.01" stroke-width="2.6"/>'),
   user: wrap('<circle cx="12" cy="8" r="4"/><path d="M4.5 20.5a7.5 7.5 0 0 1 15 0"/>'),
   bot: wrap('<rect x="4.5" y="8" width="15" height="11" rx="2.5"/><path d="M12 4.5V8M9 13h.01M15 13h.01"/>'),
 } as const;

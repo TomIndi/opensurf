@@ -103,6 +103,39 @@ export function buildBuiltinMap() { throw new Error('stub'); }`,
     expect(await ev(() => (document.querySelector('.hud-crosshair') as HTMLCanvasElement).width)).toBeGreaterThan(10);
   });
 
+  it('crosshair canvas is pixel-exact (CS:GO classic geometry at 1600x900)', async () => {
+    const px = await ev(() => {
+      const c = document.querySelector('.hud-crosshair') as HTMLCanvasElement;
+      const r = c.getBoundingClientRect();
+      const d = c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data;
+      let green = 0;
+      let black = 0;
+      const greenAt: string[] = [];
+      for (let y = 0; y < c.height; y++)
+        for (let x = 0; x < c.width; x++) {
+          const i = (y * c.width + x) * 4;
+          if (d[i + 3] === 0) continue;
+          if (d[i + 1] > 200 && d[i] < 100) {
+            green++;
+            greenAt.push(`${Math.round(r.left) + x},${Math.round(r.top) + y}`);
+          } else if (d[i] < 10 && d[i + 1] < 10 && d[i + 2] < 10) black++;
+        }
+      return { green, black, alpha: d.find((_, i) => i % 4 === 3 && d[i] > 0), greenAt };
+    });
+    // size 5 -> round(5 * 900/480) = 9 px bars, thickness 1 px, gap distance 5: 4 bars x 9 px
+    expect(px.green).toBe(36);
+    // outline 1: each bar's 11x3 outline minus its own 9 px
+    expect(px.black).toBe(4 * (11 * 3 - 9));
+    expect(px.alpha).toBe(200);
+    // left bar ends 5 px left of the centre column (800), top bar 5 px above the centre row (450)
+    expect(px.greenAt).toContain('794,450');
+    expect(px.greenAt).not.toContain('795,450');
+    expect(px.greenAt).toContain('800,444');
+    expect(px.greenAt).not.toContain('800,445');
+    expect(px.greenAt).toContain('806,450');
+    expect(px.greenAt).toContain('800,456');
+  });
+
   it('chat: messagemode, no stray key, send, history, Esc cancels', async () => {
     await page.keyboard.press('y');
     await wait(80);

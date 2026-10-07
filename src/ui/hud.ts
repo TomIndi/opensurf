@@ -5,7 +5,7 @@ import type { HudState } from '../game/api';
 import { cvarBool, cvarGetter, cvarNum, cvarStr } from './cvardefs';
 import { ClassSwitch, ClassToggle, h, TextSlot } from './dom';
 import { fmtPos, formatSpeed, formatTime } from './format';
-import { FpsMeter, FrameStats, netGraphText, SpeedTrend, splitView, timerView } from './hudlogic';
+import { FpsMeter, FrameStats, HoldLatch, netGraphText, SpeedTrend, splitView, timerView } from './hudlogic';
 import { crosshairGeometry, drawCrosshair, readCrosshairParams } from './crosshair';
 
 /** cl_hud_color palette (0 = default). */
@@ -110,6 +110,8 @@ export class Hud {
   private readonly sideEl: HTMLElement;
   private readonly sideTitle: TextSlot;
   private readonly sideRows: Record<string, TextSlot> = {};
+  private sideWrNone!: ClassToggle;
+  private sidePbNone!: ClassToggle;
   private readonly posEl: HTMLElement;
   private readonly posText: TextSlot;
   private readonly fpsEl: HTMLElement;
@@ -130,6 +132,10 @@ export class Hud {
   private cfg = { speed: true, timer: true, keys: true, showpos: 0, showfps: 0, speedColor: true, netgraph: 0 };
   private visible: boolean | null = null;
   private readonly trend = new SpeedTrend();
+  private readonly holdJump = new HoldLatch(90);
+  private readonly holdDuck = new HoldLatch(60);
+  private readonly holdTurnL = new HoldLatch(110);
+  private readonly holdTurnR = new HoldLatch(110);
   private readonly fps = new FpsMeter(0.5);
   private lastFrame = 0;
   private lastPosUpdate = 0;
@@ -211,7 +217,10 @@ export class Hud {
     ]) {
       const v = h('b.tnum');
       this.sideRows[key] = new TextSlot(v);
-      this.sideEl.appendChild(h(`div.hs-row.hs-${key}`, null, h('span', { text: label }), v));
+      const row = h(`div.hs-row.hs-${key}`, null, h('span', { text: label }), v);
+      if (key === 'wr') this.sideWrNone = new ClassToggle(row, 'none');
+      if (key === 'pb') this.sidePbNone = new ClassToggle(row, 'none');
+      this.sideEl.appendChild(row);
     }
 
     // ---- showpos / fps
@@ -359,10 +368,13 @@ export class Hud {
       this.keys.back.set(k.back);
       this.keys.left.set(k.left);
       this.keys.right.set(k.right);
-      this.keys.jump.set(k.jump);
-      this.keys.duck.set(k.duck);
-      this.keys.turnL.set(k.turn < 0);
-      this.keys.turnR.set(k.turn > 0);
+      this.keys.jump.set(this.holdJump.update(k.jump, now));
+      this.keys.duck.set(this.holdDuck.update(k.duck, now));
+      const left = this.holdTurnL.update(k.turn < 0, now);
+      const right = this.holdTurnR.update(k.turn > 0, now);
+      // a direction change wins immediately
+      this.keys.turnL.set(left && !(k.turn > 0));
+      this.keys.turnR.set(right && !(k.turn < 0));
     }
 
     // ---- sidebar (4 Hz is plenty)
@@ -375,6 +387,8 @@ export class Hud {
       this.sideRows.type.set(t.mapType === 'staged' ? `Staged · ${t.stageCount || '?'} stages` : t.checkpointCount ? `Linear · ${t.checkpointCount} CPs` : 'Linear');
       this.sideRows.wr.set(t.wr ? formatTime(t.wr) : 'None');
       this.sideRows.pb.set(t.pb ? formatTime(t.pb) : 'None');
+      this.sideWrNone.set(!t.wr);
+      this.sidePbNone.set(!t.pb);
       this.sideRows.stage.set(t.mapType === 'staged' && (t.state === 'running' || t.state === 'practice') ? formatTime(t.stageTime) : '—');
       this.sideRows.jumps.set(String(hud.jumps));
       this.sideRows.strafes.set(String(hud.strafes));

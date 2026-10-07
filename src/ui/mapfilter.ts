@@ -14,6 +14,10 @@ export interface MapFilterOptions {
   zonesOnly: boolean;
   /** Lower-case names of maps in the local cache. */
   cached: ReadonlySet<string>;
+  /** Only maps with a local personal best. */
+  completedOnly?: boolean;
+  /** Lower-case names of maps with a local personal best. */
+  completed?: ReadonlySet<string>;
 }
 
 export const DEFAULT_FILTER: MapFilterOptions = {
@@ -67,7 +71,8 @@ export function filterMaps(entries: readonly CatalogEntry[], o: MapFilterOptions
       (o.tiers.size === 0 || (e.tier !== null && o.tiers.has(e.tier))) &&
       matchesType(e.type, o.type) &&
       (!o.cachedOnly || o.cached.has(e.name.toLowerCase())) &&
-      (!o.zonesOnly || e.hasZones),
+      (!o.zonesOnly || e.hasZones) &&
+      (!o.completedOnly || !!o.completed?.has(e.name.toLowerCase())),
   );
   const q = o.query.trim().toLowerCase();
   out.sort((a, b) => {
