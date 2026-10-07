@@ -611,25 +611,30 @@ function readGameLumps(
     const filelen = v.getInt32(o + 12, true);
     if (idNum === 0) continue; // CS:GO writes a terminating dummy entry
     const id = fourCCString(idNum);
-    // Offsets are absolute in the file. Some console/repacked maps use offsets relative to the game lump.
+    // Offsets are absolute in the file; some console/repacked maps use offsets relative to the game lump.
+    // For CS:GO compressed game lumps (flag 1) filelen is the *uncompressed* size, so the extent of the data
+    // is taken from the LZMA header instead.
     let src: Uint8Array | null = null;
-    let start = fileofs;
-    if (!dirCompressed && fileofs >= 0 && fileofs + Math.max(filelen, 0) <= bytes.length) src = bytes;
-    else if (fileofs >= 0 && fileofs - info.offset >= 0 && fileofs - info.offset + filelen <= dir.length) {
-      src = dir;
-      start = fileofs - info.offset;
-    } else if (fileofs >= 0 && fileofs + filelen <= dir.length) {
-      src = dir;
-      start = fileofs;
-      warnings.push(`game lump ${id}: using lump-relative offset`);
+    let start = 0;
+    const candidates: [Uint8Array, number, string | null][] = [];
+    if (!dirCompressed) candidates.push([bytes, fileofs, null]);
+    candidates.push([dir, fileofs - info.offset, null]);
+    candidates.push([dir, fileofs, `game lump ${id}: using lump-relative offset`]);
+    for (const [buf, st, note] of candidates) {
+      if (st < 0 || st > buf.length) continue;
+      const lz = isSourceLzma(buf.subarray(st, Math.min(buf.length, st + 17)));
+      if (lz || st + Math.max(filelen, 0) <= buf.length) {
+        src = buf;
+        start = st;
+        if (note) warnings.push(note);
+        break;
+      }
     }
     if (!src) {
       warnings.push(`game lump ${id}: data out of range (offset ${fileofs}, length ${filelen})`);
       continue;
     }
-    let data: Uint8Array = src.subarray(start, start + Math.max(filelen, 0));
-    // CS:GO: individually LZMA-compressed game lumps (flag 1). The directory length may be the
-    // uncompressed size, so the compressed extent comes from the LZMA header itself.
+    let data: Uint8Array;
     const head = src.subarray(start, Math.min(src.length, start + 17));
     if (isSourceLzma(head)) {
       try {
@@ -642,8 +647,9 @@ function readGameLumps(
         warnings.push(`game lump ${id}: ${(e as Error).message}`);
         continue;
       }
-    } else if (flags & 1) {
-      warnings.push(`game lump ${id}: flagged compressed but has no LZMA header`);
+    } else {
+      data = src.subarray(start, start + Math.max(filelen, 0));
+      if (flags & 1) warnings.push(`game lump ${id}: flagged compressed but has no LZMA header`);
     }
     out.push({ id, flags, version, data });
   }

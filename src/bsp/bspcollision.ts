@@ -9,7 +9,7 @@ import { Vec3, v3, v3clone } from '../core/vec3';
 import { BrushModelInfo, MapEntity } from '../map/types';
 import { addBrushBevels, computeBrushBounds } from '../physics/brushbuild';
 import { Brush, BrushSide, CONTENTS_SOLID, Plane } from '../physics/types';
-import { modelBrushIndices } from './bsptree';
+import { allModelBrushIndices } from './bsptree';
 import { parseEntities } from './entities';
 import { BspFile } from './types';
 
@@ -46,7 +46,7 @@ function axialBounds(sides: BrushSide[]): { mins: Vec3; maxs: Vec3 } | null {
         hi[a] = Math.min(hi[a], s.plane.dist);
         found |= 1 << (a * 2 + 1);
       } else if (c[a] < -0.999999) {
-        lo[a] = Math.max(lo[a], -s.plane.dist);
+        lo[a] = Math.max(lo[a], 0 - s.plane.dist); // 0 - d avoids -0
         found |= 1 << (a * 2);
       }
     }
@@ -98,7 +98,7 @@ export function brushEntityPlacement(ent: MapEntity): { origin: Vec3; angles: QA
   return { origin: v3clone(ent.origin), angles };
 }
 
-/** Column-major rotation (forward, left, up) for Source angles: world = M * local. */
+/** Row-major 3x3 rotation whose columns are Source's forward, left and up vectors: world = M * local. */
 function rotationMatrix(a: QAngle): number[] {
   const f = v3();
   const r = v3();
@@ -195,10 +195,11 @@ export function buildBrushModels(bsp: BspFile, opts: BuildBrushModelsOptions = {
   let degenerate = 0;
   let total = 0;
   const out: BrushModelInfo[] = [];
+  const lists = allModelBrushIndices(bsp);
   for (let m = 0; m < bsp.models.length; m++) {
     const bm = bsp.models[m];
     let brushes: Brush[] = [];
-    for (const bi of modelBrushIndices(bsp, m)) {
+    for (const bi of lists[m]) {
       total++;
       const br = brushFromBsp(bsp, bi, m);
       if (br) brushes.push(br);
@@ -235,8 +236,12 @@ export function buildBrushModels(bsp: BspFile, opts: BuildBrushModelsOptions = {
     }
     out.push({ index: m, mins, maxs, origin, brushes });
   }
-  if (degenerate > 0 && opts.warnings) {
-    opts.warnings.push(`${degenerate} of ${total} BSP brushes are degenerate (no volume) and were skipped`);
+  if (opts.warnings) {
+    if (degenerate > 0) opts.warnings.push(`${degenerate} of ${total} BSP brushes are degenerate (no volume) and were skipped`);
+    const orphans = bsp.brushes.length - total;
+    if (orphans > 0) {
+      opts.warnings.push(`${orphans} BSP brushes are not referenced by any BSP leaf (the engine never collides with them); skipped`);
+    }
   }
   return out;
 }
@@ -392,8 +397,10 @@ export function displacementSurface(bsp: BspFile, index: number): DisplacementSu
 
 /**
  * Displacement collision as one thin convex prism per triangle (top = triangle plane facing the surface's
- * front, bottom `thickness` units below, three side walls), with bevels and bounds from brushFromPlanes.
- * Contents come from the dispinfo (CONTENTS_SOLID when unset). Model 0.
+ * front, bottom `thickness` units below, three side walls) with the axial and edge bevels brushFromPlanes
+ * would add (built analytically, see trianglePrismBrush), plus exact bounds. Contents come from the
+ * dispinfo (CONTENTS_SOLID when unset); model 0. Displacements flagged "no hull collision" are skipped.
+ * Heavy-displacement maps produce ~180k prisms: by default they are PackedBrush objects (~1.3 KB each).
  */
 export function buildDisplacementBrushes(bsp: BspFile, opts: DisplacementBrushOptions = {}): Brush[] {
   const thickness = opts.thickness ?? 2;
@@ -748,7 +755,8 @@ export function trianglePrismPlanes(a: Vec3, b: Vec3, c: Vec3, thickness: number
  * A compact, read-mostly Brush whose planes live in a shared Float64Array (SIDE_STRIDE doubles per side)
  * instead of three JS objects per side - about 4x less memory, which keeps maps with ~200k displacement
  * triangles in the low hundreds of MB. `sides` is materialized on every read (treat it as a snapshot);
- * assigning `sides` switches the brush to an ordinary array.
+ * assigning `sides` switches the brush to an ordinary array. Note: structured clone (postMessage) drops the
+ * `sides` getter - convert with toJSON() before sending brushes to a worker.
  */
 export class PackedBrush implements Brush {
   contents: number;
@@ -778,6 +786,11 @@ export class PackedBrush implements Brush {
 
   set sides(v: BrushSide[]) {
     this.own = v;
+  }
+
+  /** Plain Brush shape for JSON (debug dumps), instead of the shared side store. */
+  toJSON(): Brush {
+    return { sides: this.sides, contents: this.contents, mins: this.mins, maxs: this.maxs, model: this.model };
   }
 }
 

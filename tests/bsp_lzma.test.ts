@@ -86,6 +86,12 @@ describe('lzma: Source "LZMA" header fixtures', () => {
     }
   });
 
+  it('refuses absurd declared sizes instead of allocating them', () => {
+    const buf = fixture('bsp_lzma_pattern.bin').slice();
+    new DataView(buf.buffer).setUint32(4, 0xfffffff0, true); // actualSize ~4 GB
+    expect(() => decodeSourceLzma(buf)).toThrow(/limit/);
+  });
+
   it('returns an empty array for zero-sized output', () => {
     expect(lzmaDecompress(new Uint8Array([93, 0, 0, 1, 0]), new Uint8Array([0, 0, 0, 0, 0]), 0).length).toBe(0);
   });

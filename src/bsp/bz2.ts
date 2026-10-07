@@ -210,6 +210,9 @@ export function isBzip2(data: Uint8Array): boolean {
 /**
  * Decompresses a complete .bz2 file (one or more concatenated streams). Throws Bzip2Error on corrupt input.
  * Trailing bytes after the last stream that do not start a new stream are ignored.
+ *
+ * The result always owns an exact-size buffer (byteOffset 0, buffer.byteLength === length), so
+ * `result.buffer` can be handed to parseBsp without another copy. Peak memory is about twice the output.
  */
 export function bunzip2(data: Uint8Array, opts: Bunzip2Options = {}): Uint8Array {
   const verifyCrc = opts.verifyCrc !== false;

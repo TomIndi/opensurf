@@ -39,7 +39,11 @@ describe('bz2: fixture and error handling', () => {
 
   it('decodes the committed fixture', () => {
     expect(isBzip2(sample)).toBe(true);
-    expect(equalBytes(bunzip2(sample), sampleContent())).toBe(true);
+    const out = bunzip2(sample);
+    expect(equalBytes(out, sampleContent())).toBe(true);
+    // the result owns an exact-size buffer (usable as an ArrayBuffer without slicing)
+    expect(out.byteOffset).toBe(0);
+    expect(out.buffer.byteLength).toBe(out.length);
   });
 
   it('computes bzip2 CRC-32 (MSB-first, poly 0x04C11DB7)', () => {

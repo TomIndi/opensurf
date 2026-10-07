@@ -42,6 +42,8 @@ const REP_LEN_CODER = LEN_CODER + LEN_CODER_SIZE;
 const LITERAL = REP_LEN_CODER + LEN_CODER_SIZE;
 
 const PROB_INIT = 1024; // kBitModelTotal / 2
+/** Sanity cap on a declared output size (corrupt headers must not trigger multi-GB allocations). */
+const MAX_OUTPUT = 1 << 30;
 const TOP = 0x1000000; // 2^24
 
 /** Decoded lc/lp/pb and dictionary size from the 5-byte LZMA properties. */
@@ -164,6 +166,7 @@ function rcLen(st: Int32Array, src: Uint8Array, probs: Uint16Array, base: number
 export function lzmaDecompress(props: Uint8Array, data: Uint8Array, outSize: number): Uint8Array {
   const { lc, lp, pb } = parseLzmaProps(props);
   const known = outSize >= 0;
+  if (outSize > MAX_OUTPUT) throw new LzmaError(`declared size ${outSize} exceeds the ${MAX_OUTPUT >> 20} MB limit`);
   if (known && outSize === 0) return new Uint8Array(0);
   if (data.length < 5) throw new LzmaError('truncated stream');
 
@@ -338,7 +341,8 @@ export function lzmaDecompress(props: Uint8Array, data: Uint8Array, outSize: num
         rep0 = posSlot;
       } else {
         const numDirectBits = (posSlot >>> 1) - 1;
-        let dist = (2 | (posSlot & 1)) * 2 ** numDirectBits;
+        // numDirectBits <= 30, so the shifted value fits 32 bits; >>> 0 reads it as unsigned
+        let dist = ((2 | (posSlot & 1)) << numDirectBits) >>> 0;
         if (posSlot < END_POS_MODEL_INDEX) {
           dist += rcReverseTree(st, src, probs, SPEC_POS + dist - posSlot, numDirectBits);
         } else {
