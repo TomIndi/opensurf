@@ -233,6 +233,10 @@ export class MockGame implements GameApi {
     this.ui.chat([{ text: 'Player', color: 'team' }, { text: ': ' }, { text: t }]);
   }
 
+  bindOf(key: string): string | null {
+    return this.binds.get(key.toLowerCase()) ?? null;
+  }
+
   /** Triggers a split-delta flash on the HUD. */
   flashSplit(delta: number): void {
     this.split = { delta, time: performance.now() / 1000 };

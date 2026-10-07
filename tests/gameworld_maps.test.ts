@@ -5,12 +5,14 @@ import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { v3 } from '../src/core/vec3';
 import { EntitySystem } from '../src/game/entities';
+import { ReplaySystem } from '../src/game/replay';
 import { setRecordsStorage } from '../src/game/records';
 import { SurfTimer } from '../src/game/timer';
 import { resolveZones } from '../src/game/zoneresolve';
 import { LoadedMap } from '../src/map/types';
 import { setZonesFile } from '../src/maps/zones';
-import { hostForMap, loadRealMap } from './gameworld_host';
+import { IN_FORWARD, newUserCmd } from '../src/physics/playertypes';
+import { hostForMap, loadRealMap, physicsTick } from './gameworld_host';
 
 const DIR = process.env.SURF_TEST_MAPS ?? '';
 /** Optional directory with very large maps (surf_summer_ksf.bsp, 323 MB). */
@@ -172,7 +174,11 @@ describe.skipIf(!available.length)('game world on real maps', () => {
     timer.setZones(z.zones, z.source);
     const sp = timer.getStartSpawn(0);
     const red = ents.findTarget('red')!;
-    expect(sp.origin).toEqual(red.origin); // the info_teleport_destination inside the start zone
+    // the info_teleport_destination inside the start zone, dropped onto the floor (z 816)
+    expect(sp.origin.x).toBe(red.origin.x);
+    expect(sp.origin.y).toBe(red.origin.y);
+    expect(sp.origin.z).toBeCloseTo(816.03125, 3);
+    expect(sp.angles.yaw).toBe(red.angles.yaw);
     timer.restart(0);
     host.advance();
     ents.tick();
@@ -182,6 +188,102 @@ describe.skipIf(!available.length)('game world on real maps', () => {
     const s2 = timer.getStageSpawn(0, 2)!;
     expect(s2).not.toBeNull();
     expect(s2.origin.z).toBeGreaterThan(-700);
+  });
+
+  for (const name of ['surf_beginner', 'surf_rookie', 'surf_kitsune'].filter((m) => available.includes(m))) {
+    it(`${name}: stage teleports advance the timer through the preset stages`, async () => {
+      setRecordsStorage(null);
+      const map = await load(name);
+      const z = await resolveZones(map);
+      expect(z.source).toBe('preset');
+      const host = hostForMap(map, map.spawns[0].origin);
+      const ents = new EntitySystem(host);
+      host.entities = ents;
+      ents.spawn();
+      const timer = new SurfTimer(host);
+      timer.setZones(z.zones, z.source);
+      const tick = (): void => {
+        host.advance();
+        ents.tick();
+        timer.tick();
+      };
+      // no physics here: "fall" until a zone (or anything) is reached
+      const fall = (until: () => boolean): void => {
+        for (let i = 0; i < 200 && !until(); i++) {
+          host.setPos(host.player.origin.x, host.player.origin.y, host.player.origin.z - 8);
+          tick();
+        }
+      };
+      timer.restart(0);
+      tick();
+      fall(() => timer.getHud().state === 'startzone');
+      expect(timer.getHud().state).toBe('startzone');
+      // leave the start zone upwards: the run starts
+      const start = z.zones.find((q) => q.type === 'start' && q.group === 0)!;
+      host.setPos((start.mins.x + start.maxs.x) / 2, (start.mins.y + start.maxs.y) / 2, start.maxs.z + 200);
+      tick();
+      expect(timer.getHud().state).toBe('running');
+      const stages = z.zones.filter((q) => q.type === 'stage' && q.group === 0).sort((a, b) => a.index - b.index);
+      const inside = (p: { x: number; y: number; z: number }, q: (typeof stages)[0]): boolean =>
+        p.x >= q.mins.x - 16 && p.x <= q.maxs.x + 16 && p.y >= q.mins.y - 16 && p.y <= q.maxs.y + 16 && p.z >= q.mins.z - 72 && p.z <= q.maxs.z + 512;
+      let reached = 0;
+      for (const st of stages) {
+        // a client trigger_teleport whose destination is in this stage's start zone but which is elsewhere
+        const tp = map.entities.find((e) => {
+          if (e.classname !== 'trigger_teleport' || e.model <= 0 || e.kv.filtername || e.kv.startdisabled === '1') return false;
+          if (!((parseInt(e.kv.spawnflags ?? '0', 10) || 0) & 1)) return false;
+          const d = ents.findTarget(e.kv.target ?? '');
+          const c = brushCenter(map, e.model);
+          return !!d && !!c && inside(d.origin, st) && !inside(c, st);
+        });
+        if (!tp) continue;
+        const c = brushCenter(map, tp.model)!;
+        ents.onPlayerTeleported();
+        host.setPos(c.x, c.y, c.z - 36);
+        tick(); // touch -> teleport to the stage start
+        expect(host.teleports.at(-1)?.origin).toEqual(ents.findTarget(tp.kv.target ?? '')!.origin);
+        fall(() => timer.getHud().stage === st.index); // drop into the stage zone -> split
+        expect(timer.getHud().stage, `${name}: stage ${st.index} via trigger #${tp.index}`).toBe(st.index);
+        expect(host.chatText().at(-1)).toMatch(new RegExp(`^\\[Surf\\] Stage ${st.index} \\| `));
+        reached++;
+      }
+      expect(reached).toBeGreaterThan(stages.length / 2);
+    });
+  }
+
+  it.skipIf(!available.includes('surf_kitsune'))('surf_kitsune with real movement: leave the start, fall into the fail teleport, back in the start zone', async () => {
+    setRecordsStorage(null);
+    const map = await load('surf_kitsune');
+    const host = hostForMap(map, map.spawns[0].origin);
+    const ents = new EntitySystem(host);
+    host.entities = ents;
+    ents.spawn();
+    const timer = new SurfTimer(host);
+    host.onKill = () => timer.onPlayerKilled();
+    const replay = new ReplaySystem(map.name);
+    timer.setReplay(replay);
+    const z = await resolveZones(map);
+    timer.setZones(z.zones, z.source);
+    timer.restart(0);
+    expect(timer.getHud().state).toBe('startzone');
+    const cmd = newUserCmd();
+    const states: string[] = [];
+    let teleportsWhileRunning = 0;
+    for (let i = 0; i < 1500; i++) {
+      cmd.forwardmove = i > 50 ? 450 : 0;
+      cmd.buttons = i > 50 ? IN_FORWARD : 0;
+      const before = host.teleports.length;
+      const wasRunning = timer.getHud().state === 'running';
+      physicsTick(host, cmd, [ents, timer]);
+      replay.recordTick(host.player.origin, host.player.viewAngles, host.player.ducked, cmd.buttons);
+      if (wasRunning && host.teleports.length > before) teleportsWhileRunning++;
+      const st = timer.getHud().state;
+      if (states.at(-1) !== st) states.push(st);
+    }
+    // walked out of the start (run + recording), fell into the stage 1 fail teleport -> start zone again
+    expect(states.slice(0, 3)).toEqual(['startzone', 'running', 'startzone']);
+    expect(teleportsWhileRunning).toBeGreaterThan(0);
+    expect(host.player.origin.z).toBeGreaterThan(700);
   });
 
   it.skipIf(!available.includes('surf_utopia_njv'))('surf_utopia_njv: zones resolve (alias preset or heuristic) and the start spawn is in the start area', async () => {

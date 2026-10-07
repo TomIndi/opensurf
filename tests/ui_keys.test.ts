@@ -85,8 +85,13 @@ describe('binds parsing helpers', () => {
       ['mwheeldown', '+jump'],
       ['r', 'say "!r"'],
     ]));
-    expect(m.get('+jump')).toEqual(['space', 'mwheelup', 'mwheeldown']);
+    expect(m.get('+jump')).toEqual(['space', 'mwheeldown', 'mwheelup']);
     expect(m.get('say !r')).toEqual(['r']);
+  });
+
+  it('keeps default keys first so new keys land in the second slot', () => {
+    expect(keysByCommand(new Map([['f', '+forward'], ['w', '+forward']])).get('+forward')).toEqual(['w', 'f']);
+    expect(keysByCommand(new Map([['x', '+use'], ['b', '+use']])).get('+use')).toEqual(['b', 'x']);
   });
 
   it('every bind action is a documented command', () => {

@@ -50,6 +50,8 @@ export class Ui implements UiApi {
   private scoreboardTimer: ReturnType<typeof setInterval> | null = null;
   private dragDepth = 0;
   private wasLockedBeforeConsole = false;
+  /** Show the "click to capture the mouse" prompt while playing without pointer lock. */
+  lockHintEnabled = true;
 
   constructor(root: HTMLElement, private readonly sound: SoundApi) {
     this.root = root;
@@ -201,6 +203,13 @@ export class Ui implements UiApi {
 
     window.addEventListener('keydown', (e) => this.onKeyDownCapture(e), true);
 
+    // clicking the game view while playing captures the mouse (a map that finished loading asynchronously
+    // can't take the pointer lock without a user gesture)
+    window.addEventListener('mousedown', (e) => {
+      if (e.button !== 0 || this.game?.state !== 'playing' || document.pointerLockElement || this.isTyping()) return;
+      if (e.target === this.gameCanvas() || (e.target instanceof Node && !this.root.contains(e.target)) || e.target === this.root) this.requestLock();
+    });
+
     // UI sounds via delegation
     const SOUND_SEL = '.btn, .menu-item, .tab, .topnav button, .chip, .segmented button, .bind-slot, .xh-color, .link';
     this.root.addEventListener('mouseover', (e) => {
@@ -342,6 +351,8 @@ export class Ui implements UiApi {
   private resumeGame(): void {
     this.sound.play('ui_click');
     this.game?.resume();
+    // resume happens on a click/key (user gesture): capture the mouse if the game didn't already
+    setTimeout(() => this.relockIfPlaying(), 30);
   }
 
   private cancelLoading(): void {
@@ -445,7 +456,11 @@ export class Ui implements UiApi {
 
   showMenu(which: 'main' | 'pause' | 'none'): void {
     this.menuMode = which;
-    if (which !== 'none') this.settings.cancelCapture();
+    if (which !== 'none') {
+      this.settings.cancelCapture();
+      // menus need the cursor: a locked pointer would send every click to the game canvas
+      if (document.pointerLockElement) document.exitPointerLock();
+    }
     if (which === 'main') {
       this.pauseMenu.hide();
       this.mainMenu.show();
@@ -503,6 +518,15 @@ export class Ui implements UiApi {
   updateHud(hud: HudState): void {
     this.lastHud = hud;
     this.hud.update(hud);
+    this.hud.setLockHint(
+      this.lockHintEnabled &&
+        hud.visible &&
+        this.game?.state === 'playing' &&
+        !document.pointerLockElement &&
+        !this.console.isOpen &&
+        !this.chatBox.isOpen &&
+        !hud.spectating,
+    );
     if (this.pauseMenu.isVisible) this.pauseMenu.renderRun(hud);
   }
 }

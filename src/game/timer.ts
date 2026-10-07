@@ -18,6 +18,10 @@
 //  - replays: either timer.setReplay(replaySystem) (the timer then begins/ends/cancels recordings itself; the
 //    core only calls replay.recordTick each tick), or use the onRunStart / onRunFinish / onRunCancel callbacks.
 //  - TimerHud.lastSplitTime is on the run clock (compare with TimerHud.time to show a split for a few seconds).
+//  - host.killPlayer(reason) (trigger_hurt) should end in timer.onPlayerKilled().
+//  - extras: gotoEnd() (!end), getStageSpawn(), currentGroup, timerState, invalidateRecords() (after records
+//    were cleared/imported elsewhere), dispose() on map unload. SurfTimer servers spawn joining players in
+//    the start zone: call restart(0) after setZones() on map load.
 import { QAngle, qa } from '../core/angles';
 import { console_ } from '../core/cvars';
 import { Vec3, v3, v3clone } from '../core/vec3';
@@ -524,7 +528,8 @@ export class SurfTimer implements ISurfTimer {
         if (z.group === this.group && this.inRun() && z.index > this.checkpoint) this.reachCheckpoint(z.index);
         return;
       case 'stop':
-        if (z.group === this.group && this.inRun()) {
+        // like teletostart, not course-specific: stops whatever run is in progress
+        if (this.inRun()) {
           this.cancelRecording();
           this.state = 'stopped';
           this.chat([{ text: 'Timer stopped.', color: 'lightred' }]);
@@ -894,9 +899,9 @@ export class SurfTimer implements ISurfTimer {
       const s = this.host.map.spawns[0];
       return s ? { origin: v3clone(s.origin), angles: { ...s.angles } } : { origin: v3(), angles: qa() };
     }
-    // a start zone with an explicit spawn / destination / spawn point wins over the floor under the first one
+    // a start zone with an explicit spawn / destination / spawn point inside wins over the others
     for (const z of starts) {
-      const sp = this.entitySpawnForZone(z);
+      const sp = this.entitySpawnForZone(z, 32);
       if (sp) return sp;
     }
     return this.spawnForZone(starts[0]);
@@ -920,8 +925,11 @@ export class SurfTimer implements ISurfTimer {
     return this.destCache;
   }
 
-  /** zone.spawn, else the teleport destination / map spawn inside or just above the zone nearest its center. */
-  private entitySpawnForZone(z: ZoneDef): Spawn | null {
+  /**
+   * zone.spawn, else the teleport destination inside the zone (up to `above` units over its top) nearest its
+   * center, else a map spawn point in/near it.
+   */
+  private entitySpawnForZone(z: ZoneDef, above: number): Spawn | null {
     if (z.spawn) return { origin: v3clone(z.spawn.origin), angles: { ...z.spawn.angles } };
     const cx = (z.mins.x + z.maxs.x) / 2;
     const cy = (z.mins.y + z.maxs.y) / 2;
@@ -930,7 +938,7 @@ export class SurfTimer implements ISurfTimer {
     let best: Spawn | null = null;
     let bestD = Infinity;
     for (const e of this.teleportTargets()) {
-      if (!nearZone(e.origin, z, 16, 32, 512)) continue;
+      if (!nearZone(e.origin, z, 16, 32, above)) continue;
       if (!this.hullFits(e.origin)) continue;
       const d = dist2(e.origin);
       if (d < bestD) {
@@ -938,40 +946,62 @@ export class SurfTimer implements ISurfTimer {
         best = { origin: v3clone(e.origin), angles: { pitch: e.angles.pitch, yaw: e.angles.yaw, roll: 0 } };
       }
     }
-    if (best) return best;
-    for (const s of this.host.map.spawns) {
-      if (!nearZone(s.origin, z, 64, 64, 128)) continue;
-      if (!this.hullFits(s.origin)) continue;
-      const d = dist2(s.origin);
-      if (d < bestD) {
-        bestD = d;
-        best = { origin: v3clone(s.origin), angles: { pitch: 0, yaw: s.angles.yaw, roll: 0 } };
+    if (!best) {
+      for (const s of this.host.map.spawns) {
+        if (!nearZone(s.origin, z, 64, 64, 128)) continue;
+        if (!this.hullFits(s.origin)) continue;
+        const d = dist2(s.origin);
+        if (d < bestD) {
+          bestD = d;
+          best = { origin: v3clone(s.origin), angles: { pitch: 0, yaw: s.angles.yaw, roll: 0 } };
+        }
       }
     }
+    if (best) best.origin = this.dropToFloor(best.origin, z);
     return best;
   }
 
   /**
-   * Spawn for a start/stage zone: its explicit spawn, else a teleport destination inside it, else a map spawn
-   * inside/near it, else the floor under the zone's center (hull-fitted).
+   * Map destinations often hover well above the floor (the map drops you in); !r should put the player on
+   * the zone's floor at that spot instead. Kept as is when the floor under it is not within the zone.
+   */
+  private dropToFloor(p: Vec3, z: ZoneDef): Vec3 {
+    const tr = newTrace();
+    try {
+      this.host.collision.traceBox(p, v3(p.x, p.y, z.mins.z - 64), HULL_MINS, HULL_MAXS, MASK_PLAYERSOLID, tr);
+    } catch {
+      return p;
+    }
+    if (tr.startsolid || tr.allsolid || tr.fraction >= 1) return p;
+    return v3(p.x, p.y, tr.endpos.z);
+  }
+
+  /**
+   * Spawn for a start/stage zone: its explicit spawn; a teleport destination inside it; a map spawn in/near
+   * it; the floor under its center (hull-fitted, facing like the nearest destination/spawn); a destination
+   * hovering up to 512 units over it; its bottom center.
    */
   private spawnForZone(z: ZoneDef): Spawn {
-    const ent = this.entitySpawnForZone(z);
+    const ent = this.entitySpawnForZone(z, 32);
     if (ent) return ent;
-    const floor = zoneFloorPoint(this.host.collision, z);
-    // face like the nearest map spawn / destination (falls back to yaw 0)
-    let yaw = 0;
-    let nd = Infinity;
-    const consider = (o: Vec3, y: number): void => {
-      const d = (o.x - floor.x) ** 2 + (o.y - floor.y) ** 2 + (o.z - floor.z) ** 2;
-      if (d < nd && d < 2048 * 2048) {
-        nd = d;
-        yaw = y;
-      }
-    };
-    for (const e of this.teleportTargets()) consider(e.origin, e.angles.yaw);
-    for (const s of this.host.map.spawns) consider(s.origin, s.angles.yaw);
-    return { origin: floor, angles: qa(0, yaw, 0) };
+    const floor = findZoneFloor(this.host.collision, z);
+    if (floor) {
+      let yaw = 0;
+      let nd = Infinity;
+      const consider = (o: Vec3, y: number): void => {
+        const d = (o.x - floor.x) ** 2 + (o.y - floor.y) ** 2 + (o.z - floor.z) ** 2;
+        if (d < nd && d < 2048 * 2048) {
+          nd = d;
+          yaw = y;
+        }
+      };
+      for (const e of this.teleportTargets()) consider(e.origin, e.angles.yaw);
+      for (const s of this.host.map.spawns) consider(s.origin, s.angles.yaw);
+      return { origin: floor, angles: qa(0, yaw, 0) };
+    }
+    const high = this.entitySpawnForZone(z, 512);
+    if (high) return high;
+    return { origin: zoneFloorPoint(this.host.collision, z), angles: qa() };
   }
 
   /**
@@ -1003,13 +1033,13 @@ export function nearZone(p: Vec3, z: ZoneDef, xyPad: number, below: number, abov
 
 /**
  * Standing spot at the zone's center: traces the player hull down from the zone's top (then mid-height,
- * then bottom) to below the zone and returns the landing point; the zone's bottom center if nothing is hit.
+ * then bottom) to `depth` units below the zone and returns the landing point, or null when nothing is hit.
  */
-export function zoneFloorPoint(
+export function findZoneFloor(
   world: Pick<TimerHost['collision'], 'traceBox' | 'testBox'>,
   z: ZoneDef,
   depth = 256,
-): Vec3 {
+): Vec3 | null {
   const cx = (z.mins.x + z.maxs.x) / 2;
   const cy = (z.mins.y + z.maxs.y) / 2;
   const tr = newTrace();
@@ -1019,10 +1049,19 @@ export function zoneFloorPoint(
     try {
       world.traceBox(start, end, HULL_MINS, HULL_MAXS, MASK_PLAYERSOLID, tr);
     } catch {
-      break;
+      return null;
     }
     if (tr.allsolid || tr.startsolid) continue;
     if (tr.fraction < 1) return v3(tr.endpos.x, tr.endpos.y, tr.endpos.z);
   }
-  return v3(cx, cy, z.mins.z + 1);
+  return null;
+}
+
+/** findZoneFloor, or the zone's bottom center (+1) when there is no floor under it. */
+export function zoneFloorPoint(
+  world: Pick<TimerHost['collision'], 'traceBox' | 'testBox'>,
+  z: ZoneDef,
+  depth = 256,
+): Vec3 {
+  return findZoneFloor(world, z, depth) ?? v3((z.mins.x + z.maxs.x) / 2, (z.mins.y + z.maxs.y) / 2, z.mins.z + 1);
 }

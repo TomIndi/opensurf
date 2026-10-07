@@ -21,7 +21,14 @@ const DAY_THEME: MenuBgTheme = {
 
 declare global {
   interface Window {
-    __harness?: { ui: Ui; game: MockGame; scene: (name: string) => Promise<void>; ready: boolean };
+    __harness?: {
+      ui: Ui;
+      game: MockGame;
+      scene: (name: string) => Promise<void>;
+      ready: boolean;
+      cv: (name: string) => string | undefined;
+      bindOf: (key: string) => string | null;
+    };
   }
 }
 
@@ -71,6 +78,7 @@ async function main(): Promise<void> {
 
   const sound = new SoundSystem();
   const ui = new Ui(uiRoot, sound);
+  ui.lockHintEnabled = params.get('scene') === 'lockhint';
   const game = new MockGame(ui, { frozenTime: frozen });
   ui.attachGame(game);
   conPrint('SURF UI harness — MockGame attached', 'info');
@@ -135,6 +143,8 @@ async function main(): Promise<void> {
         if (name === 'loading-error') ui.setLoading({ phase: 'error', message: 'Google Drive answered HTTP 429. The file may be rate-limited; try again later.' });
         break;
       }
+      case 'lockhint':
+      case 'hint':
       case 'hud':
       case 'hud-start':
       case 'chat':
@@ -155,6 +165,10 @@ async function main(): Promise<void> {
           game.flashSplit(-0.42);
         }
         if (name === 'scoreboard') ui.setScoreboardVisible(true);
+        if (name === 'hint') {
+          ui.hint('Hold A against the ramp — never press W while surfing');
+          ui.centerPrint('STAGE 4');
+        }
         break;
       case 'console':
         startGame();
@@ -197,7 +211,40 @@ async function main(): Promise<void> {
     await frame();
   };
 
-  window.__harness = { ui, game, scene, ready: true };
+  // emulate the game's key binds (game-core's input layer does this in the real app)
+  window.addEventListener('keydown', (e) => {
+    if (ui.isTyping() || e.repeat) return;
+    if (game.state !== 'playing') return;
+    switch (e.code) {
+      case 'KeyY':
+        e.preventDefault();
+        ui.openChat(false);
+        break;
+      case 'KeyU':
+        e.preventDefault();
+        ui.openChat(true);
+        break;
+      case 'Backquote':
+        e.preventDefault();
+        ui.toggleConsole();
+        break;
+      case 'Tab':
+        e.preventDefault();
+        ui.setScoreboardVisible(true);
+        break;
+      case 'Escape':
+        game.pause();
+        break;
+      case 'KeyR':
+        game.say('!r');
+        break;
+    }
+  });
+  window.addEventListener('keyup', (e) => {
+    if (e.code === 'Tab') ui.setScoreboardVisible(false);
+  });
+
+  window.__harness = { ui, game, scene, ready: true, cv: (n) => console_.getCvar(n)?.value, bindOf: (k) => game.bindOf(k) };
   const s = params.get('scene');
   if (s) await scene(s);
 }

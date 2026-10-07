@@ -612,6 +612,10 @@ describe('entity I/O', () => {
     ents.fireInput('!activator', 'SetHealth', '0');
     step(host, ents);
     expect(host.kills).toHaveLength(1);
+    ents.fireInput('!activator', 'Kill');
+    step(host, ents);
+    expect(host.kills).toHaveLength(2);
+    expect(ents.playerHealth).toBe(100);
   });
 });
 

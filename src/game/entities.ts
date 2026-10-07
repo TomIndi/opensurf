@@ -21,7 +21,7 @@ import { EntityOutput, MapEntity } from '../map/types';
 import { boxIntersectsBrush } from '../physics/collision';
 import { playerHull } from '../physics/movement';
 import { FL_BASEVELOCITY, FL_ONGROUND, MOVETYPE_NOCLIP, MOVETYPE_OBSERVER } from '../physics/playertypes';
-import { Brush, MASK_PLAYERSOLID } from '../physics/types';
+import { Brush, MASK_SOLID } from '../physics/types';
 import { IEntitySystem, WorldHost } from './contracts';
 
 // ------------------------------------------------------------------------------------------ constants
@@ -1630,7 +1630,13 @@ export interface EntityDiagnostics {
  * player exists, tick() every tick after playerMove.
  *
  * Extra API beyond IEntitySystem: `playerClassname`, `playerHealth`, `resetPlayerState()`,
- * `addTeleportListener()`, `pressUse()` (call on +use), `fireInput()` (console ent_fire), `diagnostics()`.
+ * `addTeleportListener()`, `pressUse(eye, forward)` (call on +use), `fireInput()` (console ent_fire),
+ * `reapplyRender()` (after the renderer rebuilt its meshes), `onFogController` (SetFogController hook),
+ * `diagnostics()`, `describe()`, `counterValue()`.
+ *
+ * spawn() pushes brush-entity visibility/alpha/colour to host.renderer, so call it once the renderer has the
+ * map (or call reapplyRender() afterwards). Map-driven teleports go through host.teleportPlayer with velocity
+ * zero (no landmark) or null (= keep; landmark / preserve-angles teleports) and angles null (= keep view).
  */
 export class EntitySystem implements IEntitySystem {
   readonly host: WorldHost;
@@ -1828,7 +1834,7 @@ export class EntitySystem implements IEntitySystem {
     let best: FuncButton | null = null;
     const end = v3(eye.x + forward.x * USE_RANGE, eye.y + forward.y * USE_RANGE, eye.z + forward.z * USE_RANGE);
     try {
-      const tr = this.host.collision.traceRay(eye, end, MASK_PLAYERSOLID);
+      const tr = this.host.collision.traceRay(eye, end, MASK_SOLID);
       if (tr.fraction < 1) {
         bestDist = tr.fraction * USE_RANGE;
         const hit = tr.model > 0 ? this.brushByModel.get(tr.model) : undefined;
@@ -2478,7 +2484,9 @@ export class EntitySystem implements IEntitySystem {
       }
       case 'kill':
       case 'killhierarchy':
-        return; // never remove the local player
+        // the local player can't be removed: treat it as a death (the timer respawns the player)
+        this.killPlayer('kill input');
+        return;
       case 'setdamagefilter':
         this.player.damageFilter = param.trim();
         return;

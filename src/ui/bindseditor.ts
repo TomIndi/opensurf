@@ -60,9 +60,12 @@ export function normalizeCommand(cmd: string): string {
   return cmd.replace(/"/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
+/** Default bind keys first (in the order of the CS:GO surf defaults), so a newly added key never jumps ahead of them. */
+const PRIMARY_KEYS = ['w', 's', 'a', 'd', 'space', 'mwheeldown', 'mwheelup', 'ctrl', 'shift', 'e', 'tab', '`', 'y', 'u', 'r', 't', 'mouse4', 'mouse5', 'f2'];
+
 /** Groups key -> command into command -> keys (keys in a stable, friendly order). */
 export function keysByCommand(binds: Map<string, string>): Map<string, string[]> {
-  const order = allKeyNames();
+  const order = [...PRIMARY_KEYS, ...allKeyNames().filter((k) => !PRIMARY_KEYS.includes(k))];
   const rank = (k: string) => {
     const i = order.indexOf(k);
     return i < 0 ? 999 : i;

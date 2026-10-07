@@ -118,6 +118,7 @@ export class VirtualList<T> {
 
   private release(row: HTMLElement): void {
     row.style.display = 'none';
+    row.classList.remove('selected');
     this.pool.push(row);
   }
 

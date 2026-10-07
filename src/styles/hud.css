@@ -468,6 +468,28 @@
   transform: translate(-50%, -50%) scale(1);
 }
 
+.surf-ui .hud-lockhint {
+  position: absolute;
+  left: 50%;
+  top: calc(50% - 4.2 * var(--u));
+  transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  padding: calc(0.35 * var(--u)) calc(0.8 * var(--u));
+  border-radius: calc(0.3 * var(--u));
+  background: rgba(0, 0, 0, 0.55);
+  font: 600 calc(0.95 * var(--u)) var(--font);
+  color: rgba(255, 255, 255, 0.9);
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+
+.surf-ui .hud-lockhint.show {
+  opacity: 1;
+  transition-delay: 0.4s;
+}
+
 /* ------------------------------------------------------------ chat */
 
 .surf-ui .chat {

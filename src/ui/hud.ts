@@ -2,7 +2,7 @@
 // center print and the CS:GO crosshair. update() runs every frame and only touches nodes whose value changed.
 import { console_ } from '../core/cvars';
 import type { HudState } from '../game/api';
-import { cvarBool, cvarGetter, cvarNum } from './cvardefs';
+import { cvarBool, cvarGetter, cvarNum, cvarStr } from './cvardefs';
 import { ClassSwitch, ClassToggle, h, TextSlot } from './dom';
 import { fmtPos, formatSpeed, formatTime } from './format';
 import { FpsMeter, SpeedTrend, splitView, timerView } from './hudlogic';
@@ -118,6 +118,8 @@ export class Hud {
   private readonly specText: TextSlot;
   private readonly hintEl: HTMLElement;
   private readonly centerEl: HTMLElement;
+  private readonly lockHint: HTMLElement;
+  private lockHintOn = false;
   private hintTimer: ReturnType<typeof setTimeout> | null = null;
   private centerTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -222,6 +224,7 @@ export class Hud {
     this.specEl.append(h('span.spec-tag', { text: 'Replay' }), specTextEl);
     this.hintEl = h('div.hud-hint');
     this.centerEl = h('div.hud-center');
+    this.lockHint = h('div.hud-lockhint', null, h('span.kbd', { text: 'CLICK' }), ' to capture the mouse');
 
     this.el = h(
       'div.hud',
@@ -235,6 +238,7 @@ export class Hud {
       this.specEl,
       this.hintEl,
       this.centerEl,
+      this.lockHint,
     );
     this.readConfig();
     console_.onCvarChange((cv) => {
@@ -370,7 +374,7 @@ export class Hud {
       const v = hud.velocity;
       const vel = Math.hypot(v.x, v.y, v.z);
       this.posText.set(
-        `name: ${hud.spectating ?? 'Player'}\npos:  ${fmtPos(o.x)} ${fmtPos(o.y)} ${fmtPos(o.z)}\nang:  ${fmtPos(a.pitch)} ${fmtPos(a.yaw)} ${fmtPos(a.roll)}\nvel:  ${fmtPos(vel)}`,
+        `name: ${hud.spectating ?? (cvarStr('name') || 'Player')}\npos:  ${fmtPos(o.x)} ${fmtPos(o.y)} ${fmtPos(o.z)}\nang:  ${fmtPos(a.pitch)} ${fmtPos(a.yaw)} ${fmtPos(a.roll)}\nvel:  ${fmtPos(vel)}`,
       );
     }
 
@@ -379,6 +383,13 @@ export class Hud {
       this.specEl.classList.add('show');
       this.specText.set(`Watching ${hud.spectating}`);
     } else this.specEl.classList.remove('show');
+  }
+
+  /** "Click to capture the mouse" prompt (pointer not locked while playing). */
+  setLockHint(on: boolean): void {
+    if (on === this.lockHintOn) return;
+    this.lockHintOn = on;
+    this.lockHint.classList.toggle('show', on);
   }
 
   hint(text: string, seconds = 4): void {
