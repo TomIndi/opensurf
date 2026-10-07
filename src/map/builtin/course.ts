@@ -32,8 +32,11 @@ export interface CourseSection {
    * dropping (0 = the destination hovers over the ramp).
    */
   runup?: number;
-  /** Booster volumes in this section (the autopilot coasts through them). */
-  boosts?: { mins: Vec3; maxs: Vec3 }[];
+  /**
+   * Staged maps: the stage's exit (a portal teleporting to the next stage room). After the section's last
+   * ramp the run heads here instead of to the next section's first ramp.
+   */
+  exit?: Vec3;
 }
 
 export interface Course {

@@ -167,15 +167,17 @@ export class Autopilot {
       return;
     }
 
-    // ---- airborne: line up with the next ramp (or head for the finish)
+    // ---- airborne: line up with the next ramp, or head for the stage exit portal / the finish
     let want: number;
-    if (!this.leaving || this.cur + 1 < this.ramps.length) {
+    const exit = this.leaving ? this.course.sections[r.section].exit : undefined;
+    const sameSection = this.cur + 1 < this.ramps.length && this.ramps[this.cur + 1].section === r.section;
+    if (!this.leaving || sameSection || (!exit && this.cur + 1 < this.ramps.length)) {
       const ti = this.leaving ? this.cur + 1 : this.cur;
       this.mode = this.leaving ? 'fly' : 'approach';
       want = this.pursuitYaw(ti, o, speed);
     } else {
       this.mode = 'finish';
-      const target = this.course.finish;
+      const target = exit ?? this.course.finish;
       want = Math.atan2(target.y - o.y, target.x - o.x) * RAD;
     }
     if (speed < 60) {
