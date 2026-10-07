@@ -2,7 +2,23 @@
 // masks), merged static props, the 3D skybox group, per-model render state and animated materials.
 //
 // Nothing here needs a WebGL context (unit-testable in node); the Renderer uploads and draws the result.
-import { BufferAttribute, BufferGeometry, Box3, Group, Matrix4, Mesh, ShaderMaterial, Sphere, Texture, Vector3 } from 'three';
+import {
+  BufferAttribute,
+  BufferGeometry,
+  Box3,
+  DataTexture,
+  Group,
+  Matrix4,
+  Mesh,
+  NearestFilter,
+  NoColorSpace,
+  RGBAFormat,
+  ShaderMaterial,
+  Sphere,
+  Texture,
+  UnsignedByteType,
+  Vector3,
+} from 'three';
 import { angleVectors } from '../core/angles';
 import type { Vec3 } from '../core/vec3';
 import { SURF_SKY, SURF_SKY2D } from '../bsp/types';
@@ -30,9 +46,21 @@ export const ORDER_DECAL = 1;
 /** Translucent decals go first among the translucent surfaces. */
 export const ORDER_DECAL_TRANSLUCENT = -1;
 
+/** Merged brush-entity batches of one material (see MapScene: brush entities share draw calls). */
+export interface MergedGroup {
+  models: Set<number>;
+  /** Draws the group's models that are visible and opaque (model alpha 1). */
+  opaque: Mesh;
+  /** Translucent copy (same geometry) drawing the models faded with rendermode/renderamt; null for materials that are translucent themselves (`opaque` then draws everything, blended). */
+  faded: Mesh | null;
+}
+
 export interface ModelEntry {
   model: number;
+  /** Meshes of this model alone (water, decals... and every batch when merging is off). */
   meshes: Mesh[];
+  /** Merged groups containing this model's batches. */
+  merged: MergedGroup[];
   materials: Set<ShaderMaterial>;
   uniforms: ModelUniforms;
   visible: boolean;
@@ -42,6 +70,8 @@ export interface ModelEntry {
 
 export interface MapSceneStats {
   meshes: number;
+  /** Merged brush-entity groups (each one or two meshes). */
+  mergedGroups: number;
   triangles: number;
   skyMasks: number;
   sky3dMeshes: number;
@@ -56,13 +86,36 @@ export interface MapSceneOptions {
   textures: TextureCache;
   materials: SurfaceMaterials;
   shared: SharedUniforms;
-  /** XY cell size used to split merged props for culling (default 2048). */
-  propCellSize?: number;
+  /** Largest merged prop mesh in triangles (default 16384). */
+  propClusterTriangles?: number;
+  /**
+   * Merge brush-entity batches of the same material into one mesh whose per-vertex model index looks up the
+   * model's runtime state (visible, alpha, colour) in a small texture (default true). Maps with hundreds of
+   * func_illusionary / func_brush pieces then cost a few draw calls instead of hundreds.
+   */
+  mergeBrushEntities?: boolean;
+  /**
+   * Merge opaque world surfaces and sky masks of the same material into spatial clusters (default true): the
+   * loader's per-cell batches are often tiny; fewer, larger meshes cut the draw calls several times over.
+   */
+  mergeWorld?: boolean;
+  /** Largest merged surface cluster in triangles (default 16384). */
+  clusterTriangles?: number;
 }
 
 interface Animated {
   material: ShaderMaterial;
   info: SurfMaterialInfo;
+}
+
+/** Batches merged into shared meshes: world surfaces, sky masks or brush entities (with the model state). */
+interface MergeQueue {
+  kind: 'world' | 'sky' | 'entity';
+  batches: RenderBatch[];
+  def: MaterialDef | null;
+  v: SurfaceVariant | null;
+  envKey: number;
+  sky3d: boolean;
 }
 
 const _v = new Vector3();
@@ -71,6 +124,12 @@ const _v = new Vector3();
 export function sky3dMatrix(origin: Vec3, scale: number, out: Matrix4 = new Matrix4()): Matrix4 {
   const s = scale > 0 && Number.isFinite(scale) ? scale : 16;
   return out.set(s, 0, 0, -origin.x * s, 0, s, 0, -origin.y * s, 0, 0, s, -origin.z * s, 0, 0, 0, 1);
+}
+
+/** Centre of a batch's bounds (first vertex when the bounds are unusable). */
+export function batchCenter(b: RenderBatch): Vec3 {
+  if (validBox(b.mins, b.maxs)) return { x: (b.mins.x + b.maxs.x) / 2, y: (b.mins.y + b.maxs.y) / 2, z: (b.mins.z + b.maxs.z) / 2 };
+  return { x: b.positions[0] ?? 0, y: b.positions[1] ?? 0, z: b.positions[2] ?? 0 };
 }
 
 /** Sky faces are depth-only masks. */
@@ -174,12 +233,79 @@ export function fallbackCube(props: readonly RenderProp[]): [number, number, num
   return acc.map((c) => [c[0] / n, c[1] / n, c[2] / n]) as [number, number, number][];
 }
 
+/**
+ * Splits items into spatially coherent clusters of at most `maxTris` triangles and 65535 vertices (recursive
+ * median splits along the longest axis of the item centres, balanced by triangle count). Single items larger
+ * than the limits stay alone.
+ */
+export function kdClusters<T>(
+  items: readonly T[],
+  center: (t: T) => Vec3,
+  tris: (t: T) => number,
+  verts: (t: T) => number,
+  maxTris: number,
+): T[][] {
+  const out: T[][] = [];
+  const rec = (list: T[], depth: number): void => {
+    let nt = 0;
+    let nv = 0;
+    for (const t of list) {
+      nt += tris(t);
+      nv += verts(t);
+    }
+    if (list.length <= 1 || depth >= 32 || (nt <= maxTris && nv <= 65535)) {
+      if (list.length) out.push(list);
+      return;
+    }
+    let mnx = Infinity;
+    let mny = Infinity;
+    let mnz = Infinity;
+    let mxx = -Infinity;
+    let mxy = -Infinity;
+    let mxz = -Infinity;
+    for (const t of list) {
+      const c = center(t);
+      mnx = Math.min(mnx, c.x);
+      mny = Math.min(mny, c.y);
+      mnz = Math.min(mnz, c.z);
+      mxx = Math.max(mxx, c.x);
+      mxy = Math.max(mxy, c.y);
+      mxz = Math.max(mxz, c.z);
+    }
+    const ex = mxx - mnx;
+    const ey = mxy - mny;
+    const ez = mxz - mnz;
+    const axis: 'x' | 'y' | 'z' = ex >= ey && ex >= ez ? 'x' : ey >= ez ? 'y' : 'z';
+    const sorted = list.slice().sort((a, b) => center(a)[axis] - center(b)[axis]);
+    // split where half of the triangles are on each side
+    let acc = 0;
+    let cut = 1;
+    for (let i = 0; i < sorted.length - 1; i++) {
+      acc += tris(sorted[i]);
+      cut = i + 1;
+      if (acc >= nt / 2) break;
+    }
+    rec(sorted.slice(0, cut), depth + 1);
+    rec(sorted.slice(cut), depth + 1);
+  };
+  rec(items.slice(), 0);
+  return out;
+}
+
 export function mergeProps(
   props: readonly RenderProp[],
-  opts: { sky3dArea: number; cellSize: number; envIndex: (p: Vec3) => number; usesEnv: (material: string) => boolean; fallbackCube?: readonly (readonly number[])[] },
+  opts: {
+    sky3dArea: number;
+    envIndex: (p: Vec3) => number;
+    usesEnv: (material: string) => boolean;
+    fallbackCube?: readonly (readonly number[])[];
+    /** Largest merged mesh in triangles (default 16384); bigger families are split spatially. */
+    maxClusterTriangles?: number;
+  },
 ): { group: PropGroup; positions: Float32Array; normals: Float32Array; uvs: Float32Array; light: Float32Array; indices: Uint32Array; mins: Vec3; maxs: Vec3 }[] {
   const groups = new Map<string, PropGroup>();
-  const cell = opts.cellSize > 0 ? opts.cellSize : 2048;
+  // pass 1: valid props per (material, alpha, pass) and their triangle totals
+  const families = new Map<string, { props: RenderProp[]; tris: number; alpha: number; sky3d: boolean }>();
   for (const p of props) {
     if (!p || !p.positions || !p.indices || p.positions.length < 9 || p.indices.length < 3) continue;
     const o = p.origin;
@@ -187,23 +313,32 @@ export function mergeProps(
     const sky3d = opts.sky3dArea >= 0 && p.area === opts.sky3dArea;
     const alpha = p.alpha !== undefined && p.alpha < 1 ? Math.round(Math.max(0, p.alpha) * 32) / 32 : 1;
     if (alpha <= 0) continue;
-    const env = opts.usesEnv(p.material) ? opts.envIndex(o) : -1;
-    const ck = `${Math.floor(o.x / cell)},${Math.floor(o.y / cell)},${Math.floor(o.z / (cell * 2))}`;
-    const key = `${p.material}|${alpha}|${sky3d ? 1 : 0}|${env}|${ck}`;
-    let g = groups.get(key);
-    if (!g) groups.set(key, (g = { key, material: p.material, alpha, sky3d, envKey: env, props: [], verts: 0, idx: 0 }));
-    const nv = Math.floor(p.positions.length / 3);
-    // keep merged meshes below 65536 vertices (16-bit indices) where possible
-    if (g.verts > 0 && g.verts + nv > 65535) {
-      let n = 1;
-      let k2 = `${key}#${n}`;
-      while (groups.has(k2) && groups.get(k2)!.verts + nv > 65535) k2 = `${key}#${++n}`;
-      g = groups.get(k2);
-      if (!g) groups.set(k2, (g = { key: k2, material: p.material, alpha, sky3d, envKey: env, props: [], verts: 0, idx: 0 }));
+    const fk = `${p.material}|${alpha}|${sky3d ? 1 : 0}`;
+    let fam = families.get(fk);
+    if (!fam) families.set(fk, (fam = { props: [], tris: 0, alpha, sky3d }));
+    fam.props.push(p);
+    fam.tris += p.indices.length / 3;
+  }
+  // pass 2: big families are split into spatial clusters of at most maxTris triangles / 65535 vertices: few
+  // draw calls, still frustum-cullable
+  const maxTris = opts.maxClusterTriangles ?? 16384;
+  for (const [fk, fam] of families) {
+    for (const list of kdClusters(
+      fam.props,
+      (p) => p.origin,
+      (p) => p.indices.length / 3,
+      (p) => Math.floor(p.positions.length / 3),
+      maxTris,
+    )) {
+      let nv = 0;
+      let ni = 0;
+      for (const p of list) {
+        nv += Math.floor(p.positions.length / 3);
+        ni += p.indices.length;
+      }
+      const key = `${fk}#${groups.size}`;
+      groups.set(key, { key, material: list[0].material, alpha: fam.alpha, sky3d: fam.sky3d, envKey: -1, props: list, verts: nv, idx: ni });
     }
-    g.props.push(p);
-    g.verts += nv;
-    g.idx += p.indices.length;
   }
   const out = [];
   const f = { x: 0, y: 0, z: 0 };
@@ -288,6 +423,8 @@ export function mergeProps(
       vb += nv;
       ib += p.indices.length;
     }
+    // reflective props use the cubemap nearest to their group (one material instance per group, not per prop)
+    if (opts.usesEnv(g.material)) g.envKey = opts.envIndex({ x: (mins.x + maxs.x) / 2, y: (mins.y + maxs.y) / 2, z: (mins.z + maxs.z) / 2 });
     out.push({ group: g, positions, normals, uvs, light, indices, mins, maxs });
   }
   return out;
@@ -303,6 +440,7 @@ export class MapScene {
   readonly models = new Map<number, ModelEntry>();
   readonly stats: MapSceneStats = {
     meshes: 0,
+    mergedGroups: 0,
     triangles: 0,
     skyMasks: 0,
     sky3dMeshes: 0,
@@ -319,6 +457,12 @@ export class MapScene {
   private readonly cubemaps: CubemapDef[];
   private readonly cubeTextureByName = new Map<string, number>();
   private disposed = false;
+  /** Brush-entity batches waiting to be merged, by material/variant key. */
+  private readonly mergeQueue = new Map<string, MergeQueue>();
+  /** Model state texture: per model id, row 0 = (visible, alpha, -, -), row 1 = linear tint. */
+  private modelState: DataTexture | null = null;
+  private modelStateWidth = 1;
+  readonly mergedGroups: MergedGroup[] = [];
 
   constructor(
     readonly map: LoadedMap,
@@ -345,6 +489,12 @@ export class MapScene {
     if (r.lightmap && r.lightmap.width > 0 && r.lightmap.height > 0 && r.lightmap.data && r.lightmap.data.length >= 4) {
       this.lightmapTex = this.opts.textures.lightmap(r.lightmap);
     }
+    if (this.opts.mergeBrushEntities !== false) {
+      let maxModel = 0;
+      for (const b of batches) if (b.model > maxModel) maxModel = b.model;
+      for (let i = 0; i < (this.map.models?.length ?? 0); i++) maxModel = Math.max(maxModel, i);
+      this.createModelState(maxModel);
+    }
     // Group draw submission by shader variant: material ids then follow program order (fewer program switches).
     const order = batches.map((b, i) => ({ b, i, k: this.variantSortKey(b) }));
     order.sort((a, b) => (a.k < b.k ? -1 : a.k > b.k ? 1 : a.i - b.i));
@@ -355,6 +505,7 @@ export class MapScene {
       done++;
       if (onStep && (done & 31) === 0) await onStep(done, total);
     }
+    this.flushMerged();
     this.addProps(r.props ?? []);
     done++;
     if (onStep) await onStep(done, total);
@@ -374,7 +525,8 @@ export class MapScene {
   private modelEntry(model: number): ModelEntry {
     let e = this.models.get(model);
     if (!e) {
-      e = { model, meshes: [], materials: new Set(), uniforms: createModelUniforms(), visible: true, alpha: 1, color: [1, 1, 1] };
+      e = { model, meshes: [], merged: [], materials: new Set(), uniforms: createModelUniforms(), visible: true, alpha: 1, color: [1, 1, 1] };
+      this.writeModelState(e);
       this.models.set(model, e);
     }
     return e;
@@ -457,6 +609,11 @@ export class MapScene {
     g.setAttribute('position', new BufferAttribute(pos, 3));
     let material: ShaderMaterial;
     let order = ORDER_WORLD;
+    if (sky && b.model === 0 && this.opts.mergeWorld !== false) {
+      g.dispose();
+      this.enqueue(`sky|${pass}`, { kind: 'sky', batches: [], def: null, v: null, envKey: -1, sky3d: inSky3d }, b);
+      return;
+    }
     if (sky) {
       material = this.opts.materials.skyMask(pass);
       order = ORDER_SKY_MASK;
@@ -482,6 +639,21 @@ export class MapScene {
         envCube: this.envTexture(envKey),
         pass,
       };
+      const key = [b.material, lit ? 'L' : 'U', blend ? 'B' : '', pass, envKey].join('|');
+      if (b.model > 0 && this.modelState && !d.isWater && !b.decal) {
+        // brush entity: merged with the other models' batches of this material (see flushMerged)
+        g.dispose();
+        this.modelEntry(b.model);
+        this.enqueue(`E|${key}`, { kind: 'entity', batches: [], def: d, v, envKey, sky3d: inSky3d }, b);
+        return;
+      }
+      const translucent = d.translucent || d.additive || d.alpha < 1;
+      if (b.model === 0 && this.opts.mergeWorld !== false && !d.isWater && !b.decal && !translucent) {
+        // opaque world surfaces: merged into spatial clusters per material (fewer draw calls)
+        g.dispose();
+        this.enqueue(`W|${key}`, { kind: 'world', batches: [], def: d, v, envKey, sky3d: inSky3d }, b);
+        return;
+      }
       const mu = b.model > 0 ? this.modelEntry(b.model).uniforms : null;
       material = this.opts.materials.get(d, v, b.model > 0 ? `m${b.model}` : '', mu, envKey);
       if (b.decal) {
@@ -506,13 +678,202 @@ export class MapScene {
     if (inSky3d) this.stats.sky3dMeshes++;
   }
 
+  private createModelState(maxModel: number): void {
+    const n = Math.max(1, maxModel + 1);
+    const w = Math.min(n, 1024);
+    const rows = Math.ceil(n / w) * 2;
+    const data = new Uint8Array(w * rows * 4);
+    for (let id = 0; id < n; id++) {
+      const o = this.stateOffset(id, w);
+      data.set([255, 255, 0, 255], o);
+      data.set([255, 255, 255, 255], o + w * 4);
+    }
+    const t = new DataTexture(data, w, rows, RGBAFormat, UnsignedByteType);
+    t.minFilter = NearestFilter;
+    t.magFilter = NearestFilter;
+    t.generateMipmaps = false;
+    t.flipY = false;
+    t.colorSpace = NoColorSpace;
+    t.needsUpdate = true;
+    this.modelState = t;
+    this.modelStateWidth = w;
+  }
+
+  /** Byte offset of model `id`'s row-0 texel (row 1, the tint, is one texture row below). */
+  private stateOffset(id: number, w = this.modelStateWidth): number {
+    return ((Math.floor(id / w) * 2) * w + (id % w)) * 4;
+  }
+
+  /** Writes a model's state into the state texture and refreshes its merged groups' draw flags. */
+  private writeModelState(e: ModelEntry): void {
+    const t = this.modelState;
+    if (t && e.model >= 0) {
+      const w = this.modelStateWidth;
+      const data = t.image.data as Uint8Array;
+      const o = this.stateOffset(e.model, w);
+      if (o + w * 4 + 3 < data.length) {
+        data[o] = e.visible ? 255 : 0;
+        data[o + 1] = Math.round(e.alpha * 255);
+        const tint = e.uniforms.uTint.value;
+        data[o + w * 4] = Math.round(Math.max(0, Math.min(1, tint.x)) * 255);
+        data[o + w * 4 + 1] = Math.round(Math.max(0, Math.min(1, tint.y)) * 255);
+        data[o + w * 4 + 2] = Math.round(Math.max(0, Math.min(1, tint.z)) * 255);
+        t.needsUpdate = true;
+      }
+    }
+    for (const g of e.merged) this.refreshGroup(g);
+  }
+
+  /** Mesh visibility of a merged group: skip draws that would cull every vertex. */
+  private refreshGroup(g: MergedGroup): void {
+    let opaque = false;
+    let faded = false;
+    for (const id of g.models) {
+      const m = this.models.get(id);
+      const vis = !m || m.visible;
+      const a = m ? m.alpha : 1;
+      if (!vis || a <= 0) continue;
+      if (a >= 1) opaque = true;
+      else faded = true;
+    }
+    if (g.faded) {
+      g.opaque.visible = opaque;
+      g.faded.visible = faded;
+    } else g.opaque.visible = opaque || faded;
+  }
+
+  private enqueue(key: string, init: MergeQueue, b: RenderBatch): void {
+    let q = this.mergeQueue.get(key);
+    if (!q) this.mergeQueue.set(key, (q = init));
+    q.batches.push(b);
+  }
+
+  /** Builds the merged meshes queued by addBatch: per queue, spatial clusters of batches. */
+  private flushMerged(): void {
+    const maxTris = this.opts.clusterTriangles ?? 16384;
+    for (const q of this.mergeQueue.values()) {
+      const clusters = kdClusters(
+        q.batches,
+        batchCenter,
+        (b) => b.indices.length / 3,
+        (b) => Math.floor(b.positions.length / 3),
+        maxTris,
+      );
+      for (const list of clusters) this.buildMerged(q, list);
+    }
+    this.mergeQueue.clear();
+  }
+
+  private buildMerged(q: MergeQueue, list: RenderBatch[]): void {
+    let nv = 0;
+    let ni = 0;
+    for (const b of list) {
+      nv += Math.floor(b.positions.length / 3);
+      ni += b.indices.length;
+    }
+    const surface = q.kind !== 'sky';
+    const lit = surface && !!q.v?.lightmap;
+    const blend = surface && !!q.v?.blend;
+    const positions = new Float32Array(nv * 3);
+    const normals = surface ? new Float32Array(nv * 3) : null;
+    const uvs = surface ? new Float32Array(nv * 2) : null;
+    const lmuv = lit ? new Float32Array(nv * 2) : null;
+    const alphas = blend ? new Float32Array(nv) : null;
+    const modelIndex = q.kind === 'entity' ? new Float32Array(nv) : null;
+    const indices = new Uint32Array(ni);
+    const mins = { x: Infinity, y: Infinity, z: Infinity };
+    const maxs = { x: -Infinity, y: -Infinity, z: -Infinity };
+    const models = new Set<number>();
+    let vb = 0;
+    let ib = 0;
+    for (const b of list) {
+      const n = Math.floor(b.positions.length / 3);
+      positions.set(b.positions.subarray(0, n * 3), vb * 3);
+      if (normals) {
+        if (b.normals && b.normals.length >= n * 3) normals.set(b.normals.subarray(0, n * 3), vb * 3);
+        else for (let i = 0; i < n; i++) normals[(vb + i) * 3 + 2] = 1;
+      }
+      if (uvs && b.uvs && b.uvs.length >= n * 2) uvs.set(b.uvs.subarray(0, n * 2), vb * 2);
+      if (lmuv && b.lightmapUVs) lmuv.set(b.lightmapUVs.subarray(0, n * 2), vb * 2);
+      if (alphas && b.alphas) alphas.set(b.alphas.subarray(0, n), vb);
+      if (modelIndex) modelIndex.fill(b.model, vb, vb + n);
+      for (let i = 0; i < b.indices.length; i++) indices[ib + i] = b.indices[i] + vb;
+      if (validBox(b.mins, b.maxs)) {
+        mins.x = Math.min(mins.x, b.mins.x);
+        mins.y = Math.min(mins.y, b.mins.y);
+        mins.z = Math.min(mins.z, b.mins.z);
+        maxs.x = Math.max(maxs.x, b.maxs.x);
+        maxs.y = Math.max(maxs.y, b.maxs.y);
+        maxs.z = Math.max(maxs.z, b.maxs.z);
+      } else {
+        for (let i = 0; i < n; i++) {
+          mins.x = Math.min(mins.x, b.positions[i * 3]);
+          mins.y = Math.min(mins.y, b.positions[i * 3 + 1]);
+          mins.z = Math.min(mins.z, b.positions[i * 3 + 2]);
+          maxs.x = Math.max(maxs.x, b.positions[i * 3]);
+          maxs.y = Math.max(maxs.y, b.positions[i * 3 + 1]);
+          maxs.z = Math.max(maxs.z, b.positions[i * 3 + 2]);
+        }
+      }
+      models.add(b.model);
+      vb += n;
+      ib += b.indices.length;
+    }
+    const g = new BufferGeometry();
+    g.setAttribute('position', new BufferAttribute(positions, 3));
+    if (normals) g.setAttribute('normal', new BufferAttribute(normals, 3));
+    if (uvs) g.setAttribute('uv', new BufferAttribute(uvs, 2));
+    if (lmuv) g.setAttribute('lmuv', new BufferAttribute(lmuv, 2));
+    if (alphas) g.setAttribute('blendAlpha', new BufferAttribute(alphas, 1));
+    if (modelIndex) g.setAttribute('modelIndex', new BufferAttribute(modelIndex, 1));
+    g.setIndex(indexAttribute(indices, nv));
+    setBounds(g, mins, maxs);
+    this.geometries.push(g);
+    const parent = q.sky3d ? this.sky3d : this.world;
+    const addMesh = (mat: ShaderMaterial, name: string, order: number): Mesh => {
+      const mesh = new Mesh(g, mat);
+      mesh.matrixAutoUpdate = false;
+      mesh.renderOrder = order;
+      mesh.name = name;
+      mesh.userData.model = q.kind === 'entity' ? -1 : 0;
+      if (q.kind === 'entity') mesh.userData.models = models;
+      parent.add(mesh);
+      this.register(mesh, 0, mat);
+      this.stats.meshes++;
+      if (q.sky3d) this.stats.sky3dMeshes++;
+      return mesh;
+    };
+    this.stats.triangles += ni / 3;
+    if (q.kind === 'sky') {
+      addMesh(this.opts.materials.skyMask(q.sky3d ? 'sky3d' : 'world'), 'sky', ORDER_SKY_MASK);
+      this.stats.skyMasks++;
+      return;
+    }
+    const def = q.def!;
+    if (q.kind === 'world') {
+      addMesh(this.opts.materials.get(def, q.v!, '', null, q.envKey), def.name, ORDER_WORLD);
+      return;
+    }
+    const state = this.modelState!;
+    const selfTranslucent = def.translucent || def.additive || def.alpha < 1;
+    const mk = (modelPass: 0 | 1 | 2): Mesh => {
+      const v: SurfaceVariant = { ...q.v!, modelState: state, modelStateWidth: this.modelStateWidth, modelPass };
+      return addMesh(this.opts.materials.get(def, v, `merged${modelPass}`, null, q.envKey), def.name, ORDER_WORLD);
+    };
+    const group: MergedGroup = selfTranslucent ? { models, opaque: mk(2), faded: null } : { models, opaque: mk(0), faded: mk(1) };
+    this.stats.mergedGroups++;
+    this.mergedGroups.push(group);
+    for (const id of models) this.modelEntry(id).merged.push(group);
+    this.refreshGroup(group);
+  }
+
   private addProps(props: readonly RenderProp[]): void {
     if (!props.length) return;
     const r = this.map.render;
     const s3 = r.sky3d;
     const merged = mergeProps(props, {
       sky3dArea: this.hasSky3d && s3 ? s3.area : -1,
-      cellSize: this.opts.propCellSize ?? 2048,
+      maxClusterTriangles: this.opts.propClusterTriangles,
       envIndex: (p) => this.envIndexNear(p),
       usesEnv: (m) => !!r.materials.get(m)?.envmap && this.cubemaps.length > 0,
       fallbackCube: fallbackCube(props),
@@ -569,6 +930,7 @@ export class MapScene {
     const e = this.modelEntry(model);
     e.visible = !!visible;
     for (const m of e.meshes) m.visible = e.visible;
+    this.writeModelState(e);
   }
 
   setModelAlpha(model: number, alpha: number): void {
@@ -577,6 +939,7 @@ export class MapScene {
     e.alpha = a;
     e.uniforms.alpha = a;
     for (const m of e.materials) applyModelAlpha(m, a);
+    this.writeModelState(e);
   }
 
   setModelColor(model: number, rgb: [number, number, number]): void {
@@ -587,6 +950,7 @@ export class MapScene {
     }) as [number, number, number];
     e.color = c;
     setModelTint(e.uniforms, c);
+    this.writeModelState(e);
   }
 
   /** Per-frame material animation (texture scroll, animated textures). */
@@ -620,6 +984,10 @@ export class MapScene {
     this.animated.length = 0;
     this.cubeTextures.clear();
     this.lightmapTex = null;
+    this.modelState?.dispose();
+    this.modelState = null;
+    this.mergedGroups.length = 0;
+    this.mergeQueue.clear();
   }
 }
 

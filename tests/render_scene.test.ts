@@ -21,11 +21,11 @@ import { SurfaceMaterials, createSharedUniforms, srgbToLinear } from '../src/ren
 
 const caps = { maxAnisotropy: 8, s3tc: false, maxTextureSize: 4096 };
 
-async function build(map: LoadedMap) {
+async function build(map: LoadedMap, opts: { mergeBrushEntities?: boolean; mergeWorld?: boolean } = {}) {
   const textures = new TextureCache(caps);
   const shared = createSharedUniforms();
   const materials = new SurfaceMaterials({ textures, shared });
-  const scene = new MapScene(map, { textures, materials, shared });
+  const scene = new MapScene(map, { textures, materials, shared, ...opts });
   await scene.build();
   return { scene, textures, materials, shared };
 }
@@ -35,7 +35,7 @@ const meshesNamed = (s: MapScene, name: string) => s.meshes().filter((m) => m.na
 describe('MapScene with the fixture map', () => {
   it('builds one mesh per drawable batch; tool faces are skipped', async () => {
     const map = buildFixtureMap();
-    const { scene } = await build(map);
+    const { scene } = await build(map, { mergeBrushEntities: false, mergeWorld: false });
     const drawable = map.render.batches.filter((b) => b.material !== 'tools/toolsclip').length;
     expect(scene.stats.meshes - scene.stats.propMeshes).toBe(drawable);
     expect(meshesNamed(scene, 'tools/toolsclip')).toHaveLength(0);
@@ -57,7 +57,8 @@ describe('MapScene with the fixture map', () => {
     const { scene } = await build(buildFixtureMap());
     expect(scene.hasSky3d).toBe(true);
     const sky3d = scene.sky3d.children as Mesh[];
-    expect(sky3d.length).toBe(6);
+    expect(sky3d.length).toBe(1); // the block's 6 faces merged into one mesh
+    expect(sky3d[0].geometry.index!.count).toBe(36);
     expect(sky3d.every((m) => m.name === 'fixture/sky3d')).toBe(true);
     expect(scene.world.children.some((m) => m.name === 'fixture/sky3d')).toBe(false);
     // p' = (p - origin) * scale
@@ -96,13 +97,13 @@ describe('MapScene with the fixture map', () => {
     expect(scene.stats.decals).toBe(1);
   });
 
-  it('brush entities: visibility, alpha and colour per model', async () => {
-    const { scene } = await build(buildFixtureMap());
+  it('brush entities (unmerged): visibility, alpha and colour per model', async () => {
+    const { scene } = await build(buildFixtureMap(), { mergeBrushEntities: false });
     const door = meshesNamed(scene, 'fixture/door');
     expect(door).toHaveLength(6);
     const mat = door[0].material as ShaderMaterial;
     expect(door.every((m) => m.material === mat)).toBe(true);
-    // world materials are separate instances
+    expect(mat.defines.USE_MODEL_STATE).toBeUndefined();
     scene.setModelVisible(1, false);
     expect(door.every((m) => !m.visible)).toBe(true);
     scene.setModelVisible(1, true);
@@ -119,6 +120,51 @@ describe('MapScene with the fixture map', () => {
     scene.setModelAlpha(77, NaN);
     scene.setModelColor(77, [NaN, 2, -1] as [number, number, number]);
     expect(scene.models.get(77)!.color).toEqual([1, 1, 0]);
+  });
+
+  it('brush entities (merged): one draw for all models of a material, state in a texture', async () => {
+    const map = buildFixtureMap();
+    // a second brush entity with the same material
+    const extra = map.render.batches.filter((b) => b.model === 1).map((b) => ({ ...b, model: 2, positions: b.positions.map((x, i) => (i % 3 === 0 ? x + 200 : x)) }));
+    map.render.batches.push(...extra);
+    const { scene } = await build(map);
+    expect(scene.stats.mergedGroups).toBe(1);
+    const group = scene.mergedGroups[0];
+    expect([...group.models].sort()).toEqual([1, 2]);
+    const opaque = group.opaque;
+    const faded = group.faded!;
+    expect(opaque.geometry).toBe(faded.geometry);
+    expect(opaque.geometry.getAttribute('modelIndex').count).toBe(48);
+    const om = opaque.material as ShaderMaterial;
+    const fm = faded.material as ShaderMaterial;
+    expect(om.defines.USE_MODEL_STATE).toBe('');
+    expect(om.transparent).toBe(false);
+    expect(fm.transparent).toBe(true);
+    expect(om.uniforms.uModelPass.value).toBe(0);
+    expect(fm.uniforms.uModelPass.value).toBe(1);
+    expect(opaque.visible).toBe(true);
+    expect(faded.visible).toBe(false);
+    const tex = om.uniforms.modelState.value as { image: { data: Uint8Array; width: number }; version: number };
+    const w = tex.image.width;
+    const px = (id: number, row: number) => Array.from(tex.image.data.slice((row * w + id) * 4, (row * w + id) * 4 + 4));
+    expect(px(1, 0).slice(0, 2)).toEqual([255, 255]);
+    const v0 = tex.version;
+    scene.setModelVisible(1, false);
+    expect(px(1, 0)[0]).toBe(0);
+    expect(tex.version).toBeGreaterThan(v0);
+    expect(opaque.visible).toBe(true); // model 2 still drawn
+    scene.setModelVisible(2, false);
+    expect(opaque.visible).toBe(false); // nothing left to draw: skip the call
+    scene.setModelVisible(1, true);
+    scene.setModelVisible(2, true);
+    scene.setModelAlpha(2, 0.5);
+    expect(px(2, 0)[1]).toBe(128);
+    expect(faded.visible).toBe(true);
+    expect(opaque.visible).toBe(true);
+    scene.setModelAlpha(2, 1);
+    expect(faded.visible).toBe(false);
+    scene.setModelColor(1, [1, 0, 0.5]);
+    expect(px(1, 1).slice(0, 3)).toEqual([255, 0, Math.round(srgbToLinear(0.5) * 255)]);
   });
 
   it('animates texture scroll', async () => {
@@ -204,7 +250,7 @@ describe('prop helpers', () => {
       material: 'mat',
       ambientCube: cube,
     });
-    const opts = { sky3dArea: -1, cellSize: 2048, envIndex: () => -1, usesEnv: () => false };
+    const opts = { sky3dArea: -1, envIndex: () => -1, usesEnv: () => false };
     const [g] = mergeProps([mk(90)], opts);
     const P = Array.from(g.positions, (x) => Math.round(x * 1000) / 1000);
     // yaw 90: model +x -> world +y, model +y (left) -> world -x, z stays up
@@ -220,7 +266,7 @@ describe('prop helpers', () => {
     expect(Math.round(d.positions[2])).toBe(290);
   });
 
-  it('groups by material, alpha, pass and cell; keeps 16-bit indices', () => {
+  it('groups by material, alpha and pass; splits big groups spatially; keeps 16-bit indices', () => {
     const base: RenderProp = {
       model: 'm',
       origin: { x: 0, y: 0, z: 0 },
@@ -231,7 +277,7 @@ describe('prop helpers', () => {
       indices: new Uint32Array([0, 1, 2]),
       material: 'a',
     };
-    const opts = { sky3dArea: 5, cellSize: 2048, envIndex: () => -1, usesEnv: () => false };
+    const opts = { sky3dArea: 5, envIndex: () => -1, usesEnv: () => false };
     const groups = mergeProps(
       [
         base,
@@ -252,6 +298,31 @@ describe('prop helpers', () => {
     expect(groups.filter((g) => g.group.material === 'b')).toHaveLength(1);
     const total = groups.reduce((s, g) => s + g.positions.length / 3, 0);
     expect(total).toBe(30000 * 7);
+  });
+
+  it('splits big prop families into spatially coherent clusters of bounded size', () => {
+    const tri = (x: number, y: number): RenderProp => ({
+      model: 'm',
+      origin: { x, y, z: 0 },
+      angles: { pitch: 0, yaw: 0, roll: 0 },
+      positions: new Float32Array(300 * 3),
+      normals: new Float32Array(300 * 3),
+      uvs: new Float32Array(300 * 2),
+      indices: new Uint32Array(Array.from({ length: 300 }, (_, i) => i)), // 100 triangles
+      material: 'rock',
+    });
+    const props: RenderProp[] = [];
+    for (let i = 0; i < 40; i++) props.push(tri(i < 20 ? -8000 + i * 10 : 8000 + i * 10, 0));
+    const groups = mergeProps(props, { sky3dArea: -1, envIndex: () => -1, usesEnv: () => false, maxClusterTriangles: 1000 });
+    expect(groups.length).toBeGreaterThanOrEqual(4);
+    for (const g of groups) {
+      expect(g.indices.length / 3).toBeLessThanOrEqual(1000);
+      // no cluster mixes the two far-apart halves
+      expect(g.maxs.x - g.mins.x).toBeLessThan(1000);
+    }
+    expect(groups.reduce((n, g) => n + g.indices.length / 3, 0)).toBe(4000);
+    // a small family stays one mesh
+    expect(mergeProps(props.slice(0, 5), { sky3dArea: -1, envIndex: () => -1, usesEnv: () => false })).toHaveLength(1);
   });
 
   it('indexAttribute picks 16-bit indices when they fit', () => {
@@ -299,8 +370,18 @@ describe.skipIf(!MAPS)('real maps', () => {
       const { scene, materials, textures } = await build(map);
       const ms = performance.now() - t0;
       expect(ms).toBeLessThan(20000);
+      // unmerged: exactly one mesh per drawable batch
+      const flat = await build(map, { mergeBrushEntities: false, mergeWorld: false });
       const tools = map.render.batches.filter((b) => map.render.materials.get(b.material)?.isTool && !(b.surfFlags & 6)).length;
-      expect(scene.stats.meshes - scene.stats.propMeshes).toBe(map.render.batches.length - tools);
+      expect(flat.scene.stats.meshes - flat.scene.stats.propMeshes).toBe(map.render.batches.length - tools);
+      // merged: the same triangles in far fewer meshes
+      expect(scene.stats.triangles).toBe(flat.scene.stats.triangles);
+      expect(scene.stats.meshes).toBeLessThan(flat.scene.stats.meshes);
+      const ids = new Set(map.render.batches.filter((b) => b.model > 0).map((b) => b.model));
+      for (const g of scene.mergedGroups) for (const id of g.models) expect(ids.has(id)).toBe(true);
+      flat.scene.dispose();
+      flat.materials.dispose();
+      flat.textures.dispose();
       // every lightmapped batch of a lit material got a lightmapped material
       for (const m of scene.meshes()) {
         const mat = m.material as ShaderMaterial;

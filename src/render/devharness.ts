@@ -17,7 +17,7 @@ import { angleVectors } from '../core/angles';
 import type { Vec3 } from '../core/vec3';
 import type { GhostState, LoadProgress, ViewState } from '../game/api';
 import type { LoadedMap, ZoneDef } from '../map/types';
-import { Mesh, Raycaster, Vector2 } from 'three';
+import { Mesh, Raycaster, Triangle, Vector2, Vector3 } from 'three';
 import { Renderer } from './renderer';
 
 interface HarnessState {
@@ -210,7 +210,7 @@ declare global {
       info: () => ReturnType<Renderer['debugInfo']>;
       demo: () => void;
       readPixel: (fx: number, fy: number) => number[];
-      pick: (x: number, y: number) => { name: string; model: unknown; point: number[]; distance: number; transparent: boolean }[];
+      pick: (x: number, y: number) => { lm: number[] | null; name: string; model: unknown; point: number[]; distance: number; transparent: boolean }[];
     };
   }
 }
@@ -259,7 +259,26 @@ window.__renderHarness = {
     const hits = rc.intersectObjects(meshes, false).filter((x) => x.object.visible);
     return hits.slice(0, 6).map((h) => {
       const m = h.object as Mesh;
+      let lm: number[] | null = null;
+      const lmuv = m.geometry.getAttribute('lmuv');
+      const atlas = map?.render.lightmap;
+      if (lmuv && h.face && atlas) {
+        // barycentric interpolation of the lightmap uv at the hit, then the nearest atlas texel
+        const { a, b, c } = h.face;
+        const pa = new Vector3().fromBufferAttribute(m.geometry.getAttribute('position') as never, a);
+        const pb = new Vector3().fromBufferAttribute(m.geometry.getAttribute('position') as never, b);
+        const pc = new Vector3().fromBufferAttribute(m.geometry.getAttribute('position') as never, c);
+        const bary = new Vector3();
+        Triangle.getBarycoord(h.point, pa, pb, pc, bary);
+        const u = lmuv.getX(a) * bary.x + lmuv.getX(b) * bary.y + lmuv.getX(c) * bary.z;
+        const v = lmuv.getY(a) * bary.x + lmuv.getY(b) * bary.y + lmuv.getY(c) * bary.z;
+        const tx = Math.min(atlas.width - 1, Math.floor(u * atlas.width));
+        const ty = Math.min(atlas.height - 1, Math.floor(v * atlas.height));
+        const o = (ty * atlas.width + tx) * 4;
+        lm = [u, v, tx, ty, atlas.data[o], atlas.data[o + 1], atlas.data[o + 2]].map((x) => Math.round(x * 1000) / 1000);
+      }
       return {
+        lm,
         name: m.name,
         model: m.userData.model,
         point: [Math.round(h.point.x), Math.round(h.point.y), Math.round(h.point.z)],

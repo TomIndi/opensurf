@@ -1,5 +1,6 @@
 // Collision geometry from a parsed BSP: convex brushes per brush model (world + brush entities),
-// displacement collision as thin triangular prisms, and which brush entity classes are player-solid.
+// displacement collision (native triangle meshes by default, or the legacy thin triangular prisms), and
+// which brush entity classes are player-solid.
 //
 // Brush ownership follows the engine: a brush belongs to model N when a leaf of model N's BSP subtree
 // references it. Brushes referenced by no leaf (vbsp occasionally emits some) never collide in the engine
@@ -8,6 +9,7 @@ import { QAngle, angleVectors, qa } from '../core/angles';
 import { Vec3, v3, v3clone } from '../core/vec3';
 import { BrushModelInfo, MapEntity } from '../map/types';
 import { addBrushBevels, computeBrushBounds } from '../physics/brushbuild';
+import { CollisionWorld, TriangleSoup } from '../physics/collision';
 import { Brush, BrushSide, CONTENTS_SOLID, Plane } from '../physics/types';
 import { allModelBrushIndices } from './bsptree';
 import { parseEntities } from './entities';
@@ -459,6 +461,104 @@ export function buildDisplacementBrushes(bsp: BspFile, opts: DisplacementBrushOp
   return out;
 }
 
+export interface DisplacementTriangleOptions {
+  /** Also skip displacements flagged "no physics collision" (default false, see DisplacementBrushOptions). */
+  skipNoPhysics?: boolean;
+  /** Receives non-fatal problems. */
+  warnings?: string[];
+}
+
+/** Displacement collision as one triangle soup (for CollisionWorldOptions.triangles). */
+export interface DisplacementTriangles extends TriangleSoup {
+  /** xyz per vertex (every displacement's vertex grid, concatenated). */
+  positions: Float64Array;
+  /** 3 vertex indices per triangle, counter-clockwise seen from the displacement's front. */
+  indices: Uint32Array;
+  /** BSP contents per triangle (the dispinfo's, CONTENTS_SOLID when unset). */
+  contents: Int32Array;
+  /** Displacement (dispinfo index) per triangle. */
+  disp: Int32Array;
+  /** Owning model: always 0 (world). */
+  model: number;
+}
+
+/**
+ * Displacement collision as native triangles: the same triangles buildDisplacementBrushes turns into
+ * prisms (Source's alternating-diagonal tessellation, CCW from the front), as one indexed soup that
+ * CollisionWorld collides as two-sided triangles. Displacements flagged "no hull collision" are skipped
+ * (players pass through them); degenerate triangles are dropped. Model 0.
+ */
+export function buildDisplacementTriangles(bsp: BspFile, opts: DisplacementTriangleOptions = {}): DisplacementTriangles {
+  const surfs: DisplacementSurface[] = [];
+  const surfContents: number[] = [];
+  let malformed = 0;
+  let skipped = 0;
+  let nv = 0;
+  let nt = 0;
+  for (let di = 0; di < bsp.dispInfos.length; di++) {
+    const d = bsp.dispInfos[di];
+    const flags = dispFlags(d.minTess);
+    if (flags & DISP_FLAG_NO_HULL_COLL || (opts.skipNoPhysics && flags & DISP_FLAG_NO_PHYSICS_COLL)) {
+      skipped++;
+      continue;
+    }
+    const surf = displacementSurface(bsp, di);
+    if (!surf) {
+      malformed++;
+      continue;
+    }
+    surfs.push(surf);
+    surfContents.push(d.contents !== 0 ? d.contents : CONTENTS_SOLID);
+    nv += surf.positions.length / 3;
+    nt += surf.triangles.length / 3;
+  }
+  const positions = new Float64Array(nv * 3);
+  let indices = new Uint32Array(nt * 3);
+  let contents = new Int32Array(nt);
+  let disp = new Int32Array(nt);
+  let vbase = 0;
+  let t = 0;
+  let degenerate = 0;
+  for (let k = 0; k < surfs.length; k++) {
+    const surf = surfs[k];
+    const P = surf.positions;
+    positions.set(P, vbase * 3);
+    const T = surf.triangles;
+    for (let i = 0; i < T.length; i += 3) {
+      const a = T[i] * 3;
+      const b = T[i + 1] * 3;
+      const c = T[i + 2] * 3;
+      const e1x = P[b] - P[a], e1y = P[b + 1] - P[a + 1], e1z = P[b + 2] - P[a + 2];
+      const e2x = P[c] - P[a], e2y = P[c + 1] - P[a + 1], e2z = P[c + 2] - P[a + 2];
+      const cx = e1y * e2z - e1z * e2y;
+      const cy = e1z * e2x - e1x * e2z;
+      const cz = e1x * e2y - e1y * e2x;
+      if (!(Math.sqrt(cx * cx + cy * cy + cz * cz) > 1e-6)) {
+        degenerate++;
+        continue;
+      }
+      indices[t * 3] = T[i] + vbase;
+      indices[t * 3 + 1] = T[i + 1] + vbase;
+      indices[t * 3 + 2] = T[i + 2] + vbase;
+      contents[t] = surfContents[k];
+      disp[t] = surf.index;
+      t++;
+    }
+    vbase += P.length / 3;
+  }
+  if (t < nt) {
+    indices = indices.slice(0, t * 3);
+    contents = contents.slice(0, t);
+    disp = disp.slice(0, t);
+  }
+  if (opts.warnings) {
+    if (malformed) opts.warnings.push(`${malformed} displacements are malformed and have no collision`);
+    if (degenerate) opts.warnings.push(`${degenerate} degenerate displacement triangles skipped`);
+    if (skipped) opts.warnings.push(`${skipped} displacements flagged without hull collision`);
+  }
+  return { positions, indices, contents, disp, model: 0 };
+}
+
 // Thin prism brushes are built analytically: the six vertices are known exactly, so the axial and edge
 // bevels can be derived without the generic winding clipper. The result is the same plane set that
 // brushFromPlanes() produces for the prism's five planes (verified in tests/bsp_collision.test.ts) but
@@ -905,8 +1005,13 @@ export function brushEntityStartsEnabled(ent: MapEntity): boolean {
 // ------------------------------------------------------------------------------------------ assembly
 
 export interface CollisionBrushSet {
-  /** Brushes for `new CollisionWorld(brushes)`: world (all contents), solid brush entities, displacements. */
+  /**
+   * Brushes for the CollisionWorld: world (all contents), solid brush entities, and - in 'prisms' mode -
+   * displacement prisms.
+   */
   brushes: Brush[];
+  /** 'triangles' mode: the displacement triangles (CollisionWorldOptions.triangles). */
+  triangles?: DisplacementTriangles;
   /** Brush entity models that must start non-solid: call `world.setModelSolid(model, false)` for each. */
   disabledModels: number[];
   /** Brush entity models whose brushes were added (solid classes). */
@@ -914,18 +1019,29 @@ export interface CollisionBrushSet {
   warnings: string[];
 }
 
+export interface CollectCollisionOptions extends DisplacementBrushOptions {
+  /**
+   * How displacements collide. 'prisms' (default here, for callers that build `new
+   * CollisionWorld(set.brushes)`): thin prism brushes in `brushes`. 'triangles': native two-sided
+   * triangles in `set.triangles` (what loadBspMap uses: ~10x faster to build and ~8x less memory on
+   * displacement-heavy maps). 'none': no displacement collision. createCollisionWorld handles every mode.
+   */
+  displacements?: 'prisms' | 'triangles' | 'none';
+}
+
 /**
  * Collects everything the player collides with, the way the engine sees it: every world brush (solid,
  * player clip, window, grate, water, ladder... - CollisionWorld masks pick what each query needs), the
  * brushes of player-solid brush entities (already in world space when `models` came from
- * buildBrushModels' default), and displacement prisms. Triggers and other non-solid brush entities are left
- * to the entity system. `models` defaults to buildBrushModels(bsp, { entities }).
+ * buildBrushModels' default), and displacement collision (see CollectCollisionOptions.displacements).
+ * Triggers and other non-solid brush entities are left to the entity system. `models` defaults to
+ * buildBrushModels(bsp, { entities }). Build the world with createCollisionWorld(set).
  */
 export function collectCollisionBrushes(
   bsp: BspFile,
   entities: MapEntity[],
   models?: BrushModelInfo[],
-  dispOpts: DisplacementBrushOptions = {},
+  dispOpts: CollectCollisionOptions = {},
 ): CollisionBrushSet {
   const warnings: string[] = [];
   const ms = models ?? buildBrushModels(bsp, { entities, warnings });
@@ -943,8 +1059,26 @@ export function collectCollisionBrushes(
     if (!brushEntityStartsEnabled(e)) disabledModels.push(e.model);
   }
   const dispWarnings: string[] = [];
-  for (const b of buildDisplacementBrushes(bsp, { ...dispOpts, warnings: dispWarnings })) brushes.push(b);
+  const mode = dispOpts.displacements ?? 'prisms';
+  let triangles: DisplacementTriangles | undefined;
+  if (mode === 'triangles') {
+    triangles = buildDisplacementTriangles(bsp, { skipNoPhysics: dispOpts.skipNoPhysics, warnings: dispWarnings });
+  } else if (mode === 'prisms') {
+    for (const b of buildDisplacementBrushes(bsp, { ...dispOpts, warnings: dispWarnings })) brushes.push(b);
+  }
   for (const w of dispWarnings) warnings.push(w);
   if (dispOpts.warnings) for (const w of dispWarnings) dispOpts.warnings.push(w);
-  return { brushes, disabledModels, solidModels, warnings };
+  const set: CollisionBrushSet = { brushes, disabledModels, solidModels, warnings };
+  if (triangles) set.triangles = triangles;
+  return set;
+}
+
+/**
+ * The CollisionWorld for a collected set: brushes + displacement triangles (if any), with the brush
+ * entity models that start disabled made non-solid.
+ */
+export function createCollisionWorld(set: CollisionBrushSet): CollisionWorld {
+  const world = new CollisionWorld(set.brushes, { triangles: set.triangles ?? null });
+  for (const m of set.disabledModels) world.setModelSolid(m, false);
+  return world;
 }

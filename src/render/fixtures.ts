@@ -5,7 +5,9 @@
 import { SURF_SKY } from '../bsp/types';
 import type { Vec3 } from '../core/vec3';
 import type { DecodedImage, LoadedMap, MaterialDef, RenderBatch, RenderProp } from '../map/types';
+import { brushFromBox } from '../physics/brushbuild';
 import { CollisionWorld } from '../physics/collision';
+import { CONTENTS_WATER } from '../physics/types';
 
 /** Flat sky face colours (sRGB bytes) by Source suffix. */
 export const FIXTURE_SKY: Record<'rt' | 'lf' | 'bk' | 'ft' | 'up' | 'dn', [number, number, number]> = {
@@ -233,7 +235,8 @@ export function buildFixtureMap(opts: { fog?: boolean; withSky3d?: boolean } = {
       { index: 0, mins: v(-512, -512, 0), maxs: v(512, 512, 384), origin: v(0, 0, 0), brushes: [] },
       { index: 1, mins: v(-50, 250, 0), maxs: v(50, 350, 150), origin: v(0, 0, 0), brushes: [] },
     ],
-    collision: new CollisionWorld([]),
+    // the water pool's volume (for the underwater view)
+    collision: new CollisionWorld([brushFromBox(v(-400, -100, -300), v(-200, 100, 2), CONTENTS_WATER)]),
     render: {
       batches,
       lightmap: { width: 4, height: 2, data: atlas },

@@ -140,7 +140,28 @@ out vec2 vUv2;
 uniform vec2 uDetailScale;
 out vec2 vDetailUv;
 #endif
+#ifdef USE_MODEL_STATE
+in float modelIndex;
+uniform sampler2D modelState;
+uniform int uModelStateWidth;
+uniform float uModelPass;
+out vec4 vModel;
+#endif
 void main() {
+#ifdef USE_MODEL_STATE
+  // merged brush entities: this vertex's model decides whether it is drawn by this pass, and its tint/alpha
+  int mid = int(modelIndex + 0.5);
+  ivec2 mc = ivec2(mid % uModelStateWidth, (mid / uModelStateWidth) * 2);
+  vec4 ms = texelFetch(modelState, mc, 0);
+  vec4 mt = texelFetch(modelState, mc + ivec2(0, 1), 0);
+  bool opaqueModel = ms.y > 0.998;
+  bool show = ms.x > 0.5 && ms.y > 0.001 && (uModelPass > 1.5 || (uModelPass < 0.5 ? opaqueModel : !opaqueModel));
+  if (!show) {
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0); // outside the clip volume: the whole triangle is dropped
+    return;
+  }
+  vModel = vec4(mt.rgb, ms.y);
+#endif
   vec4 wp = modelMatrix * vec4(position, 1.0);
   vec4 mv = viewMatrix * wp;
   gl_Position = projectionMatrix * mv;
@@ -205,6 +226,9 @@ uniform sampler2D detailMap;
 uniform float uDetailBlend;
 in vec2 vDetailUv;
 #endif
+#ifdef USE_MODEL_STATE
+in vec4 vModel;
+#endif
 #ifdef USE_ENVMAP
 uniform samplerCube envMap;
 uniform float uEnvFromSky;  // 1: no baked cubemap, reflect the sky
@@ -254,6 +278,9 @@ void main() {
 #endif
 #endif
   albedo.rgb *= uTint;
+#ifdef USE_MODEL_STATE
+  albedo.rgb *= vModel.rgb;
+#endif
   vec3 n = normalize(vNormalW);
 #ifdef DOUBLE_SIDED
   if (!gl_FrontFacing) n = -n;
@@ -288,6 +315,9 @@ void main() {
 #endif
   col *= uBrightness;
   float alpha = mix(1.0, albedo.a, uTexAlpha) * uAlpha;
+#ifdef USE_MODEL_STATE
+  alpha *= vModel.a;
+#endif
 #if defined(USE_ALPHATEST) && defined(USE_A2C)
   alpha *= cover;
 #endif
@@ -377,8 +407,9 @@ void main() {
 #endif
   vec3 tex = texture(map, vUv * 0.5 + g * 0.02).rgb;
   vec3 body = uWaterColor * mix(vec3(1.0), tex * 2.0, uTexStrength) * light * uTint;
-  // light scattered inside the water: a little brighter looking down, darker at grazing angles
-  body *= 0.75 + 0.5 * cosv;
+  // light scattered inside the water: a little brighter looking down, darker at grazing angles; the swell
+  // facing the sun catches a little more light
+  body *= (0.75 + 0.5 * cosv) * (0.9 + 0.2 * clamp(dot(n, normalize(uSunDir + vec3(0.0, 0.0, 0.6))), 0.0, 1.0));
   vec3 col;
   float alpha;
   if (below) {
@@ -436,11 +467,13 @@ export const SKY_FRAGMENT = /* glsl */ `
 precision highp float;
 layout(location = 0) out vec4 fragColor;
 uniform float uSkyBrightness;
+uniform vec4 uSkyFog; // underwater: rgb = water fog colour (linear), a = amount
 ${SKY_FUNCS}
 in vec3 vDir;
 void main() {
   vec3 d = normalize(vDir);
   vec3 c = skyColor(d, 1.0) * uSkyBrightness;
+  c = mix(c, uSkyFog.rgb, uSkyFog.a);
   fragColor = linearToOutputTexel(vec4(c, 1.0));
 }
 `;

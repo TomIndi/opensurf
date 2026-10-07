@@ -2,7 +2,7 @@
 // map's six sky faces (see skymath.ts for Source's face orientations), or a procedural sky (gradient, sun,
 // soft clouds, stars at night) for skies the map doesn't pack. Also derives the sun direction and the
 // synthetic lighting used by maps without lightmaps.
-import { BackSide, BoxGeometry, GLSL3, Mesh, ShaderMaterial, Vector3 } from 'three';
+import { BackSide, BoxGeometry, GLSL3, Mesh, ShaderMaterial, Vector3, Vector4 } from 'three';
 import { angleVectors } from '../core/angles';
 import type { Vec3 } from '../core/vec3';
 import { isProceduralImage, stockSkyPalette } from '../bsp/materials';
@@ -118,6 +118,7 @@ export class SkyBox {
       fragmentShader: SKY_FRAGMENT,
       uniforms: {
         uSkyBrightness: { value: 1 },
+        uSkyFog: { value: new Vector4(0, 0, 0, 0) },
         skyCube: shared.skyCube,
         uSkyProcedural: shared.uSkyProcedural,
         uSkyZenith: shared.uSkyZenith,
@@ -146,6 +147,13 @@ export class SkyBox {
 
   get brightness(): U<number> {
     return this.material.uniforms.uSkyBrightness as U<number>;
+  }
+
+  /** Fades the sky to a colour (linear rgb, amount 0..1): the view from inside a water volume. */
+  setOverlayFog(rgb: Vector3 | null, amount: number): void {
+    const v = (this.material.uniforms.uSkyFog as U<Vector4>).value;
+    if (rgb) v.set(rgb.x, rgb.y, rgb.z, Math.max(0, Math.min(1, amount)));
+    else v.w = 0;
   }
 
   /**

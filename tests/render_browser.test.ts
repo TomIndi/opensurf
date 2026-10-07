@@ -59,7 +59,8 @@ describe.skipIf(!chromiumPath)('renderer in a real browser', () => {
       configFile: join(ROOT, 'vite.render-harness.config.ts'),
       root: ROOT,
       logLevel: 'error',
-      server: { port: 0, host: '127.0.0.1' },
+      // no HMR / file watching: other work in the tree must not reload the page under the test
+      server: { port: 0, host: '127.0.0.1', hmr: false, watch: { ignored: ['**/*'] } },
     });
     await s.listen();
     server = s as unknown as typeof server;
@@ -190,6 +191,21 @@ describe.skipIf(!chromiumPath)('renderer in a real browser', () => {
     await page.close();
   }, 240000);
 
+  it('underwater: inside a water volume everything fades into the water fog colour', async () => {
+    const { page } = await open('fixture=1&time=1');
+    // above water: the far wall
+    near(await pixelAt(page, [-300, 0, 200], [0, 135]), [131, 109, 86], 4);
+    // eye inside the pool's volume: fully fogged to $fogcolor (0.1 0.25 0.3), sky included
+    const px = await pixelAt(page, [-300, 0, -50], [0, 0]);
+    near(px, [26, 64, 77], 6);
+    // looking up: the underside of the water surface over the fogged world/3D sky - all water coloured
+    const up = await pixelAt(page, [-300, 0, -50], [-80, 0]);
+    near(up, [26, 64, 77], 16);
+    // and back to normal
+    near(await pixelAt(page, [-300, 0, 200], [0, 135]), [131, 109, 86], 4);
+    await page.close();
+  }, 240000);
+
   it('zones, ghosts, debug boxes, clip brushes, wireframe and render scale draw without errors', async () => {
     const { page, errors } = await open('fixture=1&time=1');
     const before = await page.evaluate(() => window.__renderHarness.renderNow());
@@ -266,7 +282,8 @@ describe.skipIf(!chromiumPath)('renderer in a real browser', () => {
         expect(s.drawCalls).toBeGreaterThan(10);
         expect(s.triangles).toBeGreaterThan(1000);
         const info = await page.evaluate(() => window.__renderHarness.info());
-        expect(info.scene!.meshes).toBeGreaterThan(100);
+        expect(info.scene!.meshes).toBeGreaterThan(10);
+        expect(info.scene!.triangles).toBeGreaterThan(10000);
         const first = await page.evaluate(() => window.__renderHarness.reload(1));
         const again = await page.evaluate(() => window.__renderHarness.reload(2));
         expect(again.textures).toBe(first.textures);

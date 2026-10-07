@@ -134,6 +134,13 @@ export interface SurfaceVariant {
   envCube: Texture | null;
   /** Fog set: main view or 3D skybox. */
   pass: 'world' | 'sky3d';
+  /**
+   * Merged brush entities: per-vertex modelIndex looks up (visible, alpha, tint) in this texture. modelPass
+   * 0 draws the opaque models, 1 the faded ones (alpha-blended copy), 2 all of them (translucent materials).
+   */
+  modelState?: Texture | null;
+  modelStateWidth?: number;
+  modelPass?: 0 | 1 | 2;
 }
 
 /** Runtime info kept on every map material (material.userData.surf). */
@@ -197,6 +204,7 @@ function variantDefines(def: MaterialDef, v: SurfaceVariant, hasImage2: boolean)
     const m = def.detail.blendMode;
     d.DETAIL_MODE = m === 1 || m === 5 ? 1 : m === 2 || m === 3 ? 2 : 0;
   }
+  if (v.modelState) d.USE_MODEL_STATE = '';
   if (def.envmap && !def.isWater) {
     d.USE_ENVMAP = '';
     d.ENVMASK_MODE = def.envmap.mask === 'basealpha' ? 1 : (def.envmap.mask === 'texture' || def.envmap.mask === 'normalalpha') && def.envmap.maskImage ? 2 : 0;
@@ -250,6 +258,7 @@ export class SurfaceMaterials {
       v.blend ? 'B' : '',
       v.decal ? 'D' : '',
       v.pass,
+      v.modelState ? `MS${v.modelPass ?? 2}` : '',
       instanceKey,
       envKey,
     ].join('|');
@@ -361,6 +370,11 @@ export class SurfaceMaterials {
       uniforms.uEnvParams = { value: new Vector3(e.contrast, e.saturation, e.fresnel) };
       if (defines.ENVMASK_MODE === 2 && e.maskImage) uniforms.envMask = { value: t.image(e.maskImage, { srgb: false, repeat: true }) };
     }
+    if (v.modelState) {
+      uniforms.modelState = { value: v.modelState };
+      uniforms.uModelStateWidth = { value: Math.max(1, v.modelStateWidth ?? 1) };
+      uniforms.uModelPass = { value: v.modelPass ?? 2 };
+    }
     const m = new ShaderMaterial({
       glslVersion: GLSL3,
       vertexShader: WORLD_VERTEX,
@@ -384,12 +398,17 @@ export class SurfaceMaterials {
       m.transparent = true;
       m.depthWrite = false;
       m.blending = NormalBlending;
+    } else if (v.modelState && v.modelPass === 1) {
+      // faded copy of an opaque material for brush entities with renderamt < 255
+      m.transparent = true;
+      m.depthWrite = false;
+      m.blending = NormalBlending;
     } else {
       m.transparent = false;
       m.depthWrite = true;
       m.blending = NoBlending;
     }
-    if (defines.USE_A2C !== undefined) m.alphaToCoverage = true;
+    if (defines.USE_A2C !== undefined && !m.transparent) m.alphaToCoverage = true;
     if (v.decal) {
       m.depthWrite = false;
       m.polygonOffset = true;

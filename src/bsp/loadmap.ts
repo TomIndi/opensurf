@@ -4,7 +4,8 @@
 // Phases (each reported through onProgress and separated by a macrotask yield so the page stays responsive):
 //   parse      parseBsp (zero-copy views into `data`) + entity lump
 //   collision  brush models (brush entities placed in world space), CollisionWorld over world brushes, solid
-//              brush entities and displacement prisms; brush entities that start disabled are made non-solid
+//              brush entities and displacement triangles (native two-sided triangle collision; the legacy thin
+//              prism brushes via opts.displacementCollision); brush entities that start disabled are made non-solid
 //   textures   pakfile, materials (VMT/VTF or procedural stand-ins), 2D sky, baked cubemaps
 //   geometry   face areas, render batches + lightmap atlas + info_overlay decals, props (static props and
 //              model entities) packed in the map, lit like the engine's light cache (leaf ambient + world lights)
@@ -32,7 +33,7 @@ import type {
 import { CollisionWorld } from '../physics/collision';
 import { HULL_MAXS, HULL_MINS } from '../physics/playertypes';
 import { MASK_PLAYERSOLID, newTrace } from '../physics/types';
-import { buildBrushModels, collectCollisionBrushes } from './bspcollision';
+import { buildBrushModels, collectCollisionBrushes, createCollisionWorld } from './bspcollision';
 import { faceAreas, pointLeaf } from './bsptree';
 import { parseEntities } from './entities';
 import { BuildRenderOptions, RenderBuildStats, buildRenderBatches } from './geometry';
@@ -56,6 +57,12 @@ export interface LoadBspOptions {
   cubemaps?: boolean;
   /** Timing/summary log (default console.info). Pass () => {} to silence. */
   log?: (msg: string) => void;
+  /**
+   * Displacement collision: 'triangles' (default) collides with the displacement triangles directly;
+   * 'prisms' builds the legacy thin prism brush per triangle (several seconds and ~400 MB on
+   * displacement-heavy maps; kept for comparison).
+   */
+  displacementCollision?: 'triangles' | 'prisms';
 }
 
 const SPAWN_CLASSES = ['info_player_terrorist', 'info_player_counterterrorist', 'info_player_start', 'info_player_deathmatch'];
@@ -334,10 +341,9 @@ export async function loadBspMap(
   await yieldToEventLoop();
   tPhase = now();
   const models = buildBrushModels(bsp, { entities, warnings });
-  const set = collectCollisionBrushes(bsp, entities, models);
+  const set = collectCollisionBrushes(bsp, entities, models, { displacements: opts.displacementCollision ?? 'triangles' });
   for (const w of set.warnings) warnings.push(w);
-  const collision = new CollisionWorld(set.brushes);
-  for (const m of set.disabledModels) collision.setModelSolid(m, false);
+  const collision = createCollisionWorld(set);
   lap('collision');
 
   // ---------------------------------------------------------------- textures
@@ -444,7 +450,7 @@ export async function loadBspMap(
   log(
     `[loadmap] ${mapName}: ${total} ms (${timings.join(', ')} ms) - v${bsp.version}, ${bsp.faces.length} faces -> ` +
       `${stats.batches} batches / ${stats.triangles} tris, lightmap ${lightmap ? `${lightmap.width}x${lightmap.height}` : 'none'}, ` +
-      `${set.brushes.length} collision brushes, ${materials.size} materials, ${props.length} props, ${entities.length} entities, ` +
+      `${set.brushes.length} collision brushes + ${collision.triangleCount} triangles, ${materials.size} materials, ${props.length} props, ${entities.length} entities, ` +
       `${spawns.length} spawns, ${zones.length} zones, ${warnings.length} warnings`,
   );
 

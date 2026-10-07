@@ -34,6 +34,7 @@ import {
 import type { Vec3 } from '../core/vec3';
 import type { GhostState, LoadProgress, RenderSettings, RendererApi, ViewState } from '../game/api';
 import type { FogDef, LoadedMap, ZoneDef } from '../map/types';
+import { CONTENTS_SLIME, CONTENTS_WATER } from '../physics/types';
 import { applySourceView, createSourceCamera, sourceVerticalFov } from './camera';
 import { ClipBrushes, DebugBoxes } from './debugdraw';
 import { Ghosts } from './ghosts';
@@ -137,6 +138,9 @@ export class Renderer implements RendererApi {
   private contextLost = false;
   private lastStats = { drawCalls: 0, triangles: 0, textures: 0 };
   private sky3dActive = false;
+  /** Water surfaces (bounds + fog) for the underwater view, and the one the eye is under (null = not underwater). */
+  private waterSurfaces: WaterSurface[] = [];
+  private underwater: WaterSurface | null = null;
   private readonly tmpVec = new Vector3();
   private readonly clearColor = new Vector3(0, 0, 0);
 
@@ -173,6 +177,7 @@ export class Renderer implements RendererApi {
     this.three.setClearColor(0x000000, 1);
 
     const maxSamples = (gl.getParameter(gl.MAX_SAMPLES) as number) || 0;
+    this.maxRenderbufferSize = (gl.getParameter(gl.MAX_RENDERBUFFER_SIZE) as number) || 8192;
     this.samples = Math.max(0, Math.min(opts.samples ?? 4, maxSamples));
     this.caps = {
       maxAnisotropy: exts.has('EXT_texture_filter_anisotropic') ? Math.max(1, this.three.capabilities.getMaxAnisotropy()) : 1,
@@ -230,17 +235,22 @@ export class Renderer implements RendererApi {
 
   // ------------------------------------------------------------------------------ targets / size
 
-  private targetSize(): [number, number] {
+  /** Scene target size (canvas size x render scale, clamped to the device); stored in targetW/targetH. */
+  private updateTargetSize(): void {
     const s = Math.max(0.25, Math.min(2, Number.isFinite(this.settings.renderScale) && this.settings.renderScale > 0 ? this.settings.renderScale : 1));
-    const max = (this.gl.getParameter(this.gl.MAX_RENDERBUFFER_SIZE) as number) || 8192;
-    return [
-      Math.max(1, Math.min(max, Math.round(this.width * this.pixelRatio * s))),
-      Math.max(1, Math.min(max, Math.round(this.height * this.pixelRatio * s))),
-    ];
+    const max = this.maxRenderbufferSize;
+    this.targetW = Math.max(1, Math.min(max, Math.round(this.width * this.pixelRatio * s)));
+    this.targetH = Math.max(1, Math.min(max, Math.round(this.height * this.pixelRatio * s)));
   }
 
+  private targetW = 1;
+  private targetH = 1;
+  private maxRenderbufferSize = 8192;
+
   private ensureTarget(): void {
-    const [w, h] = this.targetSize();
+    this.updateTargetSize();
+    const w = this.targetW;
+    const h = this.targetH;
     if (this.target && this.target.width === w && this.target.height === h) return;
     if (this.target) {
       this.target.setSize(w, h);
@@ -316,6 +326,8 @@ export class Renderer implements RendererApi {
       this.materials = materials;
       this.worldScene.add(scene.world);
       this.skyScene.add(scene.sky3d);
+      this.waterSurfaces = waterSurfaces(map);
+      this.underwater = null;
       this.arrangeScenes();
       this.applyFog();
       this.clips.reset();
@@ -370,6 +382,8 @@ export class Renderer implements RendererApi {
     this.materials = null;
     this.textures = null;
     this.map = null;
+    this.waterSurfaces = [];
+    this.underwater = null;
     this.clips.reset();
     this.clips.setVisible(false, () => []);
     this.arrangeScenes();
@@ -457,9 +471,24 @@ export class Renderer implements RendererApi {
 
   private applyFog(): void {
     const r = this.map?.render;
-    this.setFogUniforms(this.shared.world, r?.fog ?? null, 1);
-    const s3 = r?.sky3d ?? null;
-    this.setFogUniforms(this.shared.sky3d, s3?.fog ?? null, s3 && s3.scale > 0 ? 1 / s3.scale : 1 / 16);
+    const w = this.underwater;
+    if (w) {
+      // inside a water volume: everything fades into the water's fog colour within its fog range (like Source's
+      // underwater view); the sky is fully fogged
+      const fog: FogDef = { enabled: true, color: w.color, start: w.start, end: w.end, maxDensity: 1 };
+      const keep = this.settings.fogEnabled;
+      this.settings.fogEnabled = true;
+      this.setFogUniforms(this.shared.world, fog, 1);
+      this.setFogUniforms(this.shared.sky3d, fog, 1); // the 3D skybox is measured in world units here
+      this.settings.fogEnabled = keep;
+      srgbToLinearVec(w.color, this.tmpVec);
+      this.sky.setOverlayFog(this.tmpVec, 1);
+    } else {
+      this.setFogUniforms(this.shared.world, r?.fog ?? null, 1);
+      this.sky.setOverlayFog(null, 0);
+      const s3 = r?.sky3d ?? null;
+      this.setFogUniforms(this.shared.sky3d, s3?.fog ?? null, s3 && s3.scale > 0 ? 1 / s3.scale : 1 / 16);
+    }
     this.sky.setFog(r?.fog ?? null, this.settings.fogEnabled);
   }
 
@@ -472,9 +501,9 @@ export class Renderer implements RendererApi {
     const aspect = this.width / this.height;
     applySourceView(this.camera, view.origin, view.angles, view.fov, aspect);
     const vfov = (sourceVerticalFov(view.fov) * Math.PI) / 180;
-    const th = this.targetSize()[1];
-    this.pixelScale.value = (2 * Math.tan(vfov / 2)) / Math.max(1, th);
+    this.pixelScale.value = (2 * Math.tan(vfov / 2)) / Math.max(1, this.targetH);
     this.mapScene?.update(t);
+    this.updateUnderwater(view.origin);
     this.ghosts.update(t, this.tmpVec.copy(this.camera.position), this.pixelScale.value);
 
     const three = this.three;
@@ -496,6 +525,30 @@ export class Renderer implements RendererApi {
     this.lastStats.drawCalls = calls;
     this.lastStats.triangles = tris;
     this.lastStats.textures = three.info.memory.textures;
+  }
+
+  /** Switches the fog to the water's when the eye enters a water volume (and back). */
+  private updateUnderwater(eye: Vec3): void {
+    const map = this.map;
+    let w: WaterSurface | null = null;
+    if (map && this.waterSurfaces.length && map.collision && typeof map.collision.pointContents === 'function') {
+      let c = 0;
+      try {
+        c = map.collision.pointContents(eye, CONTENTS_WATER | CONTENTS_SLIME);
+      } catch {
+        c = 0;
+      }
+      if (c & (CONTENTS_WATER | CONTENTS_SLIME)) w = waterAbove(this.waterSurfaces, eye);
+    }
+    if (w !== this.underwater) {
+      this.underwater = w;
+      this.applyFog();
+    }
+  }
+
+  /** True while the eye is inside a water volume (underwater fog active). */
+  get isUnderwater(): boolean {
+    return this.underwater !== null;
   }
 
   stats(): { drawCalls: number; triangles: number; textures: number } {
@@ -539,6 +592,43 @@ export class Renderer implements RendererApi {
     this.target = null;
     this.three.dispose();
   }
+}
+
+interface WaterSurface {
+  mins: Vec3;
+  maxs: Vec3;
+  color: [number, number, number];
+  start: number;
+  end: number;
+}
+
+/** Water surfaces of a map with their underwater fog ($fogcolor, $fogstart/$fogend). */
+export function waterSurfaces(map: LoadedMap): WaterSurface[] {
+  const out: WaterSurface[] = [];
+  const r = map.render;
+  if (!r) return out;
+  for (const b of r.batches ?? []) {
+    const d = b && r.materials.get(b.material);
+    if (!d || !d.isWater || !b.mins || !b.maxs) continue;
+    const c = d.waterFogColor ?? [d.fallbackColor[0] * 0.5, d.fallbackColor[1] * 0.55, d.fallbackColor[2] * 0.6];
+    const range = d.waterFogRange;
+    const start = range && Number.isFinite(range[0]) ? Math.max(0, range[0]) : 0;
+    let end = range && Number.isFinite(range[1]) ? range[1] : 400;
+    if (!(end > start + 1)) end = start + 400;
+    out.push({ mins: b.mins, maxs: b.maxs, color: [c[0], c[1], c[2]], start, end });
+  }
+  return out;
+}
+
+/** The water surface above `p` (the eye is in a water volume): the lowest surface over p within its XY bounds. */
+export function waterAbove(surfaces: readonly WaterSurface[], p: Vec3): WaterSurface | null {
+  let best: WaterSurface | null = null;
+  for (const w of surfaces) {
+    if (p.x < w.mins.x - 1 || p.x > w.maxs.x + 1 || p.y < w.mins.y - 1 || p.y > w.maxs.y + 1) continue;
+    if (w.maxs.z < p.z - 1) continue;
+    if (!best || w.mins.z < best.mins.z) best = w;
+  }
+  return best ?? surfaces[0] ?? null;
 }
 
 class LoadAbortedError extends Error {

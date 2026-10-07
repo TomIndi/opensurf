@@ -173,7 +173,7 @@ export class ZoneBeams {
       uniforms: {
         uTime: time,
         uPixelScale: pixelScale,
-        uMinPixels: { value: 1.6 },
+        uMinPixels: { value: 1.8 },
         uPulse: { value: 0.12 },
         uOpacity: { value: 1 },
       },
