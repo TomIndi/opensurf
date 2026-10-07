@@ -237,4 +237,11 @@ export interface BspFile {
   /** Raw ZIP bytes of the embedded pakfile, or null. */
   pakfile: Uint8Array | null;
   gameLumps: BspGameLump[];
+  /**
+   * Which lump `faces` came from: LUMP_FACES (7), or LUMP_FACES_HDR (58) for HDR-only compiles. When it is
+   * LUMP_FACES_HDR the faces' lightOfs index `lightingHDR`, not `lighting`. (Optional; set by parseBsp.)
+   */
+  facesLump?: number;
+  /** Non-fatal problems found while parsing/validating (unknown version, bad lump sizes, bad indices). */
+  warnings?: string[];
 }
