@@ -4,8 +4,9 @@
 // Each rendered frame (requestAnimationFrame):
 //   1. mouse movement since the last frame turns the view immediately (rendered at full refresh rate);
 //   2. the elapsed real time (× host_timescale) is accumulated and whole ticks are simulated (at most 10 per
-//      frame); with several ticks in one frame the view angles are interpolated from the previous frame's angles
-//      to the current ones across them, so strafes stay smooth at low fps;
+//      frame); each tick's view angles are the previous frame's angles interpolated towards the current ones at
+//      that tick's simulated time within the frame, so a steady mouse turn is the same angle on every tick at any
+//      fps (smooth strafes at low fps, no 1x/2x alternation when fps and tickrate differ);
 //   3. the camera renders the eye position interpolated between the last two ticks (alpha = leftover time).
 // Per tick (docs/ARCHITECTURE.md "Game loop & tick order"): usercmd -> base velocity -> zone button filters and
 // strafe stats -> playerMove -> +use -> entities (triggers, I/O) -> timer -> replay recording -> sounds.
@@ -337,8 +338,17 @@ export class Session implements TimerHost, CommandSession {
   readonly zoneEditor: ZoneEditor;
   readonly savelocs: Saveloc[] = [];
   savelocIndex = -1;
+  /**
+   * Simulation clock (s since map load, WorldHost.time). Monotonic: it advances by the tick interval in force
+   * at each tick, so a tickrate change mid-map never rescales the time already simulated (delayed outputs,
+   * logic_timers and trigger_hurt keep their schedule).
+   */
   time = 0;
   tickCount = 0;
+  /** Clock at the last tickrate change: time = clockBase + (tickCount - clockBaseTick) * clockInterval. */
+  private clockBase = 0;
+  private clockBaseTick = 0;
+  private clockInterval = 0;
   /** Origin / eye height at the start of the latest tick (render interpolation). */
   readonly prevOrigin: Vec3;
   prevViewOffset: number;
@@ -382,6 +392,20 @@ export class Session implements TimerHost, CommandSession {
 
   get moveVars(): MoveVars {
     return getMoveVars();
+  }
+
+  /**
+   * Starts the next tick of `ti` seconds: tickCount + 1 and the clock moves on by exactly one tick. While the
+   * tickrate stays the same the clock is tickCount · ti from its last change (no float drift from summing).
+   */
+  advanceClock(ti: number): void {
+    if (ti !== this.clockInterval) {
+      this.clockBase = this.time;
+      this.clockBaseTick = this.tickCount;
+      this.clockInterval = ti;
+    }
+    this.tickCount++;
+    this.time = this.clockBase + (this.tickCount - this.clockBaseTick) * ti;
   }
 
   get tickInterval(): number {
@@ -1183,11 +1207,13 @@ export class Game implements GameApi, CommandContext {
       return;
     }
     const ti = tickInterval();
-    const r = accumulateTicks(this.acc, dt * hostTimescale(), ti);
+    const span = dt * hostTimescale();
+    const r = accumulateTicks(this.acc, span, ti);
     this.acc = r.acc;
     const n = r.ticks;
     for (let i = 1; i <= n; i++) {
-      this.input.tickAngles(this.tickAngles, i, n);
+      // each tick samples the view at its own simulated time within the frame (even per-tick turns at any fps)
+      this.input.tickAngles(this.tickAngles, i, n, r.acc, ti, span);
       this.tickSession(s, this.tickAngles);
       this.dispatcher.afterTick();
       if (this._session !== s || this._state !== 'playing' || this.spec) break;
@@ -1217,8 +1243,7 @@ export class Game implements GameApi, CommandContext {
     const ps = s.player;
     const ti = tickInterval();
     const vars = getMoveVars();
-    s.tickCount++;
-    s.time = s.tickCount * ti;
+    s.advanceClock(ti);
     v3copy(s.prevOrigin, ps.origin);
     s.prevViewOffset = ps.viewOffsetZ;
 

@@ -293,7 +293,8 @@ export interface ZoneDef {
   spawn?: { origin: Vec3; angles: QAngle };
 }
 
-export type ZoneSource = 'user' | 'preset' | 'momentum' | 'builtin' | 'heuristic' | 'none';
+/** 'map': conventionally named timer trigger brushes of the map (start_trigger, endzone, cpN_trigger, bonusNstart...). */
+export type ZoneSource = 'user' | 'preset' | 'momentum' | 'builtin' | 'heuristic' | 'map' | 'none';
 
 // ---------------------------------------------------------------- the loaded map
 

@@ -14,6 +14,7 @@ import {
   lerpAngles,
   readMouseSettings,
   registerButtonCommands,
+  tickFraction,
 } from '../src/game/input';
 import {
   IN_ATTACK,
@@ -47,6 +48,12 @@ function fresh(): InputState {
 
 function cmdOf(inp: InputState, noclip = false) {
   return inp.buildCmd(newUserCmd(), inp.view, { noclip });
+}
+
+/** Runs console commands in an earlier frame: the buttons reach the next usercmd as held all along (KeyState 1). */
+function held(inp: InputState, line: string) {
+  execute(line);
+  inp.endFrame();
 }
 
 const CSGO: MouseSettings = { sensitivity: 2.5, yaw: 0.022, pitch: 0.022, customAccel: 0, accelScale: 0.04, accelMax: 0, accelExponent: 1.05 };
@@ -96,6 +103,34 @@ describe('KButton (Source kbutton semantics)', () => {
     expect(b.state).toBe(0);
     b.clearImpulses();
     expect(b.active).toBe(false);
+  });
+
+  it('keyState: Source KeyState amounts, consumed by each read', () => {
+    const b = new KButton('moveleft', IN_MOVELEFT);
+    expect(b.keyState()).toBe(0); // idle
+    b.press('a');
+    expect(b.keyState()).toBe(0.5); // pressed and held this frame
+    expect(b.keyState()).toBe(1); // held the entire frame
+    b.release('a');
+    expect(b.keyState()).toBe(0); // released this frame
+    b.press('a');
+    b.release('a');
+    expect(b.keyState()).toBe(0.25); // pressed and released this frame
+    expect(b.keyState()).toBe(0);
+    b.press('a');
+    b.keyState();
+    b.release('a');
+    b.press('a');
+    expect(b.keyState()).toBe(0.75); // released and re-pressed this frame
+    b.press('a');
+    b.clearMoveImpulses(); // frame end without a usercmd
+    expect(b.keyState()).toBe(1);
+    // the button-bit latch is separate: reading keyState does not clear it
+    const j = new KButton('moveright', IN_MOVERIGHT);
+    j.press('d');
+    j.release('d');
+    expect(j.keyState()).toBe(0.25);
+    expect(j.active).toBe(true);
   });
 
   it('reports transitions once', () => {
@@ -304,6 +339,40 @@ describe('InputState frames and ticks', () => {
     expect(inp.turn).toBe(-1); // turning left
   });
 
+  it('places each tick at its simulated time inside the frame (tickFraction)', () => {
+    // 60 fps at 100 tick, 4 ms carried in: ticks end 6 and 16 ms into the 16.67 ms frame, 0.67 ms left over
+    const dt = 1 / 60;
+    const left = 0.004 + dt - 0.02;
+    expect(tickFraction(1, 2, left, 0.01, dt)).toBeCloseTo(0.006 / dt, 9);
+    expect(tickFraction(2, 2, left, 0.01, dt)).toBeCloseTo(0.016 / dt, 9);
+    // 144 fps: the frame's only tick ends 2 ms before the frame does
+    expect(tickFraction(1, 1, 0.002, 0.01, 1 / 144)).toBeCloseTo(1 - 0.002 * 144, 9);
+    // fps == tickrate: every tick at the frame end
+    expect(tickFraction(1, 1, 0, 0.01, 0.01)).toBe(1);
+    // the backlog cap dropped time: still increasing, the last tick at the end
+    const capped = [1, 2, 3].map((i) => tickFraction(i, 3, 0, 0.01, 0.25));
+    expect(capped[0]).toBeLessThan(capped[1]);
+    expect(capped[2]).toBe(1);
+    // ticks before the frame (a tickrate change shrank the interval below the carried time) clamp to its start
+    expect(tickFraction(1, 3, 0, 0.01, 0.02)).toBe(0);
+    // no usable timing: spread evenly
+    expect(tickFraction(1, 4)).toBe(0.25);
+    expect(tickFraction(3, 4, 0, 0.01, 0)).toBe(0.75);
+    expect(tickFraction(1, 0)).toBe(1);
+  });
+
+  it('samples the view at each tick\'s time for a constant turn (60 fps, 100 tick)', () => {
+    const inp = fresh();
+    inp.setAngles(0, 0);
+    const t = qa();
+    inp.addMouse(-60, 0); // 3.3 degrees in a 1/60 s frame (198 deg/s)
+    inp.beginFrame(1 / 60, CSGO);
+    // two ticks ending 6 ms and 16 ms into the frame
+    const left = 0.004 + 1 / 60 - 0.02;
+    expect(inp.tickAngles(t, 1, 2, left, 0.01, 1 / 60).yaw).toBeCloseTo(198 * 0.006, 9);
+    expect(inp.tickAngles(t, 2, 2, left, 0.01, 1 / 60).yaw).toBeCloseTo(198 * 0.016, 9);
+  });
+
   it('wraps yaw at frame end without a jump between the frame ends', () => {
     const inp = fresh();
     inp.setAngles(0, 175);
@@ -369,47 +438,107 @@ describe('InputState frames and ticks', () => {
 describe('usercmd', () => {
   it('forward/side/up moves follow cl_*speed and the held buttons', () => {
     const inp = fresh();
-    execute('+forward');
+    held(inp, '+forward');
     let c = cmdOf(inp);
     expect(c.forwardmove).toBe(450);
     expect(c.buttons & IN_FORWARD).toBeTruthy();
-    execute('+back');
+    held(inp, '+back');
     c = cmdOf(inp);
     expect(c.forwardmove).toBe(0);
     expect(c.buttons & (IN_FORWARD | IN_BACK)).toBe(IN_FORWARD | IN_BACK);
-    execute('-forward');
+    held(inp, '-forward');
     expect(cmdOf(inp).forwardmove).toBe(-450);
-    execute('-back; +moveright');
+    held(inp, '-back; +moveright');
     c = cmdOf(inp);
     expect(c.sidemove).toBe(450);
     expect(c.buttons & IN_MOVERIGHT).toBeTruthy();
-    execute('+moveleft');
+    held(inp, '+moveleft');
     c = cmdOf(inp);
     expect(c.sidemove).toBe(0);
-    execute('-moveright');
+    held(inp, '-moveright');
     c = cmdOf(inp);
     expect(c.sidemove).toBe(-450);
     expect(c.buttons & IN_MOVELEFT).toBeTruthy();
-    execute('-moveleft');
+    held(inp, '-moveleft');
     cvar('cl_forwardspeed').set(300);
     cvar('cl_backspeed').set(200);
-    execute('+forward');
+    held(inp, '+forward');
     expect(cmdOf(inp).forwardmove).toBe(300);
-    execute('-forward; +back');
+    held(inp, '-forward; +back');
     expect(cmdOf(inp).forwardmove).toBe(-200);
     execute('-back');
   });
 
   it('upmove: +moveup/+movedown always, +jump/+duck only in noclip', () => {
     const inp = fresh();
-    execute('+jump');
+    held(inp, '+jump');
     expect(cmdOf(inp).upmove).toBe(0);
     expect(cmdOf(inp, true).upmove).toBe(320);
-    execute('-jump; +duck');
+    held(inp, '-jump; +duck');
     expect(cmdOf(inp, true).upmove).toBe(-320);
-    execute('-duck; +moveup');
+    held(inp, '-duck; +moveup');
     expect(cmdOf(inp).upmove).toBe(320);
-    execute('-moveup');
+    held(inp, '-moveup; +movedown');
+    expect(cmdOf(inp).upmove).toBe(-320);
+    execute('-movedown');
+  });
+
+  it('movement amounts follow Source KeyState: a fresh press is half a tick, a sub-tick tap a quarter', () => {
+    const inp = fresh();
+    // pressed since the last usercmd and still held: 0.5, then 1
+    execute('+moveright');
+    let c = cmdOf(inp);
+    expect(c.sidemove).toBe(225);
+    expect(c.buttons & IN_MOVERIGHT).toBeTruthy();
+    expect(cmdOf(inp).sidemove).toBe(450);
+    // released: 0 at once (the bit is gone too)
+    execute('-moveright');
+    c = cmdOf(inp);
+    expect(c.sidemove).toBe(0);
+    expect(c.buttons & IN_MOVERIGHT).toBe(0);
+    // a tap shorter than a tick (pressed and released between two usercmds): one tick at 0.25, bit set once
+    execute('+moveleft; -moveleft');
+    c = cmdOf(inp);
+    expect(c.sidemove).toBe(-112.5);
+    expect(c.buttons & IN_MOVELEFT).toBeTruthy();
+    c = cmdOf(inp);
+    expect(c.sidemove).toBe(0);
+    expect(c.buttons & IN_MOVELEFT).toBe(0);
+    // released and pressed again while held: 0.75
+    held(inp, '+forward');
+    execute('-forward; +forward');
+    expect(cmdOf(inp).forwardmove).toBe(337.5);
+    expect(cmdOf(inp).forwardmove).toBe(450);
+    execute('-forward');
+    // two keys on one button: the second key's press/release is no transition (Source kbutton)
+    held(inp, '+back s');
+    execute('+back downarrow; -back downarrow');
+    expect(cmdOf(inp).forwardmove).toBe(-450);
+    execute('-back s');
+    // both directions tapped in one tick cancel out
+    execute('+moveleft; -moveleft; +moveright; -moveright');
+    expect(cmdOf(inp).sidemove).toBe(0);
+  });
+
+  it('KeyState impulses expire at the end of the frame they happened in (no usercmd that frame)', () => {
+    const inp = fresh();
+    // a press in a frame without a tick reaches the next tick as held all along
+    execute('+moveleft');
+    inp.endFrame();
+    expect(cmdOf(inp).sidemove).toBe(-450);
+    execute('-moveleft');
+    // a tap spanning frames without a tick moves nothing (CS:GO at fps > tickrate), but still sets the bit once
+    execute('+moveright');
+    inp.endFrame();
+    execute('-moveright');
+    inp.endFrame();
+    const c = cmdOf(inp);
+    expect(c.sidemove).toBe(0);
+    expect(c.buttons & IN_MOVERIGHT).toBeTruthy();
+    // releaseAll forgets everything
+    execute('+forward');
+    inp.releaseAll();
+    expect(cmdOf(inp).forwardmove).toBe(0);
   });
 
   it('sets the button bits', () => {

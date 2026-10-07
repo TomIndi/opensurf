@@ -217,7 +217,7 @@ export class SkyBox {
     // Synthetic lighting for maps without lightmaps: a sky-tinted ambient that keeps faces readable.
     const amb = new Vector3().copy(zen).multiplyScalar(0.35).add(new Vector3().copy(hor).multiplyScalar(0.35));
     const lum = amb.x * 0.2126 + amb.y * 0.7152 + amb.z * 0.0722;
-    const target = kind === 'night' ? 0.16 : kind === 'dusk' ? 0.34 : 0.42;
+    const target = kind === 'night' ? 0.24 : kind === 'dusk' ? 0.36 : 0.42;
     amb.multiplyScalar(target / Math.max(lum, 1e-3));
     s.uAmbSky.value.copy(amb);
     s.uAmbGround.value.copy(gnd).multiplyScalar(0.25).add(new Vector3().copy(amb).multiplyScalar(0.45));

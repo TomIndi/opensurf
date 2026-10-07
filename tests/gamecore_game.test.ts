@@ -4,7 +4,7 @@ import { v3 } from '../src/core/vec3';
 import { CHAT_PREFIX } from '../src/game/commands';
 import { registerConvars, tickInterval } from '../src/game/convars';
 import { Game, MAX_TICKS_PER_FRAME, accumulateTicks, applyBaseVelocity, interpolateOrigin, renderSettingsFromCvars, triggerColor } from '../src/game/game';
-import { FL_BASEVELOCITY, IN_JUMP, MOVETYPE_NOCLIP, VIEW_OFFSET_STAND, createPlayerState } from '../src/physics/playertypes';
+import { FL_BASEVELOCITY, IN_JUMP, IN_MOVERIGHT, MOVETYPE_NOCLIP, VIEW_OFFSET_STAND, createPlayerState } from '../src/physics/playertypes';
 import { FakeRenderer, FakeUi, loadedGame, makeGame, makeTestMap, resetGlobals } from './gamecore_helpers';
 
 beforeEach(() => {
@@ -754,6 +754,224 @@ describe('map logic inside the loop', () => {
     expect(s.player.origin.x).toBeGreaterThan(20);
     expect(out.filter((l) => l.includes('broken entity'))).toHaveLength(3); // capped
     expect(out.some((l) => l.includes('further errors are not shown'))).toBe(true);
+  });
+});
+
+describe('simulation clock', () => {
+  /** Ticks until the player's gravity scale reads `g` (an AddOutput fired `delay` s after now). */
+  function ticksUntilGravity(t: Awaited<ReturnType<typeof loadedGame>>, g: number, max = 2000): number {
+    const s = t.game.session!;
+    for (let i = 1; i <= max; i++) {
+      t.game.runTicks(1);
+      if (s.player.gravityScale === g) return i;
+    }
+    return -1;
+  }
+
+  it('is tickCount · interval at a constant tickrate', async () => {
+    const t = await loadedGame();
+    const s = t.game.session!;
+    t.game.runTicks(1234);
+    expect(s.tickCount).toBe(1234);
+    expect(s.time).toBe(1234 * 0.01);
+  });
+
+  for (const [from, to] of [
+    [100, 128],
+    [128, 64],
+  ]) {
+    it(`stays monotonic across a tickrate change (${from} -> ${to}): a 1 s delayed output fires 1 s later`, async () => {
+      cvar('tickrate').set(from);
+      const t = await loadedGame();
+      const s = t.game.session!;
+      t.game.runTicks(6000);
+      const before = s.time;
+      expect(before).toBeCloseTo(6000 / from, 9);
+      cvar('tickrate').set(to);
+      s.entities.fireInput!('!player', 'AddOutput', 'gravity 0.5', 1);
+      t.game.runTicks(1);
+      // the clock moved on by exactly one new tick (it used to be rescaled: 60 s -> 46.9 s, or 46.9 s -> 93.8 s)
+      expect(s.time).toBeCloseTo(before + 1 / to, 9);
+      const n = ticksUntilGravity(t, 0.5) + 1;
+      expect(n).toBe(to); // 1 s of simulated time at the new tickrate
+      expect(s.time - before).toBeCloseTo(1, 9);
+      // and back: the clock keeps counting from where it is
+      cvar('tickrate').set(from);
+      const mid = s.time;
+      s.entities.fireInput!('!player', 'AddOutput', 'gravity 0.25', 0.5);
+      expect(ticksUntilGravity(t, 0.25)).toBe(from / 2);
+      expect(s.time - mid).toBeCloseTo(0.5, 9);
+    });
+  }
+
+  it('a tickrate change mid-run puts the run in practice; the run clock counts simulated (timescaled) ticks', async () => {
+    const t = await loadedGame();
+    const s = t.game.session!;
+    t.game.executeCommand('+forward');
+    t.game.runTicks(100); // run out of the start zone
+    expect(s.timer.getHud().state).toBe('running');
+    // a tickrate change is a server change: the run can't be ranked any more
+    cvar('tickrate').set(128);
+    expect(s.timer.inPractice).toBe(true);
+    expect(s.timer.getHud().state).toBe('practice');
+    expect(t.ui.texts()).toContain("Server cvar 'tickrate' changed to 128");
+    cvar('tickrate').set(100);
+    // host_timescale 0.5 (a cheat, also practice): one real second is half a second of game and timer time
+    execute('sv_cheats 1; host_timescale 0.5');
+    let now = frames(t.game, 1, 100, 1000);
+    const t0 = s.timer.getHud().time;
+    const ticks0 = s.tickCount;
+    const time0 = s.time;
+    now = frames(t.game, 100, 100, now);
+    t.game.executeCommand('-forward');
+    const hud = s.timer.getHud();
+    expect(hud.time - t0).toBeCloseTo((s.tickCount - ticks0) * 0.01, 9);
+    expect(hud.time - t0).toBeGreaterThan(0.48);
+    expect(hud.time - t0).toBeLessThan(0.52);
+    expect(s.time - time0).toBeCloseTo(hud.time - t0, 9);
+    expect(t.game.getHud().timer.time).toBe(hud.time); // the HUD shows the timer's simulated clock
+    // paused: neither clock moves
+    t.game.pause();
+    const paused = { tick: s.tickCount, time: s.time, run: s.timer.getHud().time };
+    frames(t.game, 50, 100, now);
+    expect({ tick: s.tickCount, time: s.time, run: s.timer.getHud().time }).toEqual(paused);
+    t.game.resume();
+    execute('sv_cheats 0');
+  });
+});
+
+describe('per-tick view angles', () => {
+  /** Turns at a constant 180 °/s for 2 s at `fps`; returns the per-tick yaw changes the movement saw. */
+  async function turnSteps(fps: number, tickrate = 100): Promise<number[]> {
+    cvar('tickrate').set(tickrate);
+    const t = await loadedGame();
+    const s = t.game.session!;
+    const yaws: number[] = [];
+    const tick = s.entities.tick.bind(s.entities);
+    s.entities.tick = () => {
+      yaws.push(s.player.viewAngles.yaw);
+      tick();
+    };
+    const countsPerSecond = 180 / (2.5 * 0.022); // sensitivity 2.5, m_yaw 0.022
+    let now = 1000;
+    t.game.frame(now);
+    for (let i = 0; i < fps * 2; i++) {
+      t.game.input.addMouse(-countsPerSecond / fps, 0); // left turn
+      now += 1000 / fps;
+      t.game.frame(now);
+    }
+    const d: number[] = [];
+    for (let i = 1; i < yaws.length; i++) {
+      let x = yaws[i] - yaws[i - 1];
+      if (x < -180) x += 360;
+      if (x > 180) x -= 360;
+      d.push(x);
+    }
+    t.game.disconnect();
+    return d.slice(2);
+  }
+
+  const stddev = (a: number[]) => {
+    const m = a.reduce((x, y) => x + y, 0) / a.length;
+    return Math.sqrt(a.reduce((x, y) => x + (y - m) ** 2, 0) / a.length);
+  };
+
+  // weights by i/n used to give e.g. 1.5,1.5,1.5,1.5,3.0 at 60 fps (sd 0.6) and 2.5,1.25 at 144 fps (sd 0.62)
+  for (const fps of [30, 60, 100, 144, 165, 240, 500]) {
+    it(`a steady mouse turn is the same angle every tick at ${fps} fps (100 tick)`, async () => {
+      const d = await turnSteps(fps);
+      expect(d.length).toBeGreaterThan(190);
+      expect(stddev(d)).toBeLessThan(1e-6);
+      expect(d[d.length - 1]).toBeCloseTo(1.8, 6);
+    });
+  }
+
+  for (const tr of [64, 128]) {
+    it(`... and at ${tr} tick (144 fps)`, async () => {
+      const d = await turnSteps(144, tr);
+      expect(stddev(d)).toBeLessThan(1e-6);
+      expect(d[d.length - 1]).toBeCloseTo(180 / tr, 6);
+    });
+  }
+});
+
+describe('movement keys (Source KeyState)', () => {
+  /** Captures each tick's usercmd sidemove / buttons. */
+  function recordCmds(t: Awaited<ReturnType<typeof loadedGame>>): { side: number; buttons: number }[] {
+    const s = t.game.session!;
+    const out: { side: number; buttons: number }[] = [];
+    const tick = s.entities.tick.bind(s.entities);
+    s.entities.tick = () => {
+      out.push({ side: s.cmd.sidemove, buttons: s.cmd.buttons });
+      tick();
+    };
+    return out;
+  }
+
+  it('a strafe tap inside one 30 fps frame still strafes for one tick (0.25), a press starts at half', async () => {
+    const t = await loadedGame();
+    const s = t.game.session!;
+    const cmds = recordCmds(t);
+    let now = 1000;
+    t.game.frame(now);
+    t.game.frame((now += 1000 / 30));
+    cmds.length = 0;
+    // key down + up between two frames (a 20 ms tap at 30 fps): used to give sidemove 0 on all 3-4 ticks
+    t.game.dispatcher.keyDown('d');
+    t.game.dispatcher.keyUp('d');
+    const vy0 = s.player.velocity.y;
+    t.game.frame((now += 1000 / 30));
+    expect(cmds.length).toBeGreaterThanOrEqual(3);
+    expect(cmds[0].side).toBe(112.5);
+    expect(cmds[0].buttons & IN_MOVERIGHT).toBeTruthy();
+    for (const c of cmds.slice(1)) expect(c).toEqual({ side: 0, buttons: 0 });
+    expect(s.player.velocity.y).toBeLessThan(vy0); // moved right (-y when facing +x)
+    // held: the first tick is a half one, then full
+    cmds.length = 0;
+    t.game.dispatcher.keyDown('d');
+    t.game.frame((now += 1000 / 30));
+    t.game.frame((now += 1000 / 30));
+    expect(cmds[0].side).toBe(225);
+    expect(cmds.slice(1).every((c) => c.side === 450)).toBe(true);
+    t.game.dispatcher.keyUp('d');
+    cmds.length = 0;
+    t.game.frame((now += 1000 / 30));
+    expect(cmds.every((c) => c.side === 0 && !(c.buttons & IN_MOVERIGHT))).toBe(true);
+  });
+
+  it('in the air a sub-tick tap is a full-strength strafe tick', async () => {
+    const t = await loadedGame();
+    const s = t.game.session!;
+    t.game.teleportPlayer(v3(0, 0, 400), { pitch: 0, yaw: 0, roll: 0 }, v3(400, 0, 0));
+    t.game.runTicks(2);
+    const v0 = s.player.velocity.y;
+    t.game.executeCommand('+moveright; -moveright');
+    t.game.runTicks(1);
+    // wishspeed 112.5 still exceeds sv_air_max_wishspeed 30: the full 30 u/s of sideways gain in one tick
+    expect(v0 - s.player.velocity.y).toBeCloseTo(30, 6);
+  });
+
+  it('at fps above the tickrate a press in a frame without a tick reaches the next tick as held (CS:GO)', async () => {
+    const t = await loadedGame();
+    const cmds = recordCmds(t);
+    // 250 fps at 100 tick: frames of 4 ms, ticks every 2.5 frames
+    let now = 1000;
+    t.game.frame(now);
+    let guard = 0;
+    // find a frame that runs no tick, press during it
+    for (;;) {
+      const before = cmds.length;
+      t.game.frame((now += 4));
+      if (cmds.length === before) break;
+      if (++guard > 10) throw new Error('no tickless frame');
+    }
+    t.game.dispatcher.keyDown('a');
+    cmds.length = 0;
+    t.game.frame((now += 4)); // the press is seen this frame
+    while (cmds.length === 0) t.game.frame((now += 4));
+    // pressed in a tickless frame: Source's per-frame KeyState read already consumed the impulse
+    expect(cmds[0].side === -450 || cmds[0].side === -225).toBe(true);
+    t.game.dispatcher.keyUp('a');
   });
 });
 

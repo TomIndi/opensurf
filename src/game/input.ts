@@ -10,7 +10,8 @@
 //    turn at cl_yawspeed/cl_pitchspeed (× cl_anglespeedkey while +speed is held).
 //  - The usercmd of each tick: forwardmove = cl_forwardspeed·(+forward) − cl_backspeed·(+back),
 //    sidemove = cl_sidespeed·(+moveright − +moveleft), upmove = cl_upspeed·(+moveup − +movedown) (plus
-//    +jump/+duck in noclip), button bits, view angles.
+//    +jump/+duck in noclip), button bits, view angles. Each (+button) is Source's KeyState amount: 1 held,
+//    0.5 on the tick of a fresh press, 0.25 for a tap that began and ended since the last tick (see keyState).
 //  - DOM: pointer lock on canvas click (raw input when supported), keys/mouse buttons/wheel run their binds while
 //    playing (ignored while the console/chat has focus), losing the pointer lock pauses the game.
 import { QAngle, normalizeAngle, qa } from '../core/angles';
@@ -56,6 +57,13 @@ export class KButton {
   impulseDown = false;
   /** Released since the last usercmd was built. */
   impulseUp = false;
+  /**
+   * Source kbutton impulse bits for the movement amount (KeyState): pressed / released since the last KeyState
+   * read. Unlike the button-bit latch above they also expire at the end of every rendered frame (Source reads
+   * KeyState every frame for its extra mouse sample), see keyState().
+   */
+  private moveImpulseDown = false;
+  private moveImpulseUp = false;
   /** Called on down/up transitions. */
   onChange: ((down: boolean) => void) | null = null;
 
@@ -83,6 +91,7 @@ export class KButton {
     }
     if (!was) {
       this.impulseDown = true;
+      this.moveImpulseDown = true;
       this.onChange?.(true);
     }
   }
@@ -99,13 +108,43 @@ export class KButton {
     } else if (!this.keys.delete(key)) return;
     if (was && !this.down) {
       this.impulseUp = true;
+      this.moveImpulseUp = true;
       this.onChange?.(false);
     }
   }
 
-  /** Movement amount for the usercmd: 1 while held, else 0. */
+  /** 1 while held, else 0 (keyboard turning, HUD). Movement amounts in usercmds come from keyState(). */
   get state(): number {
     return this.down ? 1 : 0;
+  }
+
+  /**
+   * Source's KeyState: how much of the movement this button contributes to one usercmd, from whether it is held
+   * and how it changed since the last read; then forgets those changes:
+   *   held all along 1 · pressed and still held 0.5 · released 0 · pressed and released again 0.25 ·
+   *   released and pressed again (held) 0.75.
+   * So a tap shorter than a tick still strafes for one tick (at 0.25 · 450 = 112.5 the air wish speed is still
+   * above the 30 u/s cap, i.e. a full-strength air strafe tick) instead of vanishing, and the first tick of a
+   * press is a half one, like CS:GO. Impulses not read by a usercmd of the frame they happened in expire at the
+   * frame's end (endFrame), as Source's per-frame extra mouse sample consumes them: at fps above the tickrate a
+   * press in a frame without a tick reaches the next tick as "held all along".
+   */
+  keyState(): number {
+    const down = this.down;
+    const pressed = this.moveImpulseDown;
+    const released = this.moveImpulseUp;
+    this.moveImpulseDown = false;
+    this.moveImpulseUp = false;
+    if (pressed && released) return down ? 0.75 : 0.25;
+    if (pressed) return down ? 0.5 : 0;
+    if (released) return 0;
+    return down ? 1 : 0;
+  }
+
+  /** Expires the KeyState impulses (end of a rendered frame). */
+  clearMoveImpulses(): void {
+    this.moveImpulseDown = false;
+    this.moveImpulseUp = false;
   }
 
   /** Button bit for the next usercmd: held now, or pressed (even briefly) since the last usercmd. */
@@ -125,6 +164,8 @@ export class KButton {
     this.manual = false;
     this.impulseDown = false;
     this.impulseUp = false;
+    this.moveImpulseDown = false;
+    this.moveImpulseUp = false;
     if (was) this.onChange?.(false);
   }
 }
@@ -252,6 +293,23 @@ export function lerpAngles(out: QAngle, a: QAngle, b: QAngle, t: number): QAngle
   return out;
 }
 
+/**
+ * Where tick `i` (1-based) of the `n` ticks simulated in one frame falls inside that frame, as a fraction 0..1
+ * of the frame's simulated span (`span` = frame dt · host_timescale). The fixed-tick accumulator keeps
+ * `leftover` seconds after the frame's last tick, so tick i ends (n − i) · interval + leftover before the end of
+ * the frame. Sampling the view (which moves linearly between two frames' mouse samples) at that fraction gives
+ * every tick the turn of its own slice of time: a constant mouse speed turns the same angle on every tick at
+ * any fps (60 fps at 100 tick would otherwise alternate 1.5° / 3° per tick, 144 fps 1.25° / 2.5°), which is
+ * what CS:GO's per-frame mouse sampling converges to at the high fps surfers play at. Without a usable span or
+ * interval the ticks are spread evenly (i / n).
+ */
+export function tickFraction(i: number, n: number, leftover = 0, interval = 0, span = 0): number {
+  if (!(n > 0)) return 1;
+  if (!(span > 0) || !(interval > 0) || !Number.isFinite(span) || !Number.isFinite(leftover)) return i / n;
+  const w = 1 - (Math.max(0, leftover) + (n - i) * interval) / span;
+  return w < 0 ? 0 : w > 1 ? 1 : w;
+}
+
 // ------------------------------------------------------------------------------------------ input state
 
 /** How long the HUD keeps showing the last mouse turn direction (smooths frames without mouse samples). */
@@ -373,13 +431,20 @@ export class InputState {
     this.view.pitch = clampPitch(this.view.pitch + speed * pitchSpeed * (b.lookdown.state - b.lookup.state));
   }
 
-  /** View angles for tick `i` of `n` ticks in this frame (interpolated from the frame start). */
-  tickAngles(out: QAngle, i: number, n: number): QAngle {
-    return lerpAngles(out, this.frameStart, this.view, n > 0 ? i / n : 1);
+  /**
+   * View angles for tick `i` (1-based) of the `n` ticks simulated in this frame: the view interpolated from the
+   * frame start to now at the tick's own simulated time (see tickFraction; without timing, evenly by i/n).
+   */
+  tickAngles(out: QAngle, i: number, n: number, leftover = 0, interval = 0, span = 0): QAngle {
+    return lerpAngles(out, this.frameStart, this.view, tickFraction(i, n, leftover, interval, span));
   }
 
-  /** End of a frame: wraps the continuous yaw back into ±180 (both endpoints, so nothing jumps). */
+  /**
+   * End of a frame: expires the movement-key impulses no usercmd of this frame consumed (see KButton.keyState) and
+   * wraps the continuous yaw back into ±180 (both endpoints, so nothing jumps).
+   */
   endFrame(): void {
+    for (const n of BUTTON_NAMES) this.buttons[n].clearMoveImpulses();
     const wrapped = normalizeAngle(this.view.yaw);
     const shift = wrapped - this.view.yaw;
     if (shift !== 0) {
@@ -398,9 +463,10 @@ export class InputState {
     const back = cvNum('cl_backspeed', 450);
     const side = cvNum('cl_sidespeed', 450);
     const up = cvNum('cl_upspeed', 320);
-    out.forwardmove = fwd * b.forward.state - back * b.back.state;
-    out.sidemove = side * (b.moveright.state - b.moveleft.state);
-    let upmove = up * (b.moveup.state - b.movedown.state);
+    // KeyState fractions (Source): a sub-tick tap still moves for one tick, a fresh press is a half tick
+    out.forwardmove = fwd * b.forward.keyState() - back * b.back.keyState();
+    out.sidemove = side * (b.moveright.keyState() - b.moveleft.keyState());
+    let upmove = up * (b.moveup.keyState() - b.movedown.keyState());
     if (opts.noclip) upmove += up * (b.jump.state - b.duck.state);
     out.upmove = upmove;
     let bits = 0;

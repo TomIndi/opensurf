@@ -72,7 +72,10 @@ class GhostObject {
   private labelAspect = 4;
   private name = '';
   private ducked = false;
-  private readonly samples: TrailSample[] = [];
+  /** Ring buffer of trail samples (preallocated: no per-frame allocation). */
+  private readonly ring: TrailSample[] = Array.from({ length: TRAIL_MAX }, () => ({ x: 0, y: 0, z: 0, t: 0 }));
+  private ringHead = 0; // index of the oldest sample
+  private count = 0;
   private readonly trailPos: Float32Array;
   private readonly trailFade: Float32Array;
   private readonly trailSide: Float32Array;
@@ -233,41 +236,63 @@ class GhostObject {
     this.updateTrail(time, cam, visible && !!s.trail);
   }
 
+  private sample(i: number): TrailSample {
+    return this.ring[(this.ringHead + i) % TRAIL_MAX];
+  }
+
+  private pushSample(x: number, y: number, z: number, t: number): void {
+    if (this.count === TRAIL_MAX) {
+      this.ringHead = (this.ringHead + 1) % TRAIL_MAX;
+      this.count--;
+    }
+    const s = this.ring[(this.ringHead + this.count) % TRAIL_MAX];
+    s.x = x;
+    s.y = y;
+    s.z = z;
+    s.t = t;
+    this.count++;
+  }
+
   private updateTrail(time: number, cam: Vector3, on: boolean): void {
     const geo = this.trail.geometry;
     if (!on) {
-      this.samples.length = 0;
+      this.count = 0;
       this.trail.visible = false;
       geo.setDrawRange(0, 0);
       return;
     }
     const p = this.group.position;
-    const last = this.samples[this.samples.length - 1];
-    if (last) {
-      const jump = Math.hypot(p.x - last.x, p.y - last.y, p.z + TRAIL_HEIGHT - last.z);
-      if (jump > TRAIL_TELEPORT || time < last.t) this.samples.length = 0;
+    const pz = p.z + TRAIL_HEIGHT;
+    if (this.count) {
+      const last = this.sample(this.count - 1);
+      const jump = Math.hypot(p.x - last.x, p.y - last.y, pz - last.z);
+      if (jump > TRAIL_TELEPORT || time < last.t) this.count = 0;
     }
-    const prev = this.samples[this.samples.length - 1];
-    if (!prev || time - prev.t >= 1 / 120 || Math.hypot(p.x - prev.x, p.y - prev.y, p.z + TRAIL_HEIGHT - prev.z) > 24) {
-      if (this.samples.length >= TRAIL_MAX) this.samples.shift();
-      this.samples.push({ x: p.x, y: p.y, z: p.z + TRAIL_HEIGHT, t: time });
-    } else {
-      // keep the head of the trail glued to the ghost between samples
-      prev.x = p.x;
-      prev.y = p.y;
-      prev.z = p.z + TRAIL_HEIGHT;
+    if (!this.count) this.pushSample(p.x, p.y, pz, time);
+    else {
+      const prev = this.sample(this.count - 1);
+      if (time - prev.t >= 1 / 120 || Math.hypot(p.x - prev.x, p.y - prev.y, pz - prev.z) > 24) this.pushSample(p.x, p.y, pz, time);
+      else {
+        // keep the head of the trail glued to the ghost between samples
+        prev.x = p.x;
+        prev.y = p.y;
+        prev.z = pz;
+      }
     }
-    while (this.samples.length && time - this.samples[0].t > TRAIL_SECONDS) this.samples.shift();
-    const n = this.samples.length;
+    while (this.count && time - this.sample(0).t > TRAIL_SECONDS) {
+      this.ringHead = (this.ringHead + 1) % TRAIL_MAX;
+      this.count--;
+    }
+    const n = this.count;
     if (n < 2) {
       this.trail.visible = false;
       geo.setDrawRange(0, 0);
       return;
     }
     for (let i = 0; i < n; i++) {
-      const a = this.samples[Math.max(0, i - 1)];
-      const b = this.samples[Math.min(n - 1, i + 1)];
-      const c = this.samples[i];
+      const a = this.sample(Math.max(0, i - 1));
+      const b = this.sample(Math.min(n - 1, i + 1));
+      const c = this.sample(i);
       let tx = b.x - a.x;
       let ty = b.y - a.y;
       let tz = b.z - a.z;
@@ -299,21 +324,24 @@ class GhostObject {
       this.trailSide[i * 2] = -1;
       this.trailSide[i * 2 + 1] = 1;
     }
-    (geo.attributes.position as BufferAttribute).needsUpdate = true;
-    (geo.attributes.aFade as BufferAttribute).needsUpdate = true;
-    (geo.attributes.aSide as BufferAttribute).needsUpdate = true;
-    (geo.attributes.position as BufferAttribute).clearUpdateRanges();
-    (geo.attributes.position as BufferAttribute).addUpdateRange(0, n * 6);
-    (geo.attributes.aFade as BufferAttribute).clearUpdateRanges();
-    (geo.attributes.aFade as BufferAttribute).addUpdateRange(0, n * 2);
-    (geo.attributes.aSide as BufferAttribute).clearUpdateRanges();
-    (geo.attributes.aSide as BufferAttribute).addUpdateRange(0, n * 2);
+    const pa = geo.attributes.position as BufferAttribute;
+    const fa = geo.attributes.aFade as BufferAttribute;
+    const sa = geo.attributes.aSide as BufferAttribute;
+    pa.clearUpdateRanges();
+    pa.addUpdateRange(0, n * 6);
+    pa.needsUpdate = true;
+    fa.clearUpdateRanges();
+    fa.addUpdateRange(0, n * 2);
+    fa.needsUpdate = true;
+    sa.clearUpdateRanges();
+    sa.addUpdateRange(0, n * 2);
+    sa.needsUpdate = true;
     geo.setDrawRange(0, (n - 1) * 6);
     this.trail.visible = true;
   }
 
   get trailSamples(): number {
-    return this.samples.length;
+    return this.count;
   }
 
   dispose(): void {

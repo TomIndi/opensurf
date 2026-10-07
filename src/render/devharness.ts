@@ -11,7 +11,7 @@
 //   noext=EXT_a,EXT_b        pretend extensions are missing (fallback paths)
 //   hud=0                    hide the info overlay
 //   fly=1                    WASD + mouse (click to lock) fly camera; shift = fast
-// window.__harness exposes the renderer and helpers for automated tests.
+// window.__renderHarness exposes the renderer and helpers for automated tests.
 import type { QAngle } from '../core/angles';
 import { angleVectors } from '../core/angles';
 import type { Vec3 } from '../core/vec3';
@@ -137,6 +137,9 @@ async function loadMap(): Promise<void> {
   } else if (builtin) {
     const mod = await import('../map/builtin/index');
     map = mod.buildBuiltinMap(builtin);
+  } else if (flag('fixture', false)) {
+    const { buildFixtureMap } = await import('./fixtures');
+    map = buildFixtureMap({ fog: flag('fixturefog', false), withSky3d: flag('fixturesky3d', true) });
   }
   if (map) await renderer.loadMap(map, onProgress);
   state.loadMs = Math.round(performance.now() - start);
@@ -196,7 +199,7 @@ function frame(): void {
 
 declare global {
   interface Window {
-    __harness: {
+    __renderHarness: {
       state: HarnessState;
       renderer: Renderer;
       view: ViewState;
@@ -206,12 +209,24 @@ declare global {
       reload: (times: number) => Promise<{ textures: number; geometries: number; programs: number }>;
       info: () => ReturnType<Renderer['debugInfo']>;
       demo: () => void;
-      pick: (x: number, y: number) => { name: string; model: unknown; point: number[]; distance: number; transparent: boolean }[];
+      readPixel: (fx: number, fy: number) => number[];
+      readPixel: (fx: number, fy: number) => {
+    // render, then read the canvas back before the frame is presented
+    renderer.render(view);
+    const gl = renderer.gl;
+    const x = Math.min(gl.drawingBufferWidth - 1, Math.max(0, Math.floor(fx * gl.drawingBufferWidth)));
+    const y = Math.min(gl.drawingBufferHeight - 1, Math.max(0, Math.floor((1 - fy) * gl.drawingBufferHeight)));
+    const px = new Uint8Array(4);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    return Array.from(px);
+  },
+  pick: (x: number, y: number) => { name: string; model: unknown; point: number[]; distance: number; transparent: boolean }[];
     };
   }
 }
 
-window.__harness = {
+window.__renderHarness = {
   state,
   renderer,
   view,
@@ -236,6 +251,17 @@ window.__harness = {
   },
   info: () => renderer.debugInfo(),
   demo: () => demoContent(),
+  readPixel: (fx: number, fy: number) => {
+    // render, then read the canvas back before the frame is presented
+    renderer.render(view);
+    const gl = renderer.gl;
+    const x = Math.min(gl.drawingBufferWidth - 1, Math.max(0, Math.floor(fx * gl.drawingBufferWidth)));
+    const y = Math.min(gl.drawingBufferHeight - 1, Math.max(0, Math.floor((1 - fy) * gl.drawingBufferHeight)));
+    const px = new Uint8Array(4);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    return Array.from(px);
+  },
   pick: (x: number, y: number) => {
     const rc = new Raycaster();
     renderer.render(view);

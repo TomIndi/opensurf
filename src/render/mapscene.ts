@@ -142,9 +142,41 @@ interface PropGroup {
 }
 
 /** Merges static props into world-space geometry with per-vertex lighting (one group per material/cell). */
+/** True when a light cube carries no light at all (the loader found no lighting at the prop's origin). */
+export function isEmptyCube(cube: readonly (readonly number[])[] | undefined | null): boolean {
+  if (!cube || cube.length < 6) return true;
+  let s = 0;
+  for (let i = 0; i < 6; i++) for (let k = 0; k < 3; k++) s += Math.abs(cube[i]?.[k] ?? 0);
+  return !(s > 1e-6);
+}
+
+/**
+ * Light cube for props whose own cube is empty (lighting origin inside solid / outside the map): the average of
+ * the map's other prop cubes, or a neutral light when none has light. A pitch-black prop is never right.
+ */
+export function fallbackCube(props: readonly RenderProp[]): [number, number, number][] {
+  const acc: [number, number, number][] = [
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+  ];
+  let n = 0;
+  for (const p of props) {
+    const c = p?.ambientCube;
+    if (!c || isEmptyCube(c)) continue;
+    for (let i = 0; i < 6; i++) for (let k = 0; k < 3; k++) acc[i][k] += Math.min(4, Math.max(0, c[i][k] ?? 0));
+    n++;
+  }
+  if (!n) return acc.map(() => [0.75, 0.75, 0.75]) as [number, number, number][];
+  return acc.map((c) => [c[0] / n, c[1] / n, c[2] / n]) as [number, number, number][];
+}
+
 export function mergeProps(
   props: readonly RenderProp[],
-  opts: { sky3dArea: number; cellSize: number; envIndex: (p: Vec3) => number; usesEnv: (material: string) => boolean },
+  opts: { sky3dArea: number; cellSize: number; envIndex: (p: Vec3) => number; usesEnv: (material: string) => boolean; fallbackCube?: readonly (readonly number[])[] },
 ): { group: PropGroup; positions: Float32Array; normals: Float32Array; uvs: Float32Array; light: Float32Array; indices: Uint32Array; mins: Vec3; maxs: Vec3 }[] {
   const groups = new Map<string, PropGroup>();
   const cell = opts.cellSize > 0 ? opts.cellSize : 2048;
@@ -192,7 +224,7 @@ export function mergeProps(
       angleVectors(p.angles, f, r, u);
       const nv = Math.floor(p.positions.length / 3);
       const tint = p.color ? [srgbToLinear(p.color[0]), srgbToLinear(p.color[1]), srgbToLinear(p.color[2])] : [1, 1, 1];
-      const cube = p.ambientCube && p.ambientCube.length >= 6 ? p.ambientCube : null;
+      const cube = p.ambientCube && !isEmptyCube(p.ambientCube) ? p.ambientCube : (opts.fallbackCube ?? null);
       for (let i = 0; i < nv; i++) {
         const x = p.positions[i * 3];
         const y = p.positions[i * 3 + 1];
@@ -482,6 +514,7 @@ export class MapScene {
       cellSize: this.opts.propCellSize ?? 2048,
       envIndex: (p) => this.envIndexNear(p),
       usesEnv: (m) => !!r.materials.get(m)?.envmap && this.cubemaps.length > 0,
+      fallbackCube: fallbackCube(props),
     });
     for (const mg of merged) {
       const def = r.materials.get(mg.group.material);

@@ -1,0 +1,10 @@
+{
+  "_doc": "Hand-verified timer zone fixes for map builds whose SurfTimer preset doesn't fit (loaded by src/maps/zones.ts getZoneOverrides). Per map: 'zones' replace preset zones with the same type (t), group (g) and index (i) or are added; 'remove' drops preset zones by t/g/i. Boxes: a = mins, b = maxs (Source units). Every entry is checked again at load time (src/game/zoneresolve.ts zoneReachable) and covered by a real-map test (tests/gameworld_zone_overrides.test.ts). Original data, not derived from SurfTimer's ck_zones.",
+  "maps": {
+    "surf_utopia_njv": {
+      "note": "The surf_utopia_v3 preset (alias) puts the end 1790 units above this build's end ledge and a second start 251 units above the start floor. End = the end ledge: the only floor in the final hall (hull traces land at z -6224 over x -14336..-13824, |y| <= 1023; everything else drops to the z -8192 jail teleports), marked by the func_illusionary end pad #142 [-14336,-1023,-6224]-[-13823,1023,-6208], with the back-wall return teleport #141 (target 'start') in a recess at its far side. 256 units tall so a player sliding down the back wall enters it before touching #141 (top -6096).",
+      "zones": [{ "t": "end", "g": 0, "i": 0, "a": [-14336, -1024, -6224], "b": [-13824, 1024, -5968] }],
+      "remove": [{ "t": "start", "g": 0, "i": 0 }]
+    }
+  }
+}
