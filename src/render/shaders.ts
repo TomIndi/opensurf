@@ -235,7 +235,13 @@ void main() {
   albedo = mix(albedo, albedo2, clamp(vBlend, 0.0, 1.0));
 #endif
 #ifdef USE_ALPHATEST
+#ifdef USE_A2C
+  // alpha to coverage (MSAA): a sharp, antialiased cutout edge instead of a hard discard
+  float cover = clamp((albedo.a - uAlphaRef) / max(fwidth(albedo.a), 1e-4) + 0.5, 0.0, 1.0);
+  if (cover <= 0.0) discard;
+#else
   if (albedo.a < uAlphaRef) discard;
+#endif
 #endif
 #ifdef USE_DETAIL
   vec4 det = texture(detailMap, vDetailUv);
@@ -282,6 +288,9 @@ void main() {
 #endif
   col *= uBrightness;
   float alpha = mix(1.0, albedo.a, uTexAlpha) * uAlpha;
+#if defined(USE_ALPHATEST) && defined(USE_A2C)
+  alpha *= cover;
+#endif
   float f = fogFactor(vViewDepth);
   col = mix(col, uFogColor, f * (1.0 - uAdditive));
   col *= 1.0 - f * uAdditive;
@@ -301,6 +310,8 @@ uniform float uAlpha;
 uniform float uBrightness;
 uniform float uTexStrength;
 uniform vec3 uTint;
+uniform samplerCube envMap;
+uniform float uEnvFromSky;
 uniform vec3 uAmbSky;
 uniform vec3 uAmbGround;
 uniform vec3 uSunLight;
@@ -356,7 +367,8 @@ void main() {
   float fresnel = 0.02 + 0.98 * pow(1.0 - cosv, 5.0);
   vec3 R = reflect(V, n);
   R.z = abs(R.z);
-  vec3 refl = skyColor(normalize(R), 0.0);
+  // reflection: the nearest baked env_cubemap (indoor water reflects the room), else the sky
+  vec3 refl = uEnvFromSky > 0.5 ? skyColor(normalize(R), 0.0) : texture(envMap, R).rgb;
 #ifdef USE_LIGHTMAP
   vec3 light = mix(texture(lightmap, vLmUv).rgb, vec3(1.0), uFullbright);
 #else
@@ -374,9 +386,9 @@ void main() {
     alpha = 0.88;
   } else {
     col = mix(body, refl, fresnel * 0.85 + 0.05);
-    // sun glint
-    float sp = pow(max(dot(R, uSunDir), 0.0), 220.0);
-    col += uSunColor * sp * 3.0 * (1.0 - uFullbright * 0.5);
+    // sun glint (only when reflecting the open sky)
+    float sp = pow(max(dot(normalize(R), uSunDir), 0.0), 900.0);
+    col += uSunColor * sp * 1.6 * uEnvFromSky;
     alpha = clamp(mix(uAlpha, 1.0, fresnel), 0.0, 1.0);
   }
   col *= uBrightness;

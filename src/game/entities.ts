@@ -58,10 +58,8 @@ const SF_BUTTON_LOCKED = 0x800;
 const SF_ALL_PLAYERS = 0x01;
 
 const LOGIC_TIMER_MIN_INTERVAL = 0.01;
-/** trigger_hurt applies damage every half second (damage keyvalue is per second). */
+/** trigger_hurt applies damage every half second (damage keyvalue is per second): damage * 0.5 per hit. */
 const HURT_INTERVAL = 0.5;
-/** Damage keyvalue at or above this kills outright (surf "void" triggers use 1000+). */
-const INSTAKILL_DAMAGE = 100;
 /** +use reach (CS player use radius). */
 const USE_RANGE = 80;
 const BOOSTER_SOUND_INTERVAL = 0.5;
@@ -871,7 +869,11 @@ function leaveGround(ps: WorldHost['player']): void {
   ps.groundModel = -1;
 }
 
-/** trigger_hurt: `damage` per second applied every half second; lethal damage asks the host to kill. */
+/**
+ * trigger_hurt: `damage` per second, applied as damage * 0.5 every half second from the first touch (Source's
+ * HurtThink); the hit that takes health to 0 asks the host to kill (a surf "void" trigger with 1000+ damage
+ * kills on contact, a 100-damage one on its second hit half a second later).
+ */
 class TriggerHurt extends BaseTrigger {
   damage = 10;
   private nextHurt = -Infinity;
@@ -892,12 +894,6 @@ class TriggerHurt extends BaseTrigger {
     if (now < this.nextHurt - TIME_EPS) return;
     this.nextHurt = now + HURT_INTERVAL;
     if (!this.sys.playerTakesDamage(kvInt(this.kv.damagetype))) return;
-    if (this.damage >= INSTAKILL_DAMAGE) {
-      this.fire('onhurt', p);
-      this.fire('onhurtplayer', p);
-      this.sys.killPlayer(`${this.classname} ${this.targetname}`.trim());
-      return;
-    }
     const dmg = this.damage * HURT_INTERVAL;
     if (dmg === 0) return;
     if (dmg < 0) {
@@ -990,10 +986,12 @@ class LogicRelay extends LogicEnt {
 
 class LogicAuto extends LogicEnt {
   fireSpawn(): void {
-    // A dedicated server loading a map: new game + map spawn (+ multiplayer new map).
+    // A dedicated server loading a map: new game + map spawn (+ multiplayer new map), then CS:GO's first
+    // round starts (OnMultiNewRound: CS:GO-era maps put their setup logic there).
     this.fire('onnewgame', null);
     this.fire('onmapspawn', null);
     this.fire('onmultinewmap', null);
+    this.fire('onmultinewround', null);
     if (this.hasFlag(SF_AUTO_REMOVE_ON_FIRE)) this.sys.kill(this);
   }
 }

@@ -179,6 +179,8 @@ export interface MaterialFactoryOptions {
   /** Device anisotropy etc. are handled by the TextureCache. */
   textures: TextureCache;
   shared: SharedUniforms;
+  /** Alpha-tested surfaces use alpha to coverage (only with an MSAA target). */
+  alphaToCoverage?: boolean;
 }
 
 function variantDefines(def: MaterialDef, v: SurfaceVariant, hasImage2: boolean): Record<string, string | number | boolean> {
@@ -332,7 +334,10 @@ export class SurfaceMaterials {
     const translucent = def.translucent || def.additive;
     uniforms.uTexAlpha = { value: translucent && !def.alphaTest ? 1 : def.translucent ? 1 : 0 };
     uniforms.uAdditive = { value: def.additive ? 1 : 0 };
-    if (defines.USE_ALPHATEST !== undefined) uniforms.uAlphaRef = { value: Math.max(0.001, Math.min(1, def.alphaTestRef || 0.5)) };
+    if (defines.USE_ALPHATEST !== undefined) {
+      uniforms.uAlphaRef = { value: Math.max(0.001, Math.min(1, def.alphaTestRef || 0.5)) };
+      if (this.opts.alphaToCoverage && !translucent) defines.USE_A2C = '';
+    }
     if (defines.USE_BLEND2 !== undefined) {
       uniforms.map2 = {
         value: def.image2 && def.image2.width > 0 ? t.image(def.image2, { srgb: true, repeat: true }) : t.solid(def.fallbackColor2 ?? def.fallbackColor),
@@ -384,6 +389,7 @@ export class SurfaceMaterials {
       m.depthWrite = true;
       m.blending = NoBlending;
     }
+    if (defines.USE_A2C !== undefined) m.alphaToCoverage = true;
     if (v.decal) {
       m.depthWrite = false;
       m.polygonOffset = true;
@@ -401,6 +407,8 @@ export class SurfaceMaterials {
     // procedural water images carry no information beyond the colour: use them only faintly
     uniforms.uTexStrength = { value: def.image && def.shader !== 'water' ? 0.35 : 0.0 };
     uniforms.uAlpha = { value: Math.max(0.55, Math.min(0.92, def.alpha < 1 ? def.alpha + 0.25 : 0.8)) * (mu ? mu.alpha : 1) };
+    uniforms.envMap = { value: v.envCube };
+    uniforms.uEnvFromSky = { value: v.envCube ? 0 : 1 };
     const defines: Record<string, string> = {};
     if (v.lightmap) defines.USE_LIGHTMAP = '';
     const m = new ShaderMaterial({

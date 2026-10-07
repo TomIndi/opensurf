@@ -157,7 +157,7 @@ describe('resolveZones priority', () => {
     saveUserZones('surf_prio', null);
     expect(await resolveZones(map)).toMatchObject({ source: 'heuristic' });
     const empty = buildMap({ name: 'surf_none', world: [FLOOR] }).map;
-    expect(await resolveZones(empty)).toEqual({ zones: [], source: 'none' });
+    expect(await resolveZones(empty)).toMatchObject({ zones: [], source: 'none' });
   });
 
   it('tries other builds of the map when the exact preset does not fit', async () => {

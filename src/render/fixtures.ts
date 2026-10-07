@@ -151,7 +151,7 @@ function cubeProp(material: string, origin: Vec3, yaw: number, cube?: [number, n
 
 /**
  * The fixture map. Room: x/y in [-512, 512], z in [0, 384], ceiling = sky (z 384), spawn at the origin looking
- * +X. The lightmap atlas is 4x1: texel 0 = 0.25 (dim), 1 = 1.0, 2 = 2.0 (overbright), 3 = 0.5.
+ * +X. The lightmap atlas is 4x2: row 0 texels 0 = 0.25 (dim), 1 = 1.0, 2 = 2.0 (overbright), 3 = 0.5; row 1 = 4.0.
  */
 export function buildFixtureMap(opts: { fog?: boolean; withSky3d?: boolean } = {}): LoadedMap {
   const materials = new Map<string, MaterialDef>();
@@ -176,8 +176,12 @@ export function buildFixtureMap(opts: { fog?: boolean; withSky3d?: boolean } = {
   );
   add(fixtureMaterial('fixture/sky3d', { unlit: true, image: solid(4, 4, [255, 0, 255, 255]), shader: 'unlitgeneric' }));
   add(fixtureMaterial('fixture/prop', { shader: 'vertexlitgeneric', image: solid(4, 4, [255, 255, 255, 255]) }));
+  // texture orientation: 2x2 image, top-left red, top-right green, bottom-left blue, bottom-right white
+  const orient = new Uint8Array([255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255]);
+  add(fixtureMaterial('fixture/orient', { unlit: true, shader: 'unlitgeneric', image: { width: 2, height: 2, data: orient, hasAlpha: false } }));
 
-  const lm = (i: number): [number, number, number, number] => [(i + 0.5) / 4, 0.5, (i + 0.5) / 4, 0.5];
+  // every lightmapped quad samples a single texel centre of the 4x2 atlas (row 0 at v = 0.25)
+  const lm = (i: number): [number, number, number, number] => [(i + 0.5) / 4, 0.25, (i + 0.5) / 4, 0.25];
   const batches: RenderBatch[] = [];
   // floor: lightmap texel 1 (fully lit)
   batches.push(quadBatch('fixture/floor', [v(-512, -512, 0), v(512, -512, 0), v(512, 512, 0), v(-512, 512, 0)], v(0, 0, 1), { lightmap: lm(1), uvScale: 8 }));
@@ -198,6 +202,8 @@ export function buildFixtureMap(opts: { fog?: boolean; withSky3d?: boolean } = {
   // scrolling + additive surfaces on the -y wall
   batches.push(quadBatch('fixture/scroll', [v(-300, -511, 50), v(-200, -511, 50), v(-200, -511, 150), v(-300, -511, 150)], v(0, 1, 0)));
   batches.push(quadBatch('fixture/additive', [v(-100, -511, 50), v(0, -511, 50), v(0, -511, 150), v(-100, -511, 150)], v(0, 1, 0)));
+  // texture orientation quad on the -x wall, facing the spawn: uv (0,0) at its top-left as seen from the origin
+  batches.push(quadBatch('fixture/orient', [v(-500, -50, 150), v(-500, 50, 150), v(-500, 50, 50), v(-500, -50, 50)], v(1, 0, 0)));
   // displacement blend
   batches.push(quadBatch('fixture/blend', [v(-500, 300, 1), v(-300, 300, 1), v(-300, 500, 1), v(-500, 500, 1)], v(0, 0, 1), { alphas: [0, 1, 1, 0], lightmap: lm(1) }));
   // 3D skybox content: a magenta block in area 2 around the sky camera; scaled x16 it appears far above the room
@@ -205,7 +211,8 @@ export function buildFixtureMap(opts: { fog?: boolean; withSky3d?: boolean } = {
     const o = FIXTURE_SKY3D.origin;
     batches.push(...boxBatches('fixture/sky3d', v(o.x - 40, o.y - 40, o.z + 60), v(o.x + 40, o.y + 40, o.z + 140), false, { area: FIXTURE_SKY3D.area }));
   }
-  const atlas = new Float32Array([0.25, 0.25, 0.25, 1, 1, 1, 1, 1, 2, 2, 2, 1, 0.5, 0.5, 0.5, 1]);
+  // row 1 is a decoy (4.0 = very overbright): sampling it would mean the atlas is flipped vertically
+  const atlas = new Float32Array([0.25, 0.25, 0.25, 1, 1, 1, 1, 1, 2, 2, 2, 1, 0.5, 0.5, 0.5, 1, 4, 4, 4, 1, 4, 4, 4, 1, 4, 4, 4, 1, 4, 4, 4, 1]);
   const skyFace = (c: [number, number, number]) => solid(8, 8, [c[0], c[1], c[2], 255]);
   const props: RenderProp[] = [
     cubeProp('fixture/prop', v(-200, -200, 8), 0, [
@@ -229,7 +236,7 @@ export function buildFixtureMap(opts: { fog?: boolean; withSky3d?: boolean } = {
     collision: new CollisionWorld([]),
     render: {
       batches,
-      lightmap: { width: 4, height: 1, data: atlas },
+      lightmap: { width: 4, height: 2, data: atlas },
       materials,
       sky: {
         name: 'fixture_sky',

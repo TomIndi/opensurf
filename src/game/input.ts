@@ -11,7 +11,8 @@
 //  - The usercmd of each tick: forwardmove = cl_forwardspeed·(+forward) − cl_backspeed·(+back),
 //    sidemove = cl_sidespeed·(+moveright − +moveleft), upmove = cl_upspeed·(+moveup − +movedown) (plus
 //    +jump/+duck in noclip), button bits, view angles. Each (+button) is Source's KeyState amount: 1 held,
-//    0.5 on the tick of a fresh press, 0.25 for a tap that began and ended since the last tick (see keyState).
+//    0.5 on the first tick after a press in the same frame, 0.25 for a tap that began and ended within that
+//    frame (see KButton.keyState).
 //  - DOM: pointer lock on canvas click (raw input when supported), keys/mouse buttons/wheel run their binds while
 //    playing (ignored while the console/chat has focus), losing the pointer lock pauses the game.
 import { QAngle, normalizeAngle, qa } from '../core/angles';

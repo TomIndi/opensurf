@@ -210,18 +210,7 @@ declare global {
       info: () => ReturnType<Renderer['debugInfo']>;
       demo: () => void;
       readPixel: (fx: number, fy: number) => number[];
-      readPixel: (fx: number, fy: number) => {
-    // render, then read the canvas back before the frame is presented
-    renderer.render(view);
-    const gl = renderer.gl;
-    const x = Math.min(gl.drawingBufferWidth - 1, Math.max(0, Math.floor(fx * gl.drawingBufferWidth)));
-    const y = Math.min(gl.drawingBufferHeight - 1, Math.max(0, Math.floor((1 - fy) * gl.drawingBufferHeight)));
-    const px = new Uint8Array(4);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
-    return Array.from(px);
-  },
-  pick: (x: number, y: number) => { name: string; model: unknown; point: number[]; distance: number; transparent: boolean }[];
+      pick: (x: number, y: number) => { name: string; model: unknown; point: number[]; distance: number; transparent: boolean }[];
     };
   }
 }

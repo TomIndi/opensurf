@@ -1,7 +1,8 @@
 // Console commands (Source names: map, disconnect, retry, noclip, kill, setpos, setang, getpos, alias, toggle,
 // incrementvar, cvarlist, find, help, echo, clear, status, say ...) and the SourceMod/SurfTimer chat commands
-// (!r, !s, !b, !back, !saveloc, !tele, !prac, !noclip, !pb, !top, !mi, !replay, !ghost, !hide, !showkeys,
-// !speed, !zones, !end, !help, !fov, !sens). Chat commands are also console commands as sm_<name>, like
+// (!r, !s, !b, !back, !stop, !saveloc, !tele, !prac, !noclip, !pb, !top, !wrb, !stages, !bonuses, !mi, !replay,
+// !ghost, !hide, !showkeys, !speed, !zones, !end, !help, !fov, !sens), with SurfTimer's aliases (!start = !r,
+// !teleport / !stuck = !back, !btop = !wrb). Chat commands are also console commands as sm_<name>, like
 // SourceMod registers them.
 //
 // Chat semantics follow SourceMod: "!cmd" is shown in chat and runs the command, "/cmd" runs it silently; a
@@ -31,8 +32,9 @@ import {
 import type { ChatColor, ChatSegment, GameState, SoundApi, TimerState, UiApi } from './api';
 import { addConfigProvider, loadSavedConfig, scheduleConfigSave } from './binds';
 import type { IEntitySystem, IReplaySystem, ISurfTimer, RunRecord } from './contracts';
-import { getCompletions } from './records';
+import { currentTickrate, getCompletions, getStageBest, tickLabel } from './records';
 import { formatRunTime } from './timer';
+import { getZoneReport } from './zoneresolve';
 import { showZonesHelp } from './zoneeditor';
 import type { ZoneEditor } from './zoneeditor';
 
@@ -47,6 +49,10 @@ export interface TimerExtras {
   readonly timerState: TimerState;
   dispose(): void;
   invalidateRecords(): void;
+  /** !stop (SurfTimer sm_stop). False when no run was in progress. */
+  stopTimer(): boolean;
+  /** Ticks per second the records/replays of this session belong to. */
+  tickrate(): number;
 }
 export type GameTimer = ISurfTimer & Partial<TimerExtras>;
 
@@ -156,11 +162,19 @@ function currentGroup(timer: GameTimer): number {
 export const ZONE_SOURCE_NAMES: Readonly<Record<ZoneSource, string>> = {
   user: 'your zones',
   preset: 'SurfTimer',
-  momentum: 'map triggers',
+  momentum: 'Momentum timer triggers',
   builtin: 'built-in',
   heuristic: 'automatic (start zone only)',
+  map: 'map timer triggers',
   none: 'none',
 };
+
+/** Where the zones came from, in detail when resolveZones() reported on this map ("SurfTimer preset + map timer triggers (bonus 1-2)"). */
+export function zoneSourceText(map: LoadedMap, source: ZoneSource): string {
+  const r = getZoneReport(map.name);
+  if (r && r.source === source && r.parts.length) return r.parts.join(' + ');
+  return ZONE_SOURCE_NAMES[source] ?? source;
+}
 
 /** Stage/checkpoint/bonus counts from zone definitions. */
 export function zoneSummary(zones: readonly ZoneDef[]): { stages: number; checkpoints: number; bonuses: number[]; hasEnd: boolean } {
@@ -186,7 +200,7 @@ export function mapInfoSegments(map: LoadedMap, tier: number | null, zones: read
   if (sum.stages > 0) out.push(seg(' | ', 'grey'), seg(`Staged (${sum.stages} stages)`));
   else out.push(seg(' | ', 'grey'), seg(sum.checkpoints ? `Linear (${sum.checkpoints} checkpoints)` : 'Linear'));
   if (sum.bonuses.length) out.push(seg(' | ', 'grey'), seg(sum.bonuses.length === 1 ? '1 bonus' : `${sum.bonuses.length} bonuses`));
-  out.push(seg(' | ', 'grey'), seg('Zones: ', 'grey'), seg(ZONE_SOURCE_NAMES[source] ?? source, source === 'none' ? 'lightred' : 'default'));
+  out.push(seg(' | ', 'grey'), seg('Zones: ', 'grey'), seg(zoneSourceText(map, source), source === 'none' ? 'lightred' : 'default'));
   return out;
 }
 
@@ -320,19 +334,27 @@ function noclipToggle(ctx: CommandContext, s: CommandSession): void {
   reply(ctx, seg('Noclip '), on ? seg('enabled', 'lime') : seg('disabled', 'lightred'), seg('.'));
 }
 
+/** The tickrate the session's records belong to (CS:GO leaderboards are per tickrate). */
+function sessionTickrate(s: CommandSession): number {
+  const t = s.timer.tickrate;
+  return typeof t === 'function' ? t.call(s.timer) : currentTickrate();
+}
+
 function showPb(ctx: CommandContext, s: CommandSession, group: number): void {
   const recs = s.timer.getRecords(group);
   const where = group > 0 ? `${s.map.name} Bonus ${group}` : s.map.name;
+  const tick = sessionTickrate(s);
   if (!recs.length) {
-    reply(ctx, seg("You haven't finished "), seg(where, 'gold'), seg(' yet.'));
+    reply(ctx, seg("You haven't finished "), seg(where, 'gold'), seg(` at ${tickLabel(tick)} tick yet.`));
     return;
   }
   const pb = recs[0];
-  const total = Math.max(getCompletions(s.map.name, group), recs.length);
+  const total = Math.max(getCompletions(s.map.name, group, tick), recs.length);
   reply(
     ctx,
     seg('Your PB on '),
     seg(where, 'gold'),
+    seg(` (${tickLabel(tick)} tick)`, 'grey'),
     seg(': '),
     seg(formatRunTime(pb.time), 'lime'),
     seg(` (${total} ${total === 1 ? 'completion' : 'completions'}, ${pb.jumps} jumps, ${Math.round(pb.sync)}% sync)`, 'grey'),
@@ -342,11 +364,12 @@ function showPb(ctx: CommandContext, s: CommandSession, group: number): void {
 function showTop(ctx: CommandContext, s: CommandSession, group: number): void {
   const recs: RunRecord[] = s.timer.getRecords(group);
   const where = group > 0 ? `${s.map.name} Bonus ${group}` : s.map.name;
+  const tick = tickLabel(sessionTickrate(s));
   if (!recs.length) {
-    reply(ctx, seg('No times on '), seg(where, 'gold'), seg(' yet.'));
+    reply(ctx, seg('No times on '), seg(where, 'gold'), seg(` at ${tick} tick yet.`));
     return;
   }
-  reply(ctx, seg('Top times on '), seg(where, 'gold'), seg(':'));
+  reply(ctx, seg('Top times on '), seg(where, 'gold'), seg(` (${tick} tick)`, 'grey'), seg(':'));
   const best = recs[0].time;
   recs.slice(0, 10).forEach((r, i) => {
     const d = new Date(r.date);
@@ -361,6 +384,68 @@ function showTop(ctx: CommandContext, s: CommandSession, group: number): void {
 
 function showMapInfo(ctx: CommandContext, s: CommandSession): void {
   reply(ctx, ...mapInfoSegments(s.map, s.tier, s.timer.getZones(), s.timer.zoneSource));
+  for (const n of zoneNotes(s)) reply(ctx, seg(n, 'orange'));
+}
+
+/** Problems resolveZones() found with this map's zones (when the timer still uses that resolution). */
+function zoneNotes(s: CommandSession): string[] {
+  const r = getZoneReport(s.map.name);
+  return r && r.source === s.timer.zoneSource ? r.notes : [];
+}
+
+/** Bonus numbers of the map (courses with a start zone). */
+function bonusNumbers(s: CommandSession): number[] {
+  return zoneSummary(s.timer.getZones()).bonuses;
+}
+
+/** !wrb / !btop [n]: top times of bonus n (default: the current bonus, else bonus 1). */
+function showBonusTop(ctx: CommandContext, s: CommandSession, arg: string | undefined): void {
+  const bonuses = bonusNumbers(s);
+  const g = arg !== undefined ? parseIntArg(arg) : null;
+  if (arg !== undefined && (g === null || g < 1)) {
+    reply(ctx, seg('Usage: !wrb <bonus number>', 'lightred'));
+    return;
+  }
+  const cur = currentGroup(s.timer);
+  const group = g ?? (cur > 0 ? cur : (bonuses[0] ?? 1));
+  if (!bonuses.includes(group)) {
+    reply(ctx, seg(bonuses.length ? `Bonus ${group} doesn't exist on this map.` : 'This map has no bonus.', 'lightred'));
+    return;
+  }
+  showTop(ctx, s, group);
+}
+
+/** !stages: the stages of the course (and your best stage times at this tickrate). */
+function showStages(ctx: CommandContext, s: CommandSession): void {
+  const group = currentGroup(s.timer);
+  let n = 0;
+  for (const z of s.timer.getZones()) if (z.type === 'stage' && z.group === group && z.index > n) n = z.index;
+  const where = group > 0 ? `${s.map.name} Bonus ${group}` : s.map.name;
+  if (n < 2) {
+    reply(ctx, seg(where, 'gold'), seg(' is linear (no stages).'));
+    return;
+  }
+  reply(ctx, seg(where, 'gold'), seg(` has ${n} stages: `), seg(`!s 1 - !s ${n}`, 'lightblue'), seg('.'));
+  const tick = sessionTickrate(s);
+  const segs: ChatSegment[] = [];
+  for (let i = 1; i <= n; i++) {
+    const b = getStageBest(s.map.name, group, i, tick);
+    if (!b) continue;
+    segs.push(seg(segs.length ? ' · ' : '', 'grey'), seg(`S${i} `, 'lightblue'), seg(formatRunTime(b.time), 'lime'));
+  }
+  if (segs.length) reply(ctx, seg(`Stage bests (${tickLabel(tick)} tick): `), ...segs);
+}
+
+/** !bonuses: the map's bonus courses. */
+function showBonuses(ctx: CommandContext, s: CommandSession): void {
+  const b = bonusNumbers(s);
+  if (!b.length) {
+    reply(ctx, seg('This map has no bonus.'));
+    return;
+  }
+  const segs: ChatSegment[] = [];
+  b.forEach((g, i) => segs.push(seg(i ? ', ' : ''), seg(`!b ${g}`, 'lightblue')));
+  reply(ctx, seg(`${s.map.name} has ${b.length === 1 ? '1 bonus' : `${b.length} bonuses`}: `), ...segs, seg('.'));
 }
 
 function setCvarFromChat(ctx: CommandContext, name: string, label: string, arg: string | undefined, fmt: (n: number) => string): void {
@@ -376,9 +461,9 @@ function setCvarFromChat(ctx: CommandContext, name: string, label: string, arg: 
 }
 
 const HELP_LINES: ReadonlyArray<ReadonlyArray<[string, string]>> = [
-  [['!r', 'restart'], ['!s <n>', 'stage'], ['!b <n>', 'bonus'], ['!back', 'stage start'], ['!end', 'end zone']],
-  [['!saveloc', 'save'], ['!tele [n]', 'teleport'], ['!prac', 'practice'], ['!noclip', 'noclip']],
-  [['!pb', 'personal best'], ['!top', 'top times'], ['!mi', 'map info'], ['!replay', 'watch PB']],
+  [['!r', 'restart'], ['!s <n>', 'stage'], ['!b <n>', 'bonus'], ['!back', 'stage start'], ['!stop', 'stop timer'], ['!end', 'end zone']],
+  [['!saveloc', 'save'], ['!tele [n]', 'saveloc teleport'], ['!prac', 'practice'], ['!noclip', 'noclip']],
+  [['!pb', 'personal best'], ['!top', 'top times'], ['!wrb <n>', 'bonus top'], ['!stages', ''], ['!bonuses', ''], ['!mi', 'map info'], ['!replay', 'watch PB']],
   [['!ghost', ''], ['!hide', ''], ['!showkeys', ''], ['!speed', ''], ['!fov <n>', ''], ['!sens <n>', ''], ['!zones', '']],
 ];
 
@@ -401,7 +486,7 @@ function showHelp(ctx: CommandContext): void {
 
 export const CHAT_COMMANDS: readonly ChatCommand[] = [
   {
-    names: ['r', 'restart'],
+    names: ['r', 'restart', 'start'],
     usage: '!r',
     help: 'Restart the map (main course start).',
     map: true,
@@ -445,13 +530,24 @@ export const CHAT_COMMANDS: readonly ChatCommand[] = [
     },
   },
   {
-    names: ['back', 'stuck'],
+    names: ['back', 'stuck', 'teleport'],
     usage: '!back',
     help: 'Restart the current stage (or the course on linear maps).',
     map: true,
     run: (ctx, _a, s) => {
       if (ctx.spectating) ctx.stopSpectate();
       s!.timer.restartStage();
+    },
+  },
+  {
+    names: ['stop'],
+    usage: '!stop',
+    help: 'Stop your timer.',
+    map: true,
+    run: (ctx, _a, s) => {
+      const t = s!.timer;
+      const stopped = typeof t.stopTimer === 'function' ? t.stopTimer() : false;
+      if (!stopped) reply(ctx, seg('Your timer is not running.', 'lightred'));
     },
   },
   {
@@ -465,7 +561,7 @@ export const CHAT_COMMANDS: readonly ChatCommand[] = [
     },
   },
   {
-    names: ['tele', 'tp', 'teleport', 'loadloc'],
+    names: ['tele', 'tp', 'loadloc'],
     usage: '!tele [n]',
     help: 'Teleport to your last (or n-th) saved location (practice mode).',
     map: true,
@@ -546,6 +642,27 @@ export const CHAT_COMMANDS: readonly ChatCommand[] = [
       const g = args[0] !== undefined ? parseIntArg(args[0]) : null;
       showTop(ctx, s!, g !== null && g >= 0 ? g : currentGroup(s!.timer));
     },
+  },
+  {
+    names: ['wrb', 'btop', 'bonustop'],
+    usage: '!wrb [n]',
+    help: 'Best times on bonus n.',
+    map: true,
+    run: (ctx, args, s) => showBonusTop(ctx, s!, args[0]),
+  },
+  {
+    names: ['stages'],
+    usage: '!stages',
+    help: 'List the stages of the course and your best stage times.',
+    map: true,
+    run: (ctx, _a, s) => showStages(ctx, s!),
+  },
+  {
+    names: ['bonuses'],
+    usage: '!bonuses',
+    help: 'List the bonus courses of the map.',
+    map: true,
+    run: (ctx, _a, s) => showBonuses(ctx, s!),
   },
   {
     names: ['mi', 'tier', 'mapinfo', 'm'],
@@ -1157,6 +1274,7 @@ export function welcomeMessage(ctx: CommandContext, s: CommandSession): void {
   const zones = s.timer.getZones();
   reply(ctx, seg('Welcome to '), seg(s.map.name, 'lightblue'), seg('! Type '), seg('!help', 'gold'), seg(' for the commands.'));
   reply(ctx, ...mapInfoSegments(s.map, s.tier, zones, s.timer.zoneSource));
+  for (const n of zoneNotes(s)) reply(ctx, seg(n, 'orange'));
   const sum = zoneSummary(zones);
   if (!zones.length) reply(ctx, seg('This map has no timer zones: ', 'lightred'), seg('!zones', 'gold'), seg(' to create them.'));
   else if (!sum.hasEnd) reply(ctx, seg('No end zone found for this map: the timer only starts. ', 'orange'), seg('!zones', 'gold'), seg(' to add one.'));

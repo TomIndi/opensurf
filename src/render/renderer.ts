@@ -289,7 +289,7 @@ export class Renderer implements RendererApi {
     report('Building the scene', 0, 1);
     const textures = new TextureCache(this.caps);
     textures.setAnisotropy(this.settings.maxAnisotropy);
-    const materials = new SurfaceMaterials({ textures, shared: this.shared });
+    const materials = new SurfaceMaterials({ textures, shared: this.shared, alphaToCoverage: this.samples > 0 });
     materials.setWireframe(this.settings.wireframe);
     const scene = new MapScene(map, { textures, materials, shared: this.shared });
     const cleanup = () => {

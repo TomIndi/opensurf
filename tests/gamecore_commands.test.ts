@@ -365,6 +365,95 @@ describe('surf chat commands', () => {
     expect(t.ui.lastText()).toContain("Bonus 1 doesn't exist");
   });
 
+  it("SurfTimer aliases: !start = !r, !teleport = !back (not the saveloc teleport); !tele stays the saveloc teleport", () => {
+    const s = t.game.session!;
+    t.game.teleportPlayer(v3(900, 0, 0), null, null);
+    t.game.say('/start');
+    expect(Math.abs(s.player.origin.x)).toBeLessThan(1);
+    expect(s.timer.getHud().state).toBe('startzone');
+    t.game.say('/saveloc');
+    t.game.teleportPlayer(v3(900, 0, 0), null, null);
+    t.game.say('/teleport'); // linear map: !back restarts the course, no practice mode
+    expect(Math.abs(s.player.origin.x)).toBeLessThan(1);
+    expect(s.timer.inPractice).toBe(false);
+    t.game.teleportPlayer(v3(900, 0, 0), null, null);
+    t.game.say('/tele');
+    expect(s.timer.inPractice).toBe(true);
+    expect(chatCommandNames()).toEqual(expect.arrayContaining(['start', 'teleport', 'stop', 'wrb', 'btop', 'stages', 'bonuses']));
+  });
+
+  it('noclip back into the start zone then noclip off: start zone again, and the next run is saved (not practice)', () => {
+    const s = t.game.session!;
+    t.game.executeCommand('+forward');
+    t.game.runTicks(150);
+    t.game.executeCommand('-forward');
+    expect(s.timer.getHud().state).toBe('running');
+    t.game.say('/noclip');
+    expect(s.timer.getHud().state).toBe('practice');
+    t.game.teleportPlayer(v3(0, 0, 0), null, v3()); // "flies" back into the start zone
+    t.game.runTicks(5);
+    t.game.say('/noclip');
+    t.game.runTicks(150);
+    expect(s.timer.getHud()).toMatchObject({ state: 'startzone', time: 0 });
+    expect(s.timer.inPractice).toBe(false);
+    t.game.executeCommand('+forward');
+    t.game.runTicks(800);
+    t.game.executeCommand('-forward');
+    expect(s.timer.getHud().state).toBe('finished');
+    expect(t.ui.texts().some((l) => l.includes('practice — not saved'))).toBe(false);
+    expect(s.timer.getRecords(0)).toHaveLength(1);
+  });
+
+  it('!stop stops a running timer', () => {
+    const s = t.game.session!;
+    t.game.say('/stop');
+    expect(t.ui.lastText()).toContain('not running');
+    t.game.executeCommand('+forward');
+    t.game.runTicks(150);
+    t.game.executeCommand('-forward');
+    expect(s.timer.getHud().state).toBe('running');
+    t.game.say('/stop');
+    expect(s.timer.getHud().state).toBe('stopped');
+    expect(t.ui.lastText()).toContain('Timer stopped');
+  });
+
+  it('!stages / !bonuses / !wrb on a map with stages and a bonus', async () => {
+    t.game.disconnect();
+    const zone = (type: 'start' | 'end' | 'stage', group: number, index: number, x: number, y = 0) => ({
+      type,
+      group,
+      index,
+      mins: v3(x - 100, y - 100, 0),
+      maxs: v3(x + 100, y + 100, 128),
+    });
+    t = await loadedGame(
+      makeTestMap({
+        name: 'surf_staged_test',
+        zones: [zone('start', 0, 0, 0), zone('stage', 0, 2, 600), zone('stage', 0, 3, 1000), zone('end', 0, 0, 1500), zone('start', 1, 0, 0, 1500), zone('end', 1, 0, 1500, 1500)],
+      }),
+    );
+    t.game.say('/stages');
+    expect(t.ui.lastText()).toBe('[Surf] surf_staged_test has 3 stages: !s 1 - !s 3.');
+    t.game.say('/bonuses');
+    expect(t.ui.lastText()).toBe('[Surf] surf_staged_test has 1 bonus: !b 1.');
+    t.game.say('/wrb');
+    expect(t.ui.lastText()).toBe('[Surf] No times on surf_staged_test Bonus 1 at 100 tick yet.');
+    t.game.say('/btop 2');
+    expect(t.ui.lastText()).toContain("Bonus 2 doesn't exist");
+    // a bonus run: !b 1, walk out of its start (+y side open), into its end
+    t.game.say('/b 1');
+    const s = t.game.session!;
+    t.game.teleportPlayer(v3(0, 1500, 0), { pitch: 0, yaw: 0, roll: 0 }, v3());
+    t.game.setViewAngles(0, 0);
+    t.game.executeCommand('+forward');
+    for (let i = 0; i < 1200 && s.timer.getHud().state !== 'finished'; i++) t.game.runTicks(1);
+    t.game.executeCommand('-forward');
+    expect(s.timer.getHud()).toMatchObject({ state: 'finished', bonus: 1 });
+    t.game.say('/wrb 1');
+    expect(t.ui.texts().at(-2)).toBe('[Surf] Top times on surf_staged_test Bonus 1 (100 tick):');
+    expect(t.ui.lastText()).toMatch(/^#1 00:0\d\.\d{3}/);
+  });
+
   it('!end teleports to the end zone (practice)', () => {
     const s = t.game.session!;
     t.game.say('/end');
@@ -381,7 +470,7 @@ describe('surf chat commands', () => {
     t.game.runTicks(800);
     t.game.executeCommand('-forward');
     t.game.say('/pb');
-    expect(t.ui.lastText()).toMatch(/Your PB on surf_gamecore_test: 00:0\d\.\d{3} \(1 completion/);
+    expect(t.ui.lastText()).toMatch(/Your PB on surf_gamecore_test \(100 tick\): 00:0\d\.\d{3} \(1 completion/);
     t.game.say('/top');
     expect(t.ui.lastText()).toMatch(/^#1 00:0\d\.\d{3}/);
   });

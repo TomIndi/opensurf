@@ -471,7 +471,8 @@ export class MapScene {
       const center = validBox(b.mins, b.maxs)
         ? { x: (b.mins.x + b.maxs.x) / 2, y: (b.mins.y + b.maxs.y) / 2, z: (b.mins.z + b.maxs.z) / 2 }
         : { x: pos[0], y: pos[1], z: pos[2] };
-      const envKey = this.envFor(d, center);
+      // water reflects the nearest baked cubemap (Source's cheap water uses env_cubemap), else the sky
+      const envKey = d.isWater ? this.envIndexNear(center) : this.envFor(d, center);
       const v: SurfaceVariant = {
         lightmap: lit ? this.lightmapTex : null,
         vertexLight: false,

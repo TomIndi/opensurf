@@ -76,8 +76,13 @@ describe.skipIf(!SUMMER || !existsSync(SUMMER))('large map (surf_summer_ksf)', (
     const z = await resolveZones(map);
     expect(z.source).toBe('momentum');
     expect(z.zones.filter((q) => q.type === 'stage')).toHaveLength(10);
-    expect(z.zones.filter((q) => q.type === 'start')).toHaveLength(1);
-    expect(z.zones.filter((q) => q.type === 'end')).toHaveLength(1);
+    expect(z.zones.filter((q) => q.type === 'start' && q.group === 0)).toHaveLength(1);
+    expect(z.zones.filter((q) => q.type === 'end' && q.group === 0)).toHaveLength(1);
+    // the bonus the Momentum triggers lack comes from the map's zone_b1_start / zone_b1_end triggers
+    expect(z.report.parts).toEqual(['Momentum timer triggers', 'map timer triggers (bonus 1)']);
+    const b1 = z.zones.find((q) => q.type === 'start' && q.group === 1)!;
+    expect(b1.mins).toEqual(map.models[map.entities.find((e) => e.targetname === 'zone_b1_start')!.model].mins);
+    expect(z.zones.some((q) => q.type === 'end' && q.group === 1)).toBe(true);
     const host = hostForMap(map, map.spawns[0].origin);
     const ents = new EntitySystem(host);
     host.entities = ents;
@@ -90,6 +95,12 @@ describe.skipIf(!SUMMER || !existsSync(SUMMER))('large map (surf_summer_ksf)', (
     timer.tick();
     expect(timer.getHud()).toMatchObject({ mapType: 'staged', stageCount: 11 });
     expect(ents.diagnostics().unknownInputs.size).toBe(0);
+    // !b 1: spawned standing in the bonus start zone
+    timer.restart(1);
+    host.advance();
+    ents.tick();
+    timer.tick();
+    expect(timer.getHud()).toMatchObject({ state: 'startzone', bonus: 1 });
   });
 });
 

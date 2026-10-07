@@ -394,10 +394,10 @@ export function mapTriggerZones(map: LoadedMap): ZoneDef[] {
     else if (k.type === 'stage-end') {
       if (hasEnd || k.index < lastStage) continue;
       type = 'end';
-    } else {
+    } else if (k.type === 'stage' || k.type === 'checkpoint') {
       type = k.type;
       index = k.index;
-    }
+    } else continue;
     for (const [mins, maxs] of r.boxes) {
       let idx = index;
       if (type === 'start' || type === 'end') {
@@ -408,7 +408,11 @@ export function mapTriggerZones(map: LoadedMap): ZoneDef[] {
       out.push({ type, group: k.group, index: idx, mins, maxs });
     }
   }
-  return sanitizeZones(out);
+  // a "bonus" whose start is the main start box (maps that filter one course two ways) is no course of its own
+  const clean = sanitizeZones(out);
+  const mainStarts = clean.filter((z) => z.group === 0 && isStartType(z));
+  const kept = clean.filter((z) => !(z.group > 0 && isStartType(z) && mainStarts.some((m) => sameZoneBox(m, z))));
+  return kept.filter((z) => z.group === 0 || kept.some((s) => s.group === z.group && isStartType(s)));
 }
 
 // ------------------------------------------------------------------------------------------ merging
@@ -453,10 +457,11 @@ export function fillMissingZones(base: readonly ZoneDef[], extra: readonly ZoneD
     const have = out.filter((z) => z.group === g);
     let add: ZoneDef[] = [];
     if (!have.some(isStartType)) {
-      const starts = ex.filter(isStartType);
-      if (!starts.length) continue;
-      if (starts.some((s) => out.some((o) => isStartType(o) && sameZoneBox(o, s)))) continue;
-      add = ex;
+      // starts that are the same space as a start already present are copies, not a course of their own
+      const copies = ex.filter((s) => isStartType(s) && out.some((o) => isStartType(o) && sameZoneBox(o, s)));
+      const rest = ex.filter((q) => !copies.includes(q));
+      if (!rest.some(isStartType)) continue;
+      add = rest;
     } else {
       if (!have.some((z) => z.type === 'end')) add.push(...ex.filter((z) => z.type === 'end'));
       if (!have.some((z) => z.type === 'stage' || z.type === 'checkpoint')) add.push(...ex.filter((z) => z.type === 'stage' || z.type === 'checkpoint'));
@@ -570,9 +575,6 @@ export function getZoneReport(mapName: string): ZoneReport | null {
 }
 
 function finishReport(map: LoadedMap, zones: ZoneDef[], source: ZoneSource, parts: string[], notes: string[], quiet = false): ResolvedZones {
-  if (source !== 'user' && source !== 'none' && zones.length && !zones.some((z) => z.type === 'end' && z.group === 0)) {
-    notes.push('No end zone for the main course on this build: the timer only starts (!zones to add one).');
-  }
   const report: ZoneReport = { map: map.name, source: zones.length ? source : 'none', parts, notes };
   reports.set(map.name.toLowerCase(), report);
   if (!quiet) {
@@ -598,12 +600,6 @@ export async function resolveZones(map: LoadedMap): Promise<ResolvedZones> {
   }
   const u = validateZones(map, user, false);
   if (u) return finishReport(map, u, 'user', ['your zones (zone editor)'], notes);
-
-  // built-in maps ship complete zones
-  if (map.zones && map.zones.length && map.zoneSource === 'builtin') {
-    const own = sanitizeZones(map.zones);
-    if (own.length) return finishReport(map, own, 'builtin', ['built-in'], notes, true);
-  }
 
   let base: ZoneDef[] | null = null;
   let source: ZoneSource = 'none';
@@ -646,6 +642,12 @@ export async function resolveZones(map: LoadedMap): Promise<ResolvedZones> {
     parts.push(`SurfTimer preset (${fallback.key}; skipped ${describeZones(fallback.fit.dropped)}: not on this build)`);
   }
   if (base) source = 'preset';
+
+  // built-in maps ship complete zones
+  if (!base && map.zones && map.zones.length && map.zoneSource === 'builtin') {
+    const own = sanitizeZones(map.zones);
+    if (own.length) return finishReport(map, own, 'builtin', ['built-in'], notes, true);
+  }
 
   // map-derived zones (fillers, or the base when there is no preset)
   let mom: ZoneDef[] = [];

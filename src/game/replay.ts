@@ -5,14 +5,17 @@
 // usercmd buttons (bits 0..17) and the ducked state (DUCKED_FLAG).
 //
 // The PB replay of each course is kept in memory and persisted in IndexedDB (db "surf", store "replays",
-// key "map|group"). Everything works without IndexedDB (node tests, private windows): replays then live for
-// the session only.
+// key "map|group|tick"): like the records, replays belong to one tickrate (a 128-tick PB is never the ghost of
+// a 64-tick run). Replays saved before the tick was part of the key ("map|group") are still found when their
+// recorded tickrate matches. Everything works without IndexedDB (node tests, private windows): replays then
+// live for the session only.
 import { QAngle, angleDiff } from '../core/angles';
 import { console_ } from '../core/cvars';
 import { Vec3 } from '../core/vec3';
 import { VIEW_OFFSET_DUCK, VIEW_OFFSET_STAND } from '../physics/playertypes';
 import { GhostState } from './api';
 import { IReplaySystem } from './contracts';
+import { tickLabel } from './records';
 
 export const FRAME_STRIDE = 6;
 export const DUCKED_FLAG = 1 << 20;
@@ -35,8 +38,10 @@ export interface ReplayData {
   date: number;
 }
 
-export function replayKey(map: string, group: number): string {
-  return `${map.toLowerCase()}|${group | 0}`;
+/** IndexedDB key of a PB replay: "surf_kitsune|0|100" (legacy keys without the tick: tickrate omitted). */
+export function replayKey(map: string, group: number, tickrate?: number): string {
+  const base = `${map.toLowerCase()}|${group | 0}`;
+  return tickrate === undefined ? base : `${base}|${tickLabel(tickrate)}`;
 }
 
 /** Number of frames in a replay. */
@@ -244,8 +249,11 @@ export class ReplaySystem implements IReplaySystem {
   private rec: Recording | null = null;
   /** Buffer of the last finished/cancelled recording, reused by the next attempt. */
   private spare: Float32Array | null = null;
-  private readonly pbs = new Map<number, ReplayData>();
-  private readonly loading = new Map<number, Promise<boolean>>();
+  /** PB replays by memKey(group, tick). */
+  private readonly pbs = new Map<string, ReplayData>();
+  private readonly loading = new Map<string, Promise<boolean>>();
+  /** memKeys already looked up in IndexedDB (ghostAt loads the PB of a new tickrate once). */
+  private readonly requested = new Set<string>();
   /** Course whose PB the ghost shows (set by beginRecording / loadPb). */
   private activeGroup = 0;
   private spec: ReplayData | null = null;
@@ -267,17 +275,22 @@ export class ReplaySystem implements IReplaySystem {
     return this.rec ? this.rec.count : 0;
   }
 
-  /** The PB replay of a course if loaded. */
-  getPb(group: number): ReplayData | null {
-    return this.pbs.get(group | 0) ?? null;
+  private memKey(group: number, tickrate: number = this.currentTickrate()): string {
+    return `${group | 0}|${tickLabel(tickrate)}`;
   }
 
-  /** Installs a PB replay directly (imports, tests). */
+  /** The PB replay of a course at the tickrate (default: the current one) if loaded. */
+  getPb(group: number, tickrate?: number): ReplayData | null {
+    return this.pbs.get(this.memKey(group, tickrate)) ?? null;
+  }
+
+  /** Installs a PB replay directly (imports, tests). It belongs to the tickrate it was recorded at. */
   setPb(data: ReplayData): void {
-    this.pbs.set(data.group | 0, data);
+    this.pbs.set(this.memKey(data.group, data.tickrate), data);
   }
 
-  private currentTickrate(): number {
+  /** Ticks per second the game currently runs at (`tickInterval`, else the `tickrate` cvar). */
+  currentTickrate(): number {
     if (this.tickInterval > 0) return 1 / this.tickInterval;
     const tr = cvarNum('tickrate', 100);
     return tr > 0 ? tr : 100;
@@ -289,7 +302,7 @@ export class ReplaySystem implements IReplaySystem {
     const buf = this.rec?.buf ?? this.spare ?? new Float32Array(INITIAL_FRAMES * FRAME_STRIDE);
     this.spare = null;
     this.rec = { group: g, buf, count: 0, tickrate: this.currentTickrate() };
-    if (!this.pbs.has(g)) void this.loadPb(this.mapName, g);
+    if (!this.pbs.has(this.memKey(g))) void this.loadPb(this.mapName, g);
   }
 
   recordTick(origin: Vec3, angles: QAngle, ducked: boolean, buttons: number): void {
@@ -329,8 +342,11 @@ export class ReplaySystem implements IReplaySystem {
       frames: r.buf.slice(0, r.count * FRAME_STRIDE),
       date: Date.now(),
     };
-    this.pbs.set(r.group, data);
-    await idbPut({ key: replayKey(data.map, data.group), ...data });
+    // filed under the tickrate the run was played at (the cvar when it started)
+    const key = this.memKey(r.group, r.tickrate > 0 ? r.tickrate : tickrate);
+    this.pbs.set(key, data);
+    this.requested.add(key);
+    await idbPut({ key: replayKey(data.map, data.group, r.tickrate > 0 ? r.tickrate : tickrate), ...data });
   }
 
   cancelRecording(): void {
@@ -338,38 +354,55 @@ export class ReplaySystem implements IReplaySystem {
     this.rec = null;
   }
 
-  async loadPb(map: string, group: number): Promise<boolean> {
+  /** Loads the PB replay of map/group at the tickrate (default: the current one) from IndexedDB. */
+  async loadPb(map: string, group: number, tickrate: number = this.currentTickrate()): Promise<boolean> {
     const g = group | 0;
     const m = map.toLowerCase();
-    if (m === this.mapName) this.activeGroup = g;
-    if (m === this.mapName && this.pbs.has(g)) return true;
-    const key = replayKey(m, g);
-    const pending = m === this.mapName ? this.loading.get(g) : undefined;
+    const mk = this.memKey(g, tickrate);
+    if (m === this.mapName) {
+      this.activeGroup = g;
+      this.requested.add(mk);
+    }
+    if (m === this.mapName && this.pbs.has(mk)) return true;
+    const pending = m === this.mapName ? this.loading.get(mk) : undefined;
     if (pending) return pending;
+    const label = tickLabel(tickrate);
     const p = (async () => {
-      const stored = await idbGet(key);
+      let stored = await idbGet(replayKey(m, g, tickrate));
+      if (!stored) {
+        // replays saved before the tick was part of the key count for the tickrate they were recorded at
+        const legacy = await idbGet(replayKey(m, g));
+        if (legacy && legacy.tickrate > 0 && tickLabel(legacy.tickrate) === label) stored = legacy;
+      }
       const data = stored ? fromStored(stored) : null;
       if (!data) return false;
       // a run saved meanwhile (endRecording) wins over the stored copy
-      if (m === this.mapName && !this.pbs.has(g)) this.pbs.set(g, data);
+      if (m === this.mapName && !this.pbs.has(mk)) this.pbs.set(mk, data);
       return true;
     })();
     if (m === this.mapName) {
-      this.loading.set(g, p);
-      void p.finally(() => this.loading.delete(g));
+      this.loading.set(mk, p);
+      void p.finally(() => this.loading.delete(mk));
     }
     return p;
   }
 
-  /** Forgets (and deletes from IndexedDB) the PB replay of a course. */
-  async deletePb(group: number): Promise<void> {
-    this.pbs.delete(group | 0);
-    await idbDelete(replayKey(this.mapName, group));
+  /** Forgets (and deletes from IndexedDB) the PB replay of a course at the tickrate (default: the current one). */
+  async deletePb(group: number, tickrate: number = this.currentTickrate()): Promise<void> {
+    this.pbs.delete(this.memKey(group, tickrate));
+    await idbDelete(replayKey(this.mapName, group, tickrate));
+    const legacy = await idbGet(replayKey(this.mapName, group));
+    if (legacy && legacy.tickrate > 0 && tickLabel(legacy.tickrate) === tickLabel(tickrate)) await idbDelete(replayKey(this.mapName, group));
   }
 
   ghostAt(runTime: number): GhostState | null {
-    const data = this.pbs.get(this.activeGroup);
-    if (!data) return null;
+    const mk = this.memKey(this.activeGroup);
+    const data = this.pbs.get(mk);
+    if (!data) {
+      // the tickrate changed: look up that tickrate's PB once
+      if (!this.requested.has(mk)) void this.loadPb(this.mapName, this.activeGroup).catch(() => false);
+      return null;
+    }
     const s = sampleReplay(data, runTime);
     if (!s) return null;
     return {
@@ -389,7 +422,7 @@ export class ReplaySystem implements IReplaySystem {
       this.spec = null;
       return true;
     }
-    const data = this.pbs.get(group | 0);
+    const data = this.pbs.get(this.memKey(group));
     if (!data || frameCount(data) === 0) return false;
     this.activeGroup = group | 0;
     this.spec = data;
