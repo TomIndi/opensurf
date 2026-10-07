@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.bsp
+*.rar
+*.bz2
+.vite/
+test-results/
+screenshots/

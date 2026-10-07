@@ -1,0 +1,28 @@
+{
+  "name": "surf",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Browser remake of CS:GO surf servers: Source movement physics, real KSF surf maps (BSP), surf timer.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "catalog": "node scripts/build-catalog.mjs"
+  },
+  "dependencies": {
+    "fflate": "^0.8.3",
+    "node-unrar-js": "^2.0.2",
+    "three": "^0.186.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "@types/three": "^0.186.0",
+    "playwright-core": "1.56",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.3",
+    "vitest": "^5.0.3"
+  }
+}
