@@ -122,10 +122,44 @@ export function sweptGap(c0: Vec3, c1: Vec3, e: Vec3, h: HullRef): number {
   return best;
 }
 
+/**
+ * How deep the box (origin frame) is inside the brush according to the brush's own (expanded) planes,
+ * exactly as the trace code sees it: > 0 inside by that much, <= 0 outside/touching.
+ * Point boxes ignore bevels, like traces do.
+ */
+export function planeDepth(brush: Brush, origin: Vec3, mins: Vec3, maxs: Vec3): number {
+  const c = v3(origin.x + (mins.x + maxs.x) / 2, origin.y + (mins.y + maxs.y) / 2, origin.z + (mins.z + maxs.z) / 2);
+  const e = v3(Math.abs(maxs.x - mins.x) / 2, Math.abs(maxs.y - mins.y) / 2, Math.abs(maxs.z - mins.z) / 2);
+  const point = e.x * e.x + e.y * e.y + e.z * e.z < 1e-6;
+  let depth = Infinity;
+  for (const s of brush.sides) {
+    if (point && s.bevel) continue;
+    const n = s.plane.normal;
+    const dist = s.plane.dist + (point ? 0 : Math.abs(n.x) * e.x + Math.abs(n.y) * e.y + Math.abs(n.z) * e.z);
+    depth = Math.min(depth, -(n.x * c.x + n.y * c.y + n.z * c.z - dist));
+  }
+  return depth;
+}
+
+/** Deepest penetration of the box into any enabled brush of the world matching `mask` (<= 0: free). */
+export function worldDepth(world: CollisionWorld, origin: Vec3, mins: Vec3, maxs: Vec3, mask: number): number {
+  let worst = -Infinity;
+  world.queryBox(
+    v3(origin.x + mins.x - 1, origin.y + mins.y - 1, origin.z + mins.z - 1),
+    v3(origin.x + maxs.x + 1, origin.y + maxs.y + 1, origin.z + maxs.z + 1),
+    (b) => {
+      if (b.contents & mask) worst = Math.max(worst, planeDepth(b, origin, mins, maxs));
+    },
+  );
+  return worst;
+}
+
 export interface SlideResult {
   pos: Vec3;
   vel: Vec3;
   normals: Vec3[];
+  /** world.lastHitBrush for each entry of `normals`. */
+  hitBrushes: number[];
   fractions: number[];
   stuck: boolean;
   startsolid: boolean;
@@ -155,7 +189,7 @@ export function slideMove(
   mask: number,
   tr: TraceResult = newTrace(),
 ): SlideResult {
-  const res: SlideResult = { pos: v3(pos.x, pos.y, pos.z), vel: v3(vel.x, vel.y, vel.z), normals: [], fractions: [], stuck: false, startsolid: false };
+  const res: SlideResult = { pos: v3(pos.x, pos.y, pos.z), vel: v3(vel.x, vel.y, vel.z), normals: [], hitBrushes: [], fractions: [], stuck: false, startsolid: false };
   const p = res.pos;
   const v = res.vel;
   const planes: Vec3[] = [];
@@ -184,6 +218,7 @@ export function slideMove(
     if (tr.fraction === 1) break;
     const n = v3(tr.plane.normal.x, tr.plane.normal.y, tr.plane.normal.z);
     res.normals.push(n);
+    res.hitBrushes.push(world.lastHitBrush);
     timeLeft -= timeLeft * tr.fraction;
     planes.push(n);
     // find a velocity (original clipped by one plane) that doesn't go into any touched plane

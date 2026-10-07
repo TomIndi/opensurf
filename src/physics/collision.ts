@@ -6,7 +6,19 @@
 // each brush plane is pushed out by the box half-extents, the box center is clipped against the
 // resulting convex volume, and the reported fraction stops DIST_EPSILON short of the surface along the
 // plane normal. Bevel planes are used for box traces only. A trace starting inside a brush reports
-// startsolid (touching counts as inside); one that never leaves reports allsolid with fraction 0.
+// startsolid (touching counts as inside) and that brush does not block it; one that never leaves
+// reports allsolid with fraction 0 and endpos = start.
+//
+// Properties the movement code can rely on (all covered by tests/collision.test.ts):
+//  - A hit leaves endpos exactly DIST_EPSILON off the hit plane (pushed out by the box), measured along
+//    its normal; plane is the brush side's ORIGINAL plane (not expanded). fraction 1 => endpos === end.
+//  - Sliding parallel to a surface from that position never re-hits it, and adjacent brushes sharing
+//    the same plane (ramp seams) are never hit (see CLIP_NOISE).
+//  - Like Source, sweeping past a brush corner shallower than DIST_EPSILON is not a hit ("corner
+//    shaving"), so a trace stopped by one brush can end inside a grazed neighbour by at most
+//    DIST_EPSILON. The next trace then reports startsolid; Source's CheckStuck (unstuckPlayer) handles it.
+//  - Real-map brushes should keep the compiler's bevel sides (Source-exact edge behaviour);
+//    addBrushBevels never removes them, it only adds missing ones.
 //
 // Implemented from the algorithm descriptions; no engine code was used.
 import { Vec3 } from '../core/vec3';
@@ -281,7 +293,10 @@ function boundsValid(b: Brush): boolean {
  */
 export class CollisionWorld implements TraceWorld {
   readonly brushes: readonly Brush[];
-  /** Index (into `brushes`) of the brush that produced the last traceBox/traceRay hit, or -1. Debug aid. */
+  /**
+   * Index (into `brushes`) of the brush that produced the last traceBox/traceRay hit (fraction < 1 and
+   * not allsolid), or -1. Debug aid (e.g. showing which brush a ramp bug came from).
+   */
   lastHitBrush = -1;
 
   // ---- per slot (BVH leaf order)

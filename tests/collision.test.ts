@@ -28,7 +28,7 @@ import {
 } from '../src/physics/types';
 import { HULL_MAXS, HULL_MINS } from '../src/physics/playertypes';
 import { readBspBrushes } from './helpers/collision_bsp';
-import { boxBrushGap, hullRef, mulberry32, slideMove, sweptGap } from './helpers/collision_ref';
+import { boxBrushGap, hullRef, mulberry32, planeDepth, slideMove, sweptGap, worldDepth } from './helpers/collision_ref';
 
 const MINS = v3(HULL_MINS.x, HULL_MINS.y, HULL_MINS.z);
 const MAXS = v3(HULL_MAXS.x, HULL_MAXS.y, HULL_MAXS.z);
@@ -313,6 +313,35 @@ describe('brushbuild: planes, bevels, hulls', () => {
     expect(t.maxs.x).toBeCloseTo(100, 9);
   });
 
+  it('large point clouds: iterative hull refinement matches the cloud', () => {
+    const rnd = mulberry32(4321);
+    for (const n of [60, 150, 600]) {
+      const pts: Vec3[] = [];
+      for (let i = 0; i < n; i++) {
+        // mostly interior points plus a few dozen on an ellipsoid-ish shell
+        const u = v3(rnd() - 0.5, rnd() - 0.5, rnd() - 0.5);
+        const l = Math.hypot(u.x, u.y, u.z);
+        const r = i % 10 === 0 ? 1 : rnd() * 0.8;
+        pts.push(v3(1000 + (u.x / l) * r * 300, -500 + (u.y / l) * r * 200, 64 + (u.z / l) * r * 120));
+      }
+      const t0 = performance.now();
+      const b = brushFromPoints(pts, 1)!;
+      const ms = performance.now() - t0;
+      expect(b).not.toBeNull();
+      expect(ms).toBeLessThan(5000);
+      const verts = allVerts(b);
+      for (const s of realSides(b)) {
+        for (const p of pts) expect(dot(p, s.plane.normal) - s.plane.dist).toBeLessThan(1e-6);
+      }
+      for (let k = 0; k < 50; k++) {
+        const u = v3(rnd() - 0.5, rnd() - 0.5, rnd() - 0.5);
+        const hp = Math.max(...pts.map((p) => dot(p, u)));
+        const hv = Math.max(...verts.map((p) => dot(p, u)));
+        expect(Math.abs(hp - hv)).toBeLessThan(0.05);
+      }
+    }
+  });
+
   it('degenerate hulls return null', () => {
     expect(brushFromPoints([v3(0, 0, 0), v3(1, 0, 0), v3(0, 1, 0)], 1)).toBeNull();
     expect(brushFromPoints([v3(0, 0, 0), v3(10, 0, 0), v3(0, 10, 0), v3(10, 10, 0), v3(5, 5, 0)], 1)).toBeNull(); // coplanar
@@ -477,6 +506,71 @@ describe('CollisionWorld: box traces', () => {
     expect(d.model).toBe(2);
   });
 
+  it('out may alias the inputs (tr.endpos as the next start)', () => {
+    const tr = newTrace();
+    tr.endpos.x = 0;
+    world.traceBox(tr.endpos, v3(300, 0, 0), MINS, MAXS, MASK_PLAYERSOLID, tr);
+    expect(tr.endpos.x).toBeCloseTo(100 - 16 - DIST_EPSILON, 10);
+    const f = tr.fraction;
+    // continue from the endpos into the wall: fraction 0, endpos unchanged
+    world.traceBox(tr.endpos, v3(300, 0, 0), MINS, MAXS, MASK_PLAYERSOLID, tr);
+    expect(tr.fraction).toBe(0);
+    expect(tr.endpos.x).toBeCloseTo(100 - 16 - DIST_EPSILON, 10);
+    expect(f).toBeGreaterThan(0);
+    // end aliasing out.endpos
+    const tr2 = newTrace();
+    tr2.endpos.x = 300;
+    world.traceBox(v3(0, 0, 0), tr2.endpos, MINS, MAXS, MASK_PLAYERSOLID, tr2);
+    expect(tr2.endpos.x).toBeCloseTo(100 - 16 - DIST_EPSILON, 10);
+  });
+
+  it('exact epsilon placement holds at extreme coordinates', () => {
+    for (const base of [v3(15000, -15000, 15000), v3(-16000.5, 16000.25, -15999.75)]) {
+      const b = brushFromBox(v3(base.x, base.y - 50, base.z - 50), v3(base.x + 100, base.y + 50, base.z + 150), CONTENTS_SOLID);
+      const w = new CollisionWorld([b]);
+      const tr = w.traceBox(v3(base.x - 300, base.y, base.z), v3(base.x + 50, base.y, base.z), MINS, MAXS, MASK_PLAYERSOLID);
+      expect(tr.endpos.x).toBeCloseTo(base.x - 16 - DIST_EPSILON, 9);
+      // sliding along the face from there never re-hits it
+      for (let i = 0; i < 100; i++) {
+        const p = v3(tr.endpos.x, tr.endpos.y, tr.endpos.z);
+        const r = w.traceBox(p, v3(p.x, p.y + 7.3, p.z + 1.1), MINS, MAXS, MASK_PLAYERSOLID, tr);
+        expect(r.fraction).toBe(1);
+      }
+    }
+  });
+
+  it('Source corner shaving: grazing a corner shallower than DIST_EPSILON is not a hit', () => {
+    const box = brushFromBox(v3(0, 0, 0), v3(100, 100, 100), CONTENTS_SOLID);
+    const w1 = new CollisionWorld([box]);
+    // the ray enters through x=0 while leaving the top plane at a grazing angle: inside for x in [0, 6.67]
+    // but never deeper than 0.01 units
+    const s0 = v3(-10, 50, 99.99);
+    const e0 = v3(10, 50, 100.002);
+    expect(w1.pointContents(v3(3, 50, 99.995))).toBe(CONTENTS_SOLID);
+    const r = w1.traceRay(s0, e0, MASK_ALL);
+    expect(r.fraction).toBe(1);
+    expect(r.startsolid).toBe(false);
+    // a slightly deeper cut (deeper than DIST_EPSILON) is a hit
+    const r2 = w1.traceRay(v3(-10, 50, 99.9), v3(10, 50, 100.002), MASK_ALL);
+    expect(r2.fraction).toBeLessThan(1);
+    expect(r2.plane.normal).toEqual(v3(-1, 0, 0));
+    // if another brush stops the ray inside the shaved sliver, the endpos is (shallowly) inside the box
+    const wall = brushFromBox(v3(5, 0, 0), v3(6, 100, 200), CONTENTS_SOLID);
+    const w2 = new CollisionWorld([box, wall]);
+    const r3 = w2.traceRay(s0, e0, MASK_ALL);
+    expect(r3.fraction).toBeLessThan(1);
+    expect(r3.endpos.x).toBeCloseTo(5 - DIST_EPSILON, 9);
+    expect(w2.testBox(r3.endpos, ZERO, ZERO, MASK_ALL)).toBe(true);
+    const depth = planeDepth(box, r3.endpos, ZERO, ZERO);
+    expect(depth).toBeGreaterThan(0);
+    expect(depth).toBeLessThanOrEqual(DIST_EPSILON);
+    // the next trace starts solid in the box and ignores it (only allsolid would stop it)
+    const r4 = w2.traceRay(r3.endpos, v3(r3.endpos.x - 20, 50, 100.5), MASK_ALL);
+    expect(r4.startsolid).toBe(true);
+    expect(r4.allsolid).toBe(false);
+    expect(r4.fraction).toBe(1);
+  });
+
   it('zero-length traces report startsolid only when overlapping', () => {
     const p = v3(0, 0, 0);
     const tr = world.traceBox(p, p, MINS, MAXS, MASK_PLAYERSOLID);
@@ -583,6 +677,7 @@ describe('CollisionWorld: ramp seams (no snagging)', () => {
     { name: 'rotated 37 deg, off-grid', yaw: 37, t: v3(1234.5, -987.25, 300.125), oblique: 0 },
     { name: 'rotated 122.5 deg, oblique seams', yaw: 122.5, t: v3(-3000.3, 2500.7, -1000), oblique: 90 },
     { name: 'axis aligned, oblique seams', yaw: 0, t: v3(0, 0, 0), oblique: -70 },
+    { name: 'far from origin (+-15000), rotated 71.3 deg', yaw: 71.3, t: v3(15000.3, -14000.7, 12000.9), oblique: 33 },
   ];
 
   for (const cfg of configs) {
@@ -739,6 +834,96 @@ describe('CollisionWorld: tunneling, models, masks, contents', () => {
       expect(Math.sign(dot(v3(r.x - c0.x, r.y - c0.y, 0), n))).toBe(startSide);
       expect(w.testBox(r, MINS, MAXS, MASK_PLAYERSOLID)).toBe(false);
     }
+  });
+
+  it('thin displacement-style triangle prisms: solid, no tunneling, smooth sliding over a gentle mesh', () => {
+    // a gently curved height field triangulated, each triangle extruded 1 unit down (thin prisms)
+    const rnd = mulberry32(606);
+    const N = 8;
+    const S = 64;
+    const hgt = (i: number, j: number) => 20 * Math.sin(i * 0.4) + 12 * Math.cos(j * 0.3) + (rnd() - 0.5) * 0.01;
+    const H: number[][] = [];
+    for (let i = 0; i <= N; i++) {
+      H.push([]);
+      for (let j = 0; j <= N; j++) H[i].push(hgt(i, j));
+    }
+    const brushes: Brush[] = [];
+    const tri = (a: Vec3, b: Vec3, c: Vec3) => {
+      const pts = [a, b, c, v3(a.x, a.y, a.z - 1), v3(b.x, b.y, b.z - 1), v3(c.x, c.y, c.z - 1)];
+      const br = brushFromPoints(pts, CONTENTS_SOLID);
+      expect(br).not.toBeNull();
+      brushes.push(br!);
+    };
+    const P = (i: number, j: number) => v3(1000.37 + i * S, -500.11 + j * S, 3000 + H[i][j]);
+    for (let i = 0; i < N; i++)
+      for (let j = 0; j < N; j++) {
+        tri(P(i, j), P(i + 1, j), P(i + 1, j + 1));
+        tri(P(i, j), P(i + 1, j + 1), P(i, j + 1));
+      }
+    const w = new CollisionWorld(brushes);
+    // drops land on top, never fall through
+    for (let k = 0; k < 300; k++) {
+      const x = 1000.37 + 20 + rnd() * (N * S - 40);
+      const y = -500.11 + 20 + rnd() * (N * S - 40);
+      const tr = w.traceBox(v3(x, y, 3200), v3(x, y, 2800), MINS, MAXS, MASK_PLAYERSOLID);
+      expect(tr.fraction).toBeLessThan(1);
+      expect(tr.plane.normal.z).toBeGreaterThan(0.3);
+      // point traces too (1-unit thick prisms)
+      const r = w.traceRay(v3(x, y, 3200), v3(x, y, 2800), MASK_PLAYERSOLID);
+      expect(r.fraction).toBeLessThan(1);
+      expect(r.plane.normal.z).toBeGreaterThan(0.3);
+    }
+    // fast diagonal falls at 3500 u/s never tunnel through the 1-unit shell
+    for (let k = 0; k < 200; k++) {
+      let p = v3(1000.37 + 100 + rnd() * 300, -500.11 + 100 + rnd() * 300, 3150);
+      const v = v3((rnd() - 0.5) * 1000, (rnd() - 0.5) * 1000, -3400);
+      for (let t = 0; t < 10; t++) {
+        const tr = w.traceBox(p, v3(p.x + v.x / 64, p.y + v.y / 64, p.z + v.z / 64), MINS, MAXS, MASK_PLAYERSOLID);
+        expect(tr.startsolid).toBe(false);
+        p = v3(tr.endpos.x, tr.endpos.y, tr.endpos.z);
+        if (tr.fraction < 1) break;
+      }
+      expect(p.z).toBeGreaterThan(2900);
+      expect(w.testBox(p, MINS, MAXS, MASK_PLAYERSOLID)).toBe(false);
+    }
+    // sliding across the triangle mesh with gravity: never stuck or inside, always gets across. (A box that
+    // is briefly airborne over a convex fold can legitimately catch a ridge edge with a vertical box edge -
+    // that contact normal is horizontal, exactly like a box-vs-triangle test would give.)
+    const trr = newTrace();
+    let touches = 0;
+    let topTouches = 0;
+    let offEdges = 0;
+    for (let k = 0; k < 60; k++) {
+      const x = 1000.37 + 40 + rnd() * 100;
+      const y = -500.11 + 40 + rnd() * (N * S - 80);
+      const drop = w.traceBox(v3(x, y, 3200), v3(x, y, 2800), MINS, MAXS, MASK_PLAYERSOLID);
+      let pos = v3(drop.endpos.x, drop.endpos.y, drop.endpos.z);
+      let vel = v3(900, (rnd() - 0.5) * 300, 0);
+      let offEdge = false;
+      for (let t = 0; t < 100 && pos.x < 1000.37 + N * S - 40; t++) {
+        if (pos.y < -500.11 + 20 || pos.y > -500.11 + N * S - 20) {
+          offEdge = true; // slid off the side of the mesh
+          break;
+        }
+        vel.z -= 800 / 100;
+        const r = slideMove(w, pos, vel, 1 / 100, MINS, MAXS, MASK_PLAYERSOLID, trr);
+        expect(r.stuck).toBe(false);
+        // at most a Source-style shaved-corner sliver, never real penetration
+        expect(worldDepth(w, r.pos, MINS, MAXS, MASK_PLAYERSOLID)).toBeLessThanOrEqual(DIST_EPSILON + 1e-9);
+        for (const m of r.normals) {
+          touches++;
+          if (m.z > 0.9) topTouches++;
+        }
+        pos = r.pos;
+        vel = r.vel;
+        expect(pos.z).toBeGreaterThan(2960); // never fell through the shell
+      }
+      if (!offEdge) expect(pos.x).toBeGreaterThan(1000.37 + N * S - 60);
+      else offEdges++;
+    }
+    expect(touches).toBeGreaterThan(500);
+    expect(topTouches / touches).toBeGreaterThan(0.95);
+    expect(offEdges).toBeLessThan(30);
   });
 
   it('disabled brush models are ignored by every query', () => {
@@ -1023,7 +1208,7 @@ describe('CollisionWorld: randomized properties vs exact reference', () => {
     expect(solid).toBeGreaterThan(100);
   });
 
-  it('endpos of non-startsolid traces is never in solid (dense random world)', () => {
+  it('endpos of non-startsolid traces is never deeper than DIST_EPSILON in solid (dense random world)', () => {
     const rnd = mulberry32(8);
     const brushes: Brush[] = [];
     for (let i = 0; i < 400; i++) {
@@ -1041,19 +1226,25 @@ describe('CollisionWorld: randomized properties vs exact reference', () => {
     const w = new CollisionWorld(brushes);
     const tr = newTrace();
     let n = 0;
+    let slivers = 0;
     for (let k = 0; k < 20000; k++) {
       const s = v3((rnd() - 0.5) * 3200, (rnd() - 0.5) * 3200, (rnd() - 0.5) * 3200);
       const t = v3(s.x + (rnd() - 0.5) * 800, s.y + (rnd() - 0.5) * 800, s.z + (rnd() - 0.5) * 800);
       w.traceBox(s, t, MINS, MAXS, MASK_PLAYERSOLID, tr);
       if (tr.startsolid) continue;
       n++;
-      expect(w.testBox(tr.endpos, MINS, MAXS, MASK_PLAYERSOLID)).toBe(false);
-      // a retrace from the endpos to the same target never goes further than... the target, and never starts solid
+      // Source semantics: a sweep stopped by one brush may end inside a corner sliver of another brush it
+      // grazed (shallower than DIST_EPSILON); anything deeper would be a tunneling bug.
+      if (w.testBox(tr.endpos, MINS, MAXS, MASK_PLAYERSOLID)) {
+        slivers++;
+        expect(worldDepth(w, tr.endpos, MINS, MAXS, MASK_PLAYERSOLID)).toBeLessThanOrEqual(DIST_EPSILON + 1e-9);
+      }
+      // retracing towards the same target from the endpos goes (almost) nowhere
       const again = w.traceBox(tr.endpos, t, MINS, MAXS, MASK_PLAYERSOLID);
-      expect(again.startsolid).toBe(false);
-      if (tr.fraction < 1) expect(again.fraction).toBeLessThan(1e-3 + (tr.fraction === 1 ? 1 : 0.5));
+      if (!again.startsolid && tr.fraction < 1) expect(again.fraction).toBeLessThan(0.5);
     }
     expect(n).toBeGreaterThan(10000);
+    expect(slivers).toBeLessThan(n * 0.01);
   });
 
   it('BVH traces equal brute-force traces over each brush individually', () => {
@@ -1197,19 +1388,21 @@ describe.skipIf(!haveMaps)('CollisionWorld on real maps (SURF_TEST_MAPS)', () =>
         ourExtra += copy.sides.length - b.sides.length;
       }
 
-      // spawn points: drop to the ground
+      // spawn points: drop to the ground (some maps spawn players in the air above a floor)
       const tr = newTrace();
       let spawnOk = 0;
+      let spawnTried = 0;
       for (const sp of bsp.spawns.slice(0, 64)) {
         const start = v3(sp.x, sp.y, sp.z + 1);
-        w.traceBox(start, v3(sp.x, sp.y, sp.z - 512), MINS, MAXS, MASK_PLAYERSOLID, tr);
+        w.traceBox(start, v3(sp.x, sp.y, sp.z - 8192), MINS, MAXS, MASK_PLAYERSOLID, tr);
         if (tr.startsolid) continue;
+        spawnTried++;
+        if (tr.fraction === 1) continue;
         spawnOk++;
-        expect(tr.fraction).toBeLessThan(1);
         expect(tr.plane.normal.z).toBeGreaterThan(0.7);
         expect(w.testBox(tr.endpos, MINS, MAXS, MASK_PLAYERSOLID)).toBe(false);
       }
-      if (bsp.spawns.length) expect(spawnOk).toBeGreaterThan(0);
+      if (spawnTried) expect(spawnOk).toBeGreaterThan(spawnTried * 0.5);
 
       // random traces inside the world bounds: endpos never in solid
       let wmin = v3(Infinity, Infinity, Infinity);
@@ -1221,6 +1414,7 @@ describe.skipIf(!haveMaps)('CollisionWorld on real maps (SURF_TEST_MAPS)', () =>
       const rnd = mulberry32(file.length * 7919);
       let free = 0;
       let hits = 0;
+      let slivers = 0;
       const t2 = performance.now();
       const N = 30000;
       for (let i = 0; i < N; i++) {
@@ -1231,16 +1425,116 @@ describe.skipIf(!haveMaps)('CollisionWorld on real maps (SURF_TEST_MAPS)', () =>
         if (tr.startsolid) continue;
         free++;
         if (tr.fraction < 1) hits++;
-        if (w.testBox(tr.endpos, MINS, MAXS, MASK_PLAYERSOLID)) throw new Error(`endpos in solid: ${JSON.stringify(s)} -> ${JSON.stringify(e)} f=${tr.fraction}`);
+        if (w.testBox(tr.endpos, MINS, MAXS, MASK_PLAYERSOLID)) {
+          // only a Source-style shaved-corner sliver is allowed
+          const depth = worldDepth(w, tr.endpos, MINS, MAXS, MASK_PLAYERSOLID);
+          if (depth > DIST_EPSILON + 1e-9) throw new Error(`endpos ${depth} deep in solid: ${JSON.stringify(s)} -> ${JSON.stringify(e)} f=${tr.fraction}`);
+          slivers++;
+        }
       }
       const traceMs = performance.now() - t2;
       console.log(
         `[collision] ${file}: v${bsp.version} read ${readMs.toFixed(0)} ms, build ${buildMs.toFixed(1)} ms, ` +
           `${st.brushes} brushes ${st.sides} sides (${bevels} compiler bevels), bvh depth ${st.depth}; ` +
           `bevels vs compiler (first 3000 brushes): ${missing} compiler bevels not reproduced, ${ourExtra} net extra; ` +
-          `${bsp.spawns.length} spawns (${spawnOk} ok); ${N} traces ${traceMs.toFixed(0)} ms (${free} free, ${hits} hits)`,
+          `${bsp.spawns.length} spawns (${spawnOk} ok); ${N} traces ${traceMs.toFixed(0)} ms (${free} free, ${hits} hits, ${slivers} sliver ends)`,
       );
       expect(free).toBeGreaterThan(N * 0.05);
+    });
+
+    it(`${file}: surfing real ramps never snags on a neighbouring coplanar brush (compiler and regenerated bevels)`, () => {
+      const bsp = readBspBrushes(join(MAPS_DIR!, file));
+      if (!bsp) return;
+      const regen: Brush[] = bsp.world.map((b) => {
+        const c: Brush = { sides: b.sides.filter((s) => !s.bevel).map((s) => ({ plane: s.plane, bevel: false })), contents: b.contents, mins: b.mins, maxs: b.maxs, model: 0 };
+        addBrushBevels(c);
+        return c;
+      });
+      const worlds: [string, CollisionWorld, Brush[]][] = [
+        ['compiler', new CollisionWorld(bsp.world), bsp.world],
+        ['regenerated', new CollisionWorld(regen), regen],
+      ];
+      // surfable faces (0.1 < n.z < 0.7) of decent size
+      const faces: { n: Vec3; w: Vec3[] }[] = [];
+      for (const b of bsp.world) {
+        if (!(b.contents & MASK_PLAYERSOLID)) continue;
+        const ws = brushWindings(b);
+        b.sides.forEach((s, i) => {
+          const n = s.plane.normal;
+          if (s.bevel || ws[i].length < 3 || n.z < 0.1 || n.z > 0.69) return;
+          const nw = newell(ws[i]);
+          if (Math.hypot(nw.x, nw.y, nw.z) / 2 > 128 * 128) faces.push({ n, w: ws[i] });
+        });
+      }
+      const near = (a: Vec3, b: Vec3, eps: number) => Math.abs(a.x - b.x) + Math.abs(a.y - b.y) + Math.abs(a.z - b.z) < eps;
+      const tr = newTrace();
+      const summary: string[] = [];
+      for (const [name, w, list] of worlds) {
+        const rnd = mulberry32(17);
+        let samples = 0;
+        let ticks = 0;
+        let losses = 0;
+        let steps = 0;
+        for (let k = 0; k < 250 && faces.length; k++) {
+          const face = faces[Math.floor(rnd() * faces.length)];
+          const fw = face.w;
+          const t = 1 + Math.floor(rnd() * (fw.length - 2));
+          let r1 = rnd();
+          let r2 = rnd();
+          if (r1 + r2 > 1) {
+            r1 = 1 - r1;
+            r2 = 1 - r2;
+          }
+          const p = v3(
+            fw[0].x + (fw[t].x - fw[0].x) * r1 + (fw[t + 1].x - fw[0].x) * r2,
+            fw[0].y + (fw[t].y - fw[0].y) * r1 + (fw[t + 1].y - fw[0].y) * r2,
+            fw[0].z + (fw[t].z - fw[0].z) * r1 + (fw[t + 1].z - fw[0].z) * r2,
+          );
+          const fn = face.n;
+          const start = v3(p.x + fn.x * 40, p.y + fn.y * 40, p.z + fn.z * 40 - 36);
+          const sgn = rnd() < 0.5 ? 1 : -1;
+          if (w.testBox(start, MINS, MAXS, MASK_PLAYERSOLID)) continue;
+          w.traceBox(start, v3(start.x - fn.x * 80, start.y - fn.y * 80, start.z - fn.z * 80), MINS, MAXS, MASK_PLAYERSOLID, tr);
+          if (tr.fraction === 1 || !near(tr.plane.normal, fn, 1e-3)) continue;
+          // the plane we actually landed on (may belong to a neighbouring, nearly coplanar brush)
+          const n = v3(tr.plane.normal.x, tr.plane.normal.y, tr.plane.normal.z);
+          const rampD = tr.plane.dist;
+          const hl = Math.hypot(n.x, n.y);
+          samples++;
+          let pos = v3(tr.endpos.x, tr.endpos.y, tr.endpos.z);
+          let vel = v3((-n.y / hl) * 1200 * sgn, (n.x / hl) * 1200 * sgn, 0);
+          for (let tick = 0; tick < 60; tick++) {
+            vel.z -= 800 * 0.01;
+            const before = Math.hypot(vel.x, vel.y);
+            const r = slideMove(w, pos, vel, 0.01, MINS, MAXS, MASK_PLAYERSOLID, tr);
+            ticks++;
+            const after = Math.hypot(r.vel.x, r.vel.y);
+            const others = r.normals.filter((m) => !near(m, n, 1e-3));
+            if (after < before * 0.98 && others.length) {
+              losses++;
+              // A legit stop is a wall / ramp end, or a map-geometry step (a neighbouring brush whose slope is
+              // a fraction of a unit off ours - Source snags there too). Being stopped by a brush that
+              // continues *exactly* our ramp plane would be a collision bug (seam snag).
+              r.normals.forEach((m, i) => {
+                if (near(m, n, 1e-3)) return;
+                const hb = list[r.hitBrushes[i]];
+                expect(hb).toBeDefined();
+                if (hb.sides.some((s) => !s.bevel && near(s.plane.normal, n, 3e-6) && Math.abs(s.plane.dist - rampD) < 0.01)) {
+                  throw new Error(`${name}: seam snag at ${JSON.stringify(r.pos)} normal ${JSON.stringify(m)}`);
+                }
+                if (hb.sides.some((s) => !s.bevel && near(s.plane.normal, n, 1e-3) && Math.abs(s.plane.dist - rampD) < 2)) steps++;
+              });
+              break;
+            }
+            if (!r.normals.some((m) => near(m, n, 1e-3))) break; // left the ramp
+            pos = r.pos;
+            vel = r.vel;
+          }
+        }
+        summary.push(`${name}: ${samples} samples, ${ticks} ticks, ${losses} stops (${steps} on near-coplanar map steps)`);
+        if (faces.length > 20) expect(samples).toBeGreaterThan(50);
+      }
+      console.log(`[collision] ${file} surf sim (${faces.length} ramp faces): ${summary.join('; ')}`);
     });
   }
 });

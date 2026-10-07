@@ -7,7 +7,7 @@
 import { QAngle, angleVectors, qa } from '../core/angles';
 import { Vec3, v3, v3clone } from '../core/vec3';
 import { BrushModelInfo, MapEntity } from '../map/types';
-import { addBrushBevels, brushFromPlanes, computeBrushBounds } from '../physics/brushbuild';
+import { addBrushBevels, computeBrushBounds } from '../physics/brushbuild';
 import { Brush, BrushSide, CONTENTS_SOLID, Plane } from '../physics/types';
 import { modelBrushIndices } from './bsptree';
 import { parseEntities } from './entities';
@@ -257,6 +257,11 @@ export interface DisplacementBrushOptions {
    * VPhysics objects; player hull traces still collide (only "no hull collision" lets players through).
    */
   skipNoPhysics?: boolean;
+  /**
+   * Return compact PackedBrush objects (default true). Set false for plain Brush objects with ordinary
+   * side arrays (~4x the memory).
+   */
+  packed?: boolean;
   /** Receives non-fatal problems. */
   warnings?: string[];
 }
@@ -392,6 +397,7 @@ export function displacementSurface(bsp: BspFile, index: number): DisplacementSu
  */
 export function buildDisplacementBrushes(bsp: BspFile, opts: DisplacementBrushOptions = {}): Brush[] {
   const thickness = opts.thickness ?? 2;
+  const store = opts.packed === false ? null : new SideStore();
   const out: Brush[] = [];
   let malformed = 0;
   let degenerate = 0;
@@ -415,15 +421,27 @@ export function buildDisplacementBrushes(bsp: BspFile, opts: DisplacementBrushOp
       const a = T[k] * 3;
       const b = T[k + 1] * 3;
       const c = T[k + 2] * 3;
-      const brush = prismBrush(
+      const n = prismSides(
         P[a], P[a + 1], P[a + 2],
         P[b], P[b + 1], P[b + 2],
         P[c], P[c + 1], P[c + 2],
         thickness,
-        contents,
+        SCRATCH_SIDES,
+        SCRATCH_BOUNDS,
       );
-      if (brush) out.push(brush);
-      else degenerate++;
+      if (n === 0) {
+        degenerate++;
+        continue;
+      }
+      const bb = SCRATCH_BOUNDS;
+      const mins = v3(bb[0], bb[1], bb[2]);
+      const maxs = v3(bb[3], bb[4], bb[5]);
+      if (store) {
+        const off = store.add(SCRATCH_SIDES, n);
+        out.push(new PackedBrush(store.chunk, off, n, contents, 0, mins, maxs));
+      } else {
+        out.push({ sides: unpackSides(SCRATCH_SIDES, 0, n), contents, mins, maxs, model: 0 });
+      }
     }
   }
   if (opts.warnings) {
@@ -434,14 +452,66 @@ export function buildDisplacementBrushes(bsp: BspFile, opts: DisplacementBrushOp
   return out;
 }
 
-/** Thin prism under the CCW triangle (a, b, c); null for degenerate triangles. */
-function prismBrush(
+// Thin prism brushes are built analytically: the six vertices are known exactly, so the axial and edge
+// bevels can be derived without the generic winding clipper. The result is the same plane set that
+// brushFromPlanes() produces for the prism's five planes (verified in tests/bsp_collision.test.ts) but
+// several times faster, which matters for maps with 100k+ displacement triangles. Tolerances mirror the
+// generic builder's.
+const BEVEL_MIN_EDGE = 0.01;
+const BEVEL_MIN_CROSS = 1e-3;
+const BEVEL_ON_EPSILON = 0.01;
+const AXIAL_EPSILON = 1e-9;
+const NORMAL_EPSILON = 1e-5;
+const DIST_EQUAL_EPSILON = 0.01;
+
+/** Packed side layout: nx, ny, nz, dist, flags (bit 0 = bevel). */
+const SIDE_STRIDE = 5;
+/** Upper bound on prism sides: 5 real + 6 axial + 9 edges * 6 candidates. */
+const MAX_PRISM_SIDES = 5 + 6 + 54;
+
+/** Shared (frozen) unit normals for axial bevels: -x +x -y +y -z +z. */
+const AXIAL_NORMALS: readonly Vec3[] = [
+  Object.freeze(v3(-1, 0, 0)),
+  Object.freeze(v3(1, 0, 0)),
+  Object.freeze(v3(0, -1, 0)),
+  Object.freeze(v3(0, 1, 0)),
+  Object.freeze(v3(0, 0, -1)),
+  Object.freeze(v3(0, 0, 1)),
+];
+
+// scratch buffers for prism construction
+const PV = new Float64Array(18); // 6 vertices: 0..2 top, 3..5 bottom
+// edges as vertex index pairs: three top edges (their bottom twins are vertex + 3), then the three
+// vertical edges
+const PE = [0, 1, 1, 2, 2, 0, 0, 3, 1, 4, 2, 5];
+const REAL = new Float64Array(5 * 4); // top, bottom, 3 walls: nx ny nz dist
+const SCRATCH_SIDES = new Float64Array(MAX_PRISM_SIDES * SIDE_STRIDE);
+const SCRATCH_BOUNDS = new Float64Array(6);
+
+function writeSide(out: Float64Array, n: number, x: number, y: number, z: number, d: number, bevel: number): number {
+  const o = n * SIDE_STRIDE;
+  out[o] = x;
+  out[o + 1] = y;
+  out[o + 2] = z;
+  out[o + 3] = d;
+  out[o + 4] = bevel;
+  return n + 1;
+}
+
+/**
+ * Computes the full side list (real sides, axial and edge bevels, in the generic builder's order: the six
+ * axial planes first, then the remaining real sides, then edge bevels) of the thin prism under the
+ * counter-clockwise triangle (a, b, c) into `out` (SIDE_STRIDE values per side) and its AABB into
+ * `bounds` (minx miny minz maxx maxy maxz). Returns the side count, or 0 for degenerate triangles.
+ */
+function prismSides(
   ax: number, ay: number, az: number,
   bx: number, by: number, bz: number,
   cx: number, cy: number, cz: number,
   thickness: number,
-  contents: number,
-): Brush | null {
+  out: Float64Array,
+  bounds: Float64Array,
+): number {
   const e1x = bx - ax;
   const e1y = by - ay;
   const e1z = bz - az;
@@ -452,47 +522,284 @@ function prismBrush(
   let ny = e1z * e2x - e1x * e2z;
   let nz = e1x * e2y - e1y * e2x;
   const len = Math.sqrt(nx * nx + ny * ny + nz * nz);
-  if (!(len > 1e-6)) return null;
+  if (!(len > 1e-6) || !(thickness > 0)) return 0;
   nx /= len;
   ny /= len;
   nz /= len;
-  const mx = (ax + bx + cx) / 3;
-  const my = (ay + by + cy) / 3;
-  const mz = (az + bz + cz) / 3;
-  const top = nx * mx + ny * my + nz * mz;
-  const planes: Plane[] = [
-    { normal: v3(nx, ny, nz), dist: top },
-    { normal: v3(-nx, -ny, -nz), dist: -(top - thickness) },
-  ];
-  const xs = [ax, bx, cx];
-  const ys = [ay, by, cy];
-  const zs = [az, bz, cz];
+
+  PV[0] = ax; PV[1] = ay; PV[2] = az;
+  PV[3] = bx; PV[4] = by; PV[5] = bz;
+  PV[6] = cx; PV[7] = cy; PV[8] = cz;
+  for (let i = 0; i < 9; i += 3) {
+    PV[9 + i] = PV[i] - nx * thickness;
+    PV[10 + i] = PV[i + 1] - ny * thickness;
+    PV[11 + i] = PV[i + 2] - nz * thickness;
+  }
+
+  // real sides: top, bottom, three walls
+  const top = (nx * (ax + bx + cx) + ny * (ay + by + cy) + nz * (az + bz + cz)) / 3;
+  REAL[0] = nx; REAL[1] = ny; REAL[2] = nz; REAL[3] = top;
+  REAL[4] = -nx; REAL[5] = -ny; REAL[6] = -nz; REAL[7] = -(top - thickness);
   for (let i = 0; i < 3; i++) {
-    const j = (i + 1) % 3;
-    const ex = xs[j] - xs[i];
-    const ey = ys[j] - ys[i];
-    const ez = zs[j] - zs[i];
-    // edge x normal points away from the triangle interior for a CCW triangle
+    const p = i * 3;
+    const q = ((i + 1) % 3) * 3;
+    const ex = PV[q] - PV[p];
+    const ey = PV[q + 1] - PV[p + 1];
+    const ez = PV[q + 2] - PV[p + 2];
+    // edge x normal points away from the interior of a CCW triangle
     let sx = ey * nz - ez * ny;
     let sy = ez * nx - ex * nz;
     let sz = ex * ny - ey * nx;
     const sl = Math.sqrt(sx * sx + sy * sy + sz * sz);
-    if (!(sl > 1e-9)) return null;
+    if (!(sl > 1e-9)) return 0;
     sx /= sl;
     sy /= sl;
     sz /= sl;
-    const dist = sx * xs[i] + sy * ys[i] + sz * zs[i];
-    if (sx * mx + sy * my + sz * mz > dist) {
-      // centroid in front: wrong orientation (shouldn't happen for a CCW triangle)
-      sx = -sx;
-      sy = -sy;
-      sz = -sz;
-      planes.push({ normal: v3(sx, sy, sz), dist: -dist });
+    const o = 8 + i * 4;
+    REAL[o] = sx;
+    REAL[o + 1] = sy;
+    REAL[o + 2] = sz;
+    REAL[o + 3] = sx * PV[p] + sy * PV[p + 1] + sz * PV[p + 2];
+  }
+
+  // bounds
+  let minx = Infinity, miny = Infinity, minz = Infinity;
+  let maxx = -Infinity, maxy = -Infinity, maxz = -Infinity;
+  for (let i = 0; i < 18; i += 3) {
+    const x = PV[i], y = PV[i + 1], z = PV[i + 2];
+    if (x < minx) minx = x;
+    if (x > maxx) maxx = x;
+    if (y < miny) miny = y;
+    if (y > maxy) maxy = y;
+    if (z < minz) minz = z;
+    if (z > maxz) maxz = z;
+  }
+  if (!(maxx - minx > 1e-6 && maxy - miny > 1e-6 && maxz - minz > 1e-6)) return 0;
+  bounds[0] = minx; bounds[1] = miny; bounds[2] = minz;
+  bounds[3] = maxx; bounds[4] = maxy; bounds[5] = maxz;
+
+  let n = 0;
+
+  // axial planes first (-x +x -y +y -z +z): reuse an exactly axial real side at the extent, else a bevel
+  let used = 0;
+  for (let k = 0; k < 6; k++) {
+    const axis = k >> 1;
+    const dir = k & 1 ? 1 : -1;
+    const extent = dir < 0 ? -bounds[axis] : bounds[3 + axis];
+    let found = -1;
+    let foundErr = Infinity;
+    for (let i = 0; i < 5; i++) {
+      if (used & (1 << i)) continue;
+      const o = i * 4;
+      const c0 = REAL[o + axis];
+      const c1 = REAL[o + (axis === 0 ? 1 : 0)];
+      const c2 = REAL[o + (axis === 2 ? 1 : 2)];
+      if (Math.abs(c0 - dir) > AXIAL_EPSILON || Math.abs(c1) > AXIAL_EPSILON || Math.abs(c2) > AXIAL_EPSILON) continue;
+      const err = Math.abs(REAL[o + 3] - extent);
+      if (err <= DIST_EQUAL_EPSILON && err < foundErr) {
+        found = i;
+        foundErr = err;
+      }
+    }
+    if (found >= 0) {
+      used |= 1 << found;
+      const o = found * 4;
+      n = writeSide(out, n, REAL[o], REAL[o + 1], REAL[o + 2], REAL[o + 3], 0);
     } else {
-      planes.push({ normal: v3(sx, sy, sz), dist });
+      const an = AXIAL_NORMALS[k];
+      n = writeSide(out, n, an.x, an.y, an.z, extent, 1);
     }
   }
-  return brushFromPlanes(planes, contents, 0);
+  for (let i = 0; i < 5; i++) {
+    if (used & (1 << i)) continue;
+    const o = i * 4;
+    n = writeSide(out, n, REAL[o], REAL[o + 1], REAL[o + 2], REAL[o + 3], 0);
+  }
+
+  // Edge bevels: planes through an edge, parallel to a world axis, supporting the prism. The bottom edges
+  // are parallel to the top ones and yield the same candidate normals, so each top/bottom pair is
+  // evaluated once and accepted when either edge of the pair touches the supporting plane.
+  for (let e = 0; e < 12; e += 2) {
+    const p = PE[e] * 3;
+    const q = PE[e + 1] * 3;
+    const pair = e < 6; // top edge with its parallel bottom edge (+9 doubles)
+    const p1x = PV[p], p1y = PV[p + 1], p1z = PV[p + 2];
+    const p2x = PV[q], p2y = PV[q + 1], p2z = PV[q + 2];
+    let ex = p2x - p1x;
+    let ey = p2y - p1y;
+    let ez = p2z - p1z;
+    const elen = Math.sqrt(ex * ex + ey * ey + ez * ez);
+    if (elen < BEVEL_MIN_EDGE) continue;
+    ex /= elen;
+    ey /= elen;
+    ez /= elen;
+    if (Math.abs(ex) < 1e-9) ex = 0;
+    if (Math.abs(ey) < 1e-9) ey = 0;
+    if (Math.abs(ez) < 1e-9) ez = 0;
+    for (let axis = 0; axis < 3; axis++) {
+      for (let dir = -1; dir <= 1; dir += 2) {
+        // bevel normal = edge x (dir * axis)
+        let bnx: number;
+        let bny: number;
+        let bnz: number;
+        if (axis === 0) {
+          bnx = 0;
+          bny = ez * dir;
+          bnz = -ey * dir;
+        } else if (axis === 1) {
+          bnx = -ez * dir;
+          bny = 0;
+          bnz = ex * dir;
+        } else {
+          bnx = ey * dir;
+          bny = -ex * dir;
+          bnz = 0;
+        }
+        const bl = Math.sqrt(bnx * bnx + bny * bny + bnz * bnz);
+        if (bl < BEVEL_MIN_CROSS) continue;
+        bnx /= bl;
+        bny /= bl;
+        bnz /= bl;
+        if (Math.abs(bnx) > 1 - AXIAL_EPSILON || Math.abs(bny) > 1 - AXIAL_EPSILON || Math.abs(bnz) > 1 - AXIAL_EPSILON) continue;
+        let dist = -Infinity;
+        for (let k = 0; k < 18; k += 3) {
+          const d = PV[k] * bnx + PV[k + 1] * bny + PV[k + 2] * bnz;
+          if (d > dist) dist = d;
+        }
+        const lim = dist - BEVEL_ON_EPSILON;
+        let touches = p1x * bnx + p1y * bny + p1z * bnz >= lim && p2x * bnx + p2y * bny + p2z * bnz >= lim;
+        if (!touches && pair) {
+          touches =
+            PV[p + 9] * bnx + PV[p + 10] * bny + PV[p + 11] * bnz >= lim &&
+            PV[q + 9] * bnx + PV[q + 10] * bny + PV[q + 11] * bnz >= lim;
+        }
+        if (!touches) continue;
+        let dup = false;
+        for (let k = 0; k < n; k++) {
+          const o = k * SIDE_STRIDE;
+          if (Math.abs(out[o] - bnx) < NORMAL_EPSILON && Math.abs(out[o + 1] - bny) < NORMAL_EPSILON && Math.abs(out[o + 2] - bnz) < NORMAL_EPSILON) {
+            dup = true;
+            break;
+          }
+        }
+        if (dup || n >= MAX_PRISM_SIDES) continue;
+        n = writeSide(out, n, bnx, bny, bnz, dist, 1);
+      }
+    }
+  }
+  return n;
+}
+
+/** Materializes packed sides as BrushSide objects (axial bevels share frozen normals). */
+function unpackSides(data: Float64Array, off: number, count: number): BrushSide[] {
+  const sides: BrushSide[] = new Array(count);
+  for (let i = 0; i < count; i++) {
+    const o = off + i * SIDE_STRIDE;
+    const x = data[o];
+    const y = data[o + 1];
+    const z = data[o + 2];
+    const bevel = data[o + 4] !== 0;
+    let normal: Vec3 | null = null;
+    if (bevel) {
+      if (x === -1 && y === 0 && z === 0) normal = AXIAL_NORMALS[0];
+      else if (x === 1 && y === 0 && z === 0) normal = AXIAL_NORMALS[1];
+      else if (x === 0 && y === -1 && z === 0) normal = AXIAL_NORMALS[2];
+      else if (x === 0 && y === 1 && z === 0) normal = AXIAL_NORMALS[3];
+      else if (x === 0 && y === 0 && z === -1) normal = AXIAL_NORMALS[4];
+      else if (x === 0 && y === 0 && z === 1) normal = AXIAL_NORMALS[5];
+    }
+    sides[i] = { plane: { normal: normal ?? v3(x, y, z), dist: data[o + 3] }, bevel };
+  }
+  return sides;
+}
+
+/**
+ * Thin convex prism under the counter-clockwise triangle (a, b, c): top = triangle plane, bottom
+ * `thickness` below it, three walls, plus axial and edge bevels. Null for degenerate triangles.
+ */
+export function trianglePrismBrush(
+  ax: number, ay: number, az: number,
+  bx: number, by: number, bz: number,
+  cx: number, cy: number, cz: number,
+  thickness: number,
+  contents: number,
+  model = 0,
+): Brush | null {
+  const n = prismSides(ax, ay, az, bx, by, bz, cx, cy, cz, thickness, SCRATCH_SIDES, SCRATCH_BOUNDS);
+  if (n === 0) return null;
+  const b = SCRATCH_BOUNDS;
+  return {
+    sides: unpackSides(SCRATCH_SIDES, 0, n),
+    contents,
+    mins: v3(b[0], b[1], b[2]),
+    maxs: v3(b[3], b[4], b[5]),
+    model,
+  };
+}
+
+/** The five real planes of the prism under triangle (a, b, c) (reference input for brushFromPlanes). */
+export function trianglePrismPlanes(a: Vec3, b: Vec3, c: Vec3, thickness: number): Plane[] | null {
+  const br = trianglePrismBrush(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z, thickness, CONTENTS_SOLID);
+  if (!br) return null;
+  return br.sides.filter((s) => !s.bevel).map((s) => ({ normal: v3clone(s.plane.normal), dist: s.plane.dist }));
+}
+
+/**
+ * A compact, read-mostly Brush whose planes live in a shared Float64Array (SIDE_STRIDE doubles per side)
+ * instead of three JS objects per side - about 4x less memory, which keeps maps with ~200k displacement
+ * triangles in the low hundreds of MB. `sides` is materialized on every read (treat it as a snapshot);
+ * assigning `sides` switches the brush to an ordinary array.
+ */
+export class PackedBrush implements Brush {
+  contents: number;
+  model: number;
+  mins: Vec3;
+  maxs: Vec3;
+  private own: BrushSide[] | null = null;
+
+  constructor(
+    private readonly data: Float64Array,
+    private readonly offset: number,
+    readonly sideCount: number,
+    contents: number,
+    model: number,
+    mins: Vec3,
+    maxs: Vec3,
+  ) {
+    this.contents = contents;
+    this.model = model;
+    this.mins = mins;
+    this.maxs = maxs;
+  }
+
+  get sides(): BrushSide[] {
+    return this.own ?? unpackSides(this.data, this.offset, this.sideCount);
+  }
+
+  set sides(v: BrushSide[]) {
+    this.own = v;
+  }
+}
+
+/** Chunked Float64 storage for packed sides. */
+class SideStore {
+  chunk = new Float64Array(0);
+  private used = 0;
+  constructor(private readonly chunkDoubles = 1 << 20) {}
+
+  /** Copies `count` sides from `src` into `this.chunk` and returns their offset there. */
+  add(src: Float64Array, count: number): number {
+    const need = count * SIDE_STRIDE;
+    if (this.used + need > this.chunk.length) {
+      this.chunk = new Float64Array(Math.max(this.chunkDoubles, need));
+      this.used = 0;
+    }
+    const off = this.used;
+    const chunk = this.chunk;
+    for (let i = 0; i < need; i++) chunk[off + i] = src[i];
+    this.used += need;
+    return off;
+  }
 }
 
 // ------------------------------------------------------------------------------------------ entity classes
