@@ -190,7 +190,9 @@ export async function extractMapArchive(data: ArrayBuffer, fileName: string): Pr
   if (startsWith(bytes, SIG_BZ2)) {
     const out = bunzip2(bytes);
     if (!startsWith(out, SIG_VBSP)) throw new Error('The .bz2 file does not contain a BSP map.');
-    return { name: hint, bsp: out.buffer.slice(out.byteOffset, out.byteOffset + out.byteLength) as ArrayBuffer };
+    // bunzip2 returns an exact-size buffer at offset 0: no copy needed.
+    const exact = out.byteOffset === 0 && out.byteLength === out.buffer.byteLength;
+    return { name: hint, bsp: (exact ? out.buffer : out.slice().buffer) as ArrayBuffer };
   }
   if (startsWith(bytes, SIG_RAR)) {
     const { createExtractorFromData } = await import('node-unrar-js');

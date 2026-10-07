@@ -901,3 +901,50 @@ export function brushEntityStartsEnabled(ent: MapEntity): boolean {
   }
   return !startDisabled;
 }
+
+// ------------------------------------------------------------------------------------------ assembly
+
+export interface CollisionBrushSet {
+  /** Brushes for `new CollisionWorld(brushes)`: world (all contents), solid brush entities, displacements. */
+  brushes: Brush[];
+  /** Brush entity models that must start non-solid: call `world.setModelSolid(model, false)` for each. */
+  disabledModels: number[];
+  /** Brush entity models whose brushes were added (solid classes). */
+  solidModels: number[];
+  warnings: string[];
+}
+
+/**
+ * Collects everything the player collides with, the way the engine sees it: every world brush (solid,
+ * player clip, window, grate, water, ladder... - CollisionWorld masks pick what each query needs), the
+ * brushes of player-solid brush entities (already in world space when `models` came from
+ * buildBrushModels' default), and displacement prisms. Triggers and other non-solid brush entities are left
+ * to the entity system. `models` defaults to buildBrushModels(bsp, { entities }).
+ */
+export function collectCollisionBrushes(
+  bsp: BspFile,
+  entities: MapEntity[],
+  models?: BrushModelInfo[],
+  dispOpts: DisplacementBrushOptions = {},
+): CollisionBrushSet {
+  const warnings: string[] = [];
+  const ms = models ?? buildBrushModels(bsp, { entities, warnings });
+  const brushes: Brush[] = [];
+  // loops instead of push(...array): spreading 100k+ elements overflows the call stack
+  if (ms[0]) for (const b of ms[0].brushes) brushes.push(b);
+  const disabledModels: number[] = [];
+  const solidModels: number[] = [];
+  const seen = new Set<number>();
+  for (const e of entities) {
+    if (e.model <= 0 || e.model >= ms.length || seen.has(e.model) || !isSolidBrushEntity(e)) continue;
+    seen.add(e.model);
+    solidModels.push(e.model);
+    for (const b of ms[e.model].brushes) brushes.push(b);
+    if (!brushEntityStartsEnabled(e)) disabledModels.push(e.model);
+  }
+  const dispWarnings: string[] = [];
+  for (const b of buildDisplacementBrushes(bsp, { ...dispOpts, warnings: dispWarnings })) brushes.push(b);
+  for (const w of dispWarnings) warnings.push(w);
+  if (dispOpts.warnings) for (const w of dispWarnings) dispOpts.warnings.push(w);
+  return { brushes, disabledModels, solidModels, warnings };
+}

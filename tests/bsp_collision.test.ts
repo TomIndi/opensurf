@@ -9,6 +9,7 @@ import {
   brushEntityStartsEnabled,
   brushFromBsp,
   buildBrushModels,
+  collectCollisionBrushes,
   buildDisplacementBrushes,
   dispFlags,
   displacementSurface,
@@ -264,6 +265,26 @@ describe('collision world integration (synthetic map)', () => {
     expect(near(down(0, 330, 0x40000000), 48)).toBe(true); // rotated trigger box, only with its contents mask
     expect(down(30, 300, 0x40000000)).toBeNull(); // outside the rotated box (the floor isn't in this mask)
     expect(near(down(0, 331, MASK_PLAYERSOLID), 0)).toBe(true); // trigger contents aren't player-solid
+  });
+});
+
+describe('collectCollisionBrushes', () => {
+  it('collects world, solid brush entities and displacement prisms; reports start-disabled models', () => {
+    const bsp = parseBsp(buildBoxWorld().buffer);
+    const ents = parseEntities(bsp.entitiesText);
+    const set = collectCollisionBrushes(bsp, ents);
+    // floor + func_brush cube + 8 displacement prisms; the trigger_push is left out
+    expect(set.brushes.length).toBe(1 + 1 + 8);
+    expect(set.solidModels).toEqual([1]);
+    expect(set.disabledModels).toEqual([]);
+    expect(set.brushes.some((b) => b.model === 2)).toBe(false);
+    ents[2].kv.startdisabled = '1';
+    const off = collectCollisionBrushes(bsp, ents);
+    expect(off.disabledModels).toEqual([1]);
+    const world = new CollisionWorld(off.brushes);
+    for (const m of off.disabledModels) world.setModelSolid(m, false);
+    const tr = world.traceRay(v3(100, 0, 200), v3(100, 0, -30), MASK_PLAYERSOLID);
+    expect(Math.abs(tr.endpos.z - 0)).toBeLessThan(0.04); // falls through the disabled func_brush to the floor
   });
 });
 

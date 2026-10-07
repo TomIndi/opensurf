@@ -7,14 +7,22 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } 
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { buildBrushModels, buildDisplacementBrushes, brushEntityPlacement, displacementSurface, dispFlags, isSolidBrushEntity } from '../src/bsp/bspcollision';
+import {
+  brushEntityPlacement,
+  buildBrushModels,
+  buildDisplacementBrushes,
+  collectCollisionBrushes,
+  dispFlags,
+  displacementSurface,
+  isSolidBrushEntity,
+} from '../src/bsp/bspcollision';
 import { allModelBrushIndices, brushModelMap, faceAreas, modelBrushIndices, pointLeaf } from '../src/bsp/bsptree';
 import { parseEntities } from '../src/bsp/entities';
 import { parseBsp, validateBsp } from '../src/bsp/reader';
 import { BspFile } from '../src/bsp/types';
 import { BrushModelInfo, MapEntity } from '../src/map/types';
 import { CollisionWorld } from '../src/physics/collision';
-import { Brush, CONTENTS_SOLID, MASK_PLAYERSOLID } from '../src/physics/types';
+import { CONTENTS_SOLID, MASK_PLAYERSOLID } from '../src/physics/types';
 
 function listMaps(env: string | undefined): string[] {
   if (!env || !existsSync(env)) return [];
@@ -190,11 +198,13 @@ describe.skipIf(MAPS.length === 0)('real maps', () => {
       });
 
       it('collision world: no spawn starts stuck in solid', () => {
-        const brushes: Brush[] = [];
-        for (const b of models[0].brushes) brushes.push(b);
-        for (const e of ents) if (e.model > 0 && isSolidBrushEntity(e)) for (const b of models[e.model].brushes) brushes.push(b);
-        for (const b of buildDisplacementBrushes(bsp)) brushes.push(b);
-        const world = new CollisionWorld(brushes);
+        const set = collectCollisionBrushes(bsp, ents, models);
+        let expected = models[0].brushes.length;
+        for (const m of set.solidModels) expected += models[m].brushes.length;
+        expect(set.brushes.length).toBeGreaterThanOrEqual(expected);
+        for (const m of set.solidModels) expect(isSolidBrushEntity(ents.find((e) => e.model === m)!)).toBe(true);
+        const world = new CollisionWorld(set.brushes);
+        for (const m of set.disabledModels) world.setModelSolid(m, false);
         for (const s of ents) {
           if (!s.classname.startsWith('info_player_')) continue;
           const o = { x: s.origin.x, y: s.origin.y, z: s.origin.z + 1 };
