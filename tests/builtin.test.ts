@@ -14,7 +14,7 @@ import { Autopilot, AutopilotOptions } from '../src/map/builtin/autopilot';
 import { MapBuilder, RAMP_MAX_NZ, RAMP_MIN_NZ, rampHeightFor } from '../src/map/builtin/builder';
 import { BuiltCourse, RampChain, rampFrame, rampLength, rampPoint } from '../src/map/builtin/course';
 import { BUILTIN_MAPS, buildBuiltinCourse, buildBuiltinMap } from '../src/map/builtin/index';
-import { predictFlight, pushVector } from '../src/map/builtin/parts';
+import { addSign, predictFlight, pushVector, signWidth } from '../src/map/builtin/parts';
 import { LoadedMap } from '../src/map/types';
 import { boxIntersectsBrush, CollisionWorld } from '../src/physics/collision';
 import { brushWindings } from '../src/physics/brushbuild';
@@ -390,6 +390,12 @@ for (const info of BUILTIN_MAPS) {
       const glow = [...r.materials.values()].filter((m) => m.name.includes('glow'));
       expect(glow.length).toBeGreaterThan(0);
       for (const g of glow) expect(g.unlit).toBe(true);
+      // trims lying on other surfaces are decal batches (depth-biased by the renderer); free-standing glowing
+      // bars (gates, frames) are ordinary geometry
+      const decals = r.batches.filter((b) => b.decal);
+      expect(decals.length).toBeGreaterThan(0);
+      for (const d of decals) expect(d.material).toMatch(/glow/);
+      expect(r.batches.some((b) => !b.decal && /glow/.test(b.material))).toBe(true);
     });
 
     it('every world brush face is drawn or deliberately hidden; ramp faces are fully covered', () => {
@@ -999,6 +1005,38 @@ describe('MapBuilder entities and output', () => {
     expect(tr.fraction).toBeLessThan(1);
     expect(floorBelow(m, inside)).toBeLessThan(2);
     expect(m.render.materials.has('builtin/floor_dark')).toBe(true);
+  });
+
+  it('addSign draws glowing stroke-font text centred on the point and readable from the side it faces', () => {
+    const b = new MapBuilder('sign');
+    const h = 60;
+    // an 'L' facing +x: read by someone looking along -x, whose right is +y
+    addSign(b, 'L', v3(0, 0, 100), v3(1, 0, 0), h, 'builtin/glow_white');
+    const m = b.build();
+    const pts: Vec3[] = [];
+    for (const bt of m.render.batches) {
+      expect(bt.material).toBe('builtin/glow_white');
+      expect(bt.decal).toBeFalsy();
+      for (let i = 0; i < bt.positions.length; i += 3) pts.push(v3(bt.positions[i], bt.positions[i + 1], bt.positions[i + 2]));
+    }
+    const stroke = h / 9;
+    const w = (h * 4) / 6;
+    expect(signWidth('L', h)).toBeCloseTo(w, 9);
+    for (const p of pts) {
+      expect(Math.abs(p.x)).toBeLessThanOrEqual(stroke / 2 + 1e-3);
+      expect(Math.abs(p.y)).toBeLessThanOrEqual(w / 2 + stroke / 2 + 1e-3);
+      expect(p.z).toBeGreaterThanOrEqual(100 - h / 2 - stroke / 2 - 1e-3);
+      expect(p.z).toBeLessThanOrEqual(100 + h / 2 + stroke / 2 + 1e-3);
+    }
+    // the upright stroke is on the reader's left (-y), the foot runs to their right (+y)
+    const upper = pts.filter((p) => p.z > 100 + stroke);
+    const foot = pts.filter((p) => p.z < 100 - h / 2 + stroke);
+    expect(Math.max(...upper.map((p) => p.y))).toBeCloseTo(-w / 2 + stroke / 2, 3);
+    expect(Math.max(...foot.map((p) => p.y))).toBeCloseTo(w / 2, 3);
+    // longer texts are centred too, and unknown characters are rejected
+    expect(signWidth('CP 1', 96)).toBeCloseTo(4 * 64 + 3 * 32, 9);
+    expect(() => addSign(new MapBuilder('x'), 'a~', v3(), v3(0, 1, 0), 32, 'builtin/glow_white')).toThrow(/glyph/);
+    expect(() => addSign(new MapBuilder('x'), 'A', v3(), v3(0, 0, 1), 32, 'builtin/glow_white')).toThrow(/facing/);
   });
 
   it('predictFlight follows trigger_push semantics: the vertical push only acts while inside, the horizontal one is kept', () => {

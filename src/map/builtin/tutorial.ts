@@ -10,7 +10,7 @@
 import { v3 } from '../../core/vec3';
 import { MapBuilder, RampRecord } from './builder';
 import { BuiltCourse, Course, CourseRamp, CourseSection, RampChain, rampLength, rampPoint } from './course';
-import { addBackstop, addRampGate, addStartRoom, addVoidGrid, rampBottomInRect, rampZoneBox, stageDestination } from './parts';
+import { addBackstop, addEndSign, addRampGate, addSign, addStartRoom, addVoidGrid, rampBottomInRect, rampZoneBox, stageDestination } from './parts';
 
 export function buildTutorial(): BuiltCourse {
   const b = new MapBuilder('surf_tutorial', {
@@ -37,7 +37,13 @@ export function buildTutorial(): BuiltCourse {
     group: 0,
     playerSpawn: true,
     alcove: { dest: 'tut_b1', glow: BONUS_GLOW },
+    label: 'SURF TUTORIAL',
   });
+  // the basics on the side walls of the start room, and a reminder floating over the first ramp
+  addSign(b, 'HOLD A OR D INTO THE RAMP', v3(X0 - 320, -253, Z0 + 168), v3(0, 1, 0), 20, 'builtin/glow_cyan');
+  addSign(b, 'NEVER PRESS W ON A RAMP', v3(X0 - 320, -253, Z0 + 128), v3(0, 1, 0), 20, 'builtin/glow_cyan');
+  addSign(b, 'TYPE !R TO RESTART', v3(X0 - 320, 253, Z0 + 168), v3(0, -1, 0), 20, 'builtin/glow_cyan');
+  addSign(b, '!B 1 OR BACK DOOR FOR BONUS', v3(X0 - 320, 253, Z0 + 128), v3(0, -1, 0), 20, BONUS_GLOW);
 
   // ---------------------------------------------------------------- ramps
   // Gap drops are ballistic (RampChain.autoDrop): `speed` is the exit speed a gap is designed for - the speed a
@@ -53,6 +59,9 @@ export function buildTutorial(): BuiltCourse {
   const W = 352;
   // section 1: the long first ramp and a straight follow-up
   R.push(chain.straight({ gap: 0, drop: 0, length: 4200, descent: 7, side: 'left', width: w1, mat: mats[0], sideMat: SIDE, trimMat: TRIM, trimWidth: 6, name: 'ramp 1' }));
+  // the first ramp's face is on your left: hold D (strafe right, toward the ridge) and look down the ramp
+  const hint = rampPoint(R[0], 'left', 1100, 0.45);
+  addSign(b, 'HOLD D', v3(hint.x, hint.y, Z0 + 140), v3(-1, 0, 0), 96, 'builtin/glow_cyan');
   R.push(chain.straight({ gap: 320, speed: 900, land: 400, length: 3000, descent: 5, side: 'left', width: W, mat: mats[0], sideMat: SIDE, trimMat: TRIM, trimWidth: 6, name: 'ramp 2' }));
   // section 2: left/right zigzag across a corridor
   R.push(chain.straight({ gap: 448, shift: 800, travel: 500, speed: 1100, land: 450, length: 3200, descent: 5, dropIn, side: 'right', width: W, mat: mats[1], sideMat: SIDE, trimMat: TRIM, trimWidth: 6, name: 'ramp 3' }));
@@ -76,6 +85,7 @@ export function buildTutorial(): BuiltCourse {
   const endMax = v3(endRidge.x + 576 + 1536, exitPoint.y + 640, endTop);
   b.addBox(endMin, endMax, { top: 'builtin/floor_green', sides: SIDE, bottom: SIDE });
   b.addTopTrim(endMin, endMax, 'builtin/glow_green', 12);
+  addEndSign(b, endMin, endMax, v3(1, 0, 0), 'builtin/glow_green');
   addBackstop(b, endMin, endMax, v3(1, 0, 0), WALL);
   b.addZone('end', v3(endMin.x, endMin.y, endTop), v3(endMax.x, endMax.y, endTop + 1024));
   const finish = v3((endMin.x + endMax.x) / 2, exitPoint.y, endTop);
@@ -109,7 +119,7 @@ export function buildTutorial(): BuiltCourse {
       b.addDestination(dest, d.origin, d.yaw);
       const zb = rampZoneBox(first.ramp, first.face);
       b.addZone('checkpoint', zb.mins, zb.maxs, { index: s });
-      addRampGate(b, first.ramp, first.face, 64, glows[s]);
+      addRampGate(b, first.ramp, first.face, 64, glows[s], 16, `CP ${s}`);
     }
     sections.push({ name: s === 0 ? 'Start' : `Checkpoint ${s}`, dest, ramps: sectionRamps[s], marker: s });
   }
@@ -133,7 +143,7 @@ export function buildTutorial(): BuiltCourse {
   // a ^ double ramp, an S-bend (a left bend, a hop across onto a right bend) and a long finale.
   const BY = 7400;
   const BZ = 5600;
-  const bonusRoom = addStartRoom(b, { door: v3(X0, BY, BZ), floor: FLOOR, wall: WALL, ceiling: 'builtin/wall_grey', trim: BONUS_GLOW, dest: 'tut_b1', group: 1 });
+  const bonusRoom = addStartRoom(b, { door: v3(X0, BY, BZ), floor: FLOOR, wall: WALL, ceiling: 'builtin/wall_grey', trim: BONUS_GLOW, dest: 'tut_b1', group: 1, label: 'BONUS 1' });
   const BM = { mat: 'builtin/ramp_yellow', sideMat: SIDE, trimMat: TRIM, trimWidth: 6 };
   const bch = new RampChain(b, v3(X0 - 112, BY - w1 * 0.55, BZ - 96), 0);
   const B: RampRecord[] = [];
@@ -150,6 +160,7 @@ export function buildTutorial(): BuiltCourse {
   const bEndMax = v3(bRidge.x + 576 + 1536, bExit.y + 640, bTop);
   b.addBox(bEndMin, bEndMax, { top: 'builtin/floor_yellow', sides: SIDE, bottom: SIDE });
   b.addTopTrim(bEndMin, bEndMax, BONUS_GLOW, 12);
+  addEndSign(b, bEndMin, bEndMax, v3(1, 0, 0), BONUS_GLOW);
   addBackstop(b, bEndMin, bEndMax, v3(1, 0, 0), WALL);
   b.addZone('end', v3(bEndMin.x, bEndMin.y, bTop), v3(bEndMax.x, bEndMax.y, bTop + 1024), { group: 1 });
   const bonus: Course = {

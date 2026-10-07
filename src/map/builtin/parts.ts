@@ -2,7 +2,7 @@
 // stage rooms and fail-teleport volumes.
 import { Vec3, v3 } from '../../core/vec3';
 import { MapBuilder, RampRecord } from './builder';
-import { rampLength, rampPoint } from './course';
+import { rampFrame, rampLength, rampPoint } from './course';
 
 /** Yaw (degrees) of a ramp's first segment. */
 export function rampStartYaw(r: RampRecord): number {
@@ -86,6 +86,7 @@ export function addBonusAlcove(b: MapBuilder, wallX: number, cy: number, floorZ:
   addGlowBar(b, v3(fx, cy - hw - 6, floorZ), v3(fx, cy - hw - 6, floorZ + H + 12), 8, style.glow);
   addGlowBar(b, v3(fx, cy + hw + 6, floorZ), v3(fx, cy + hw + 6, floorZ + H + 12), 8, style.glow);
   addGlowBar(b, v3(fx, cy - hw - 6, floorZ + H + 8), v3(fx, cy + hw + 6, floorZ + H + 8), 8, style.glow);
+  addSign(b, 'BONUS', v3(fx, cy, floorZ + H + 38), v3(1, 0, 0), 32, style.glow);
   // the teleporter fills the alcove behind the wall
   b.addTeleport(v3(x0, cy - hw, floorZ), v3(x1 - 8, cy + hw, floorZ + H), dest);
 }
@@ -103,8 +104,10 @@ export interface StartRoomSpec {
   group: number;
   /** Also a player spawn point (info_player_*). */
   playerSpawn?: boolean;
-  /** A teleporter alcove in the back wall to a bonus start. */
+  /** A teleporter alcove in the back wall to a bonus start (signed "BONUS"). */
   alcove?: { dest: string; glow: string };
+  /** Sign above the doorway, facing the spawn (e.g. the map or bonus name). */
+  label?: string;
 }
 
 /**
@@ -121,6 +124,7 @@ export function addStartRoom(b: MapBuilder, s: StartRoomSpec): { spawn: Vec3; mi
   b.addRoom(mins, maxs, { floor: s.floor, wall: s.wall, ceiling: s.ceiling }, openings);
   b.addTopTrim(v3(mins.x, mins.y, Z - 16), v3(maxs.x, maxs.y, Z), s.trim, 6);
   if (s.alcove) addBonusAlcove(b, mins.x, s.door.y, Z, s.alcove.dest, { floor: s.floor, wall: s.wall, glow: s.alcove.glow });
+  if (s.label) addSign(b, s.label, v3(s.door.x - 4, s.door.y, Z + 264), v3(-1, 0, 0), 28, s.trim);
   const spawn = v3(s.door.x - 512, s.door.y, Z + 1);
   if (s.playerSpawn) b.addSpawn(spawn, 0);
   b.addDestination(s.dest, spawn, 0);
@@ -240,10 +244,88 @@ export function addGlowBar(b: MapBuilder, a: Vec3, c: Vec3, size: number, mat: s
 }
 
 /**
+ * Stroke font for signs: each glyph is a list of segments [x0, y0, x1, y1] on a 4 x 6 grid (y up, baseline 0).
+ */
+const GLYPHS: Record<string, number[][]> = {
+  A: [[0, 0, 0, 4], [0, 4, 2, 6], [2, 6, 4, 4], [4, 4, 4, 0], [0, 3, 4, 3]],
+  B: [[0, 0, 0, 6], [0, 6, 3, 6], [3, 6, 4, 5], [4, 5, 4, 4], [4, 4, 3, 3], [0, 3, 3, 3], [3, 3, 4, 2], [4, 2, 4, 1], [4, 1, 3, 0], [3, 0, 0, 0]],
+  C: [[4, 6, 0, 6], [0, 6, 0, 0], [0, 0, 4, 0]],
+  D: [[0, 0, 0, 6], [0, 6, 2, 6], [2, 6, 4, 4], [4, 4, 4, 2], [4, 2, 2, 0], [2, 0, 0, 0]],
+  E: [[4, 6, 0, 6], [0, 6, 0, 0], [0, 0, 4, 0], [0, 3, 3, 3]],
+  F: [[4, 6, 0, 6], [0, 6, 0, 0], [0, 3, 3, 3]],
+  G: [[4, 6, 0, 6], [0, 6, 0, 0], [0, 0, 4, 0], [4, 0, 4, 3], [4, 3, 2, 3]],
+  H: [[0, 0, 0, 6], [4, 0, 4, 6], [0, 3, 4, 3]],
+  I: [[2, 0, 2, 6], [1, 6, 3, 6], [1, 0, 3, 0]],
+  J: [[4, 6, 4, 0], [4, 0, 0, 0], [0, 0, 0, 2]],
+  K: [[0, 0, 0, 6], [0, 3, 4, 6], [0, 3, 4, 0]],
+  L: [[0, 6, 0, 0], [0, 0, 4, 0]],
+  M: [[0, 0, 0, 6], [0, 6, 2, 3], [2, 3, 4, 6], [4, 6, 4, 0]],
+  N: [[0, 0, 0, 6], [0, 6, 4, 0], [4, 0, 4, 6]],
+  O: [[0, 0, 0, 6], [0, 6, 4, 6], [4, 6, 4, 0], [4, 0, 0, 0]],
+  P: [[0, 0, 0, 6], [0, 6, 4, 6], [4, 6, 4, 3], [4, 3, 0, 3]],
+  Q: [[0, 0, 0, 6], [0, 6, 4, 6], [4, 6, 4, 0], [4, 0, 0, 0], [2, 2, 4, 0]],
+  R: [[0, 0, 0, 6], [0, 6, 4, 6], [4, 6, 4, 3], [4, 3, 0, 3], [2, 3, 4, 0]],
+  S: [[4, 6, 0, 6], [0, 6, 0, 3], [0, 3, 4, 3], [4, 3, 4, 0], [4, 0, 0, 0]],
+  T: [[0, 6, 4, 6], [2, 6, 2, 0]],
+  U: [[0, 6, 0, 0], [0, 0, 4, 0], [4, 0, 4, 6]],
+  V: [[0, 6, 2, 0], [2, 0, 4, 6]],
+  W: [[0, 6, 1, 0], [1, 0, 2, 3], [2, 3, 3, 0], [3, 0, 4, 6]],
+  X: [[0, 0, 4, 6], [0, 6, 4, 0]],
+  Y: [[0, 6, 2, 3], [4, 6, 2, 3], [2, 3, 2, 0]],
+  Z: [[0, 6, 4, 6], [4, 6, 0, 0], [0, 0, 4, 0]],
+  '0': [[0, 0, 0, 6], [0, 6, 4, 6], [4, 6, 4, 0], [4, 0, 0, 0], [0, 0, 4, 6]],
+  '1': [[2, 0, 2, 6], [2, 6, 1, 5], [1, 0, 3, 0]],
+  '2': [[0, 6, 4, 6], [4, 6, 4, 3], [4, 3, 0, 3], [0, 3, 0, 0], [0, 0, 4, 0]],
+  '3': [[0, 6, 4, 6], [4, 6, 4, 0], [4, 0, 0, 0], [1, 3, 4, 3]],
+  '4': [[0, 6, 0, 3], [0, 3, 4, 3], [4, 6, 4, 0]],
+  '5': [[4, 6, 0, 6], [0, 6, 0, 3], [0, 3, 4, 3], [4, 3, 4, 0], [4, 0, 0, 0]],
+  '6': [[4, 6, 0, 6], [0, 6, 0, 0], [0, 0, 4, 0], [4, 0, 4, 3], [4, 3, 0, 3]],
+  '7': [[0, 6, 4, 6], [4, 6, 1, 0]],
+  '8': [[0, 0, 0, 6], [0, 6, 4, 6], [4, 6, 4, 0], [4, 0, 0, 0], [0, 3, 4, 3]],
+  '9': [[4, 3, 0, 3], [0, 3, 0, 6], [0, 6, 4, 6], [4, 6, 4, 0], [4, 0, 0, 0]],
+  '!': [[2, 6, 2, 2], [2, 0.7, 2, 0]],
+  '-': [[1, 3, 3, 3]],
+  ' ': [],
+};
+
+/** Width of a sign's text for glyph height `height` (glyphs are 4/6 as wide as tall, 1/3 height apart). */
+export function signWidth(text: string, height: number): number {
+  const n = text.length;
+  return n > 0 ? n * (height * (4 / 6)) + (n - 1) * (height / 3) : 0;
+}
+
+/**
+ * Glowing text (render only), like the stage/bonus signs of surf maps: upper-case letters, digits, space, '!'
+ * and '-', drawn with glow bars in a vertical plane. `center` is the middle of the text, `facing` the
+ * horizontal direction the sign faces (towards its readers), `height` the glyph height.
+ */
+export function addSign(b: MapBuilder, text: string, center: Vec3, facing: Vec3, height: number, mat: string): void {
+  const fl = Math.hypot(facing.x, facing.y);
+  if (!(fl > 1e-9)) throw new Error('addSign: facing must be horizontal and non-zero');
+  const f = v3(facing.x / fl, facing.y / fl, 0);
+  // the reader looks along -f: their right is (-f.y, f.x)
+  const right = v3(-f.y, f.x, 0);
+  const cell = height / 6;
+  const total = signWidth(text, height);
+  const stroke = Math.max(2, height / 9);
+  let x0 = -total / 2;
+  for (const ch of text.toUpperCase()) {
+    const g = GLYPHS[ch];
+    if (!g) throw new Error(`addSign: no glyph for "${ch}"`);
+    for (const [ax, ay, bx, by] of g) {
+      const pa = v3(center.x + right.x * (x0 + ax * cell), center.y + right.y * (x0 + ax * cell), center.z - height / 2 + ay * cell);
+      const pb = v3(center.x + right.x * (x0 + bx * cell), center.y + right.y * (x0 + bx * cell), center.z - height / 2 + by * cell);
+      addGlowBar(b, pa, pb, stroke, mat);
+    }
+    x0 += height * (4 / 6) + height / 3;
+  }
+}
+
+/**
  * A glowing gate frame (render only) around the start of a ramp's surfed face at `along`: two posts and a
  * lintel, a little outside the face so runs pass through it untouched.
  */
-export function addRampGate(b: MapBuilder, r: RampRecord, face: 'left' | 'right', along: number, mat: string, size = 16): void {
+export function addRampGate(b: MapBuilder, r: RampRecord, face: 'left' | 'right', along: number, mat: string, size = 16, label?: string): void {
   const top = rampPoint(r, face, along, 0);
   const bottom = rampPoint(r, face, along, 1);
   const dx = bottom.x - top.x;
@@ -259,6 +341,26 @@ export function addRampGate(b: MapBuilder, r: RampRecord, face: 'left' | 'right'
   addGlowBar(b, v3(pIn.x, pIn.y, lo), v3(pIn.x, pIn.y, hi), size, mat);
   addGlowBar(b, v3(pOut.x, pOut.y, lo), v3(pOut.x, pOut.y, hi), size, mat);
   addGlowBar(b, v3(pIn.x, pIn.y, hi), v3(pOut.x, pOut.y, hi), size, mat);
+  if (label) {
+    // above the lintel, facing the runs coming down the ramp
+    const t = rampFrame(r, face, top).tangent;
+    addSign(b, label, v3((pIn.x + pOut.x) / 2, (pIn.y + pOut.y) / 2, hi + 112), v3(-t.x, -t.y, 0), 96, mat);
+  }
+}
+
+/**
+ * "END" (or `text`) floating over the far edge of an end platform [mins, maxs] for runs arriving along the
+ * horizontal direction `fwd`, facing them.
+ */
+export function addEndSign(b: MapBuilder, mins: Vec3, maxs: Vec3, fwd: Vec3, mat: string, text = 'END'): void {
+  const l = Math.hypot(fwd.x, fwd.y);
+  const fx = fwd.x / l;
+  const fy = fwd.y / l;
+  // distance from the centre to the far edge along fwd (support of the box)
+  const reach = ((maxs.x - mins.x) / 2) * Math.abs(fx) + ((maxs.y - mins.y) / 2) * Math.abs(fy);
+  const d = Math.max(0, reach - 64);
+  const c = v3((mins.x + maxs.x) / 2 + fx * d, (mins.y + maxs.y) / 2 + fy * d, maxs.z + 320);
+  addSign(b, text, c, v3(-fx, -fy, 0), 160, mat);
 }
 
 /** Part of a ramp (along-ridge range) owned by a void-grid owner. */

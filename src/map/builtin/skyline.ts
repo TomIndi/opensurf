@@ -6,7 +6,7 @@
 import { v3, Vec3 } from '../../core/vec3';
 import { MapBuilder, RampRecord } from './builder';
 import { BuiltCourse, Course, CourseRamp, CourseSection, RampChain, dirOf, rampLength, rampPoint } from './course';
-import { addBackstop, addRampGate, addStartRoom, addVoidGrid, rampZoneBox, stageDestination } from './parts';
+import { addBackstop, addEndSign, addRampGate, addStartRoom, addVoidGrid, rampZoneBox, stageDestination } from './parts';
 
 export function buildSkyline(): BuiltCourse {
   const b = new MapBuilder('surf_skyline', {
@@ -16,6 +16,8 @@ export function buildSkyline(): BuiltCourse {
   const RAMP = 'builtin/ramp_white';
   const SIDE = 'builtin/wall_dark';
   const TRIM = 'builtin/glow_orange';
+  /** Gates and signs stand against the sky: white reads better than orange on the dusk haze. */
+  const SIGN = 'builtin/glow_white';
   const W = 320;
   const st = { mat: RAMP, sideMat: SIDE, trimMat: TRIM };
   const Z0 = 8400;
@@ -33,6 +35,7 @@ export function buildSkyline(): BuiltCourse {
     group: 0,
     playerSpawn: true,
     alcove: { dest: 'sky_b1', glow: BONUS_GLOW },
+    label: 'SURF SKYLINE',
   });
 
   // ---------------------------------------------------------------- the course
@@ -67,6 +70,7 @@ export function buildSkyline(): BuiltCourse {
   b.addBox(endMin, endMax, { top: 'builtin/floor_orange', sides: SIDE, bottom: SIDE });
   b.addTopTrim(endMin, endMax, TRIM, 16);
   addBackstop(b, endMin, endMax, v3(fx, fy, 0), 'builtin/wall_grey');
+  addEndSign(b, endMin, endMax, v3(fx, fy, 0), SIGN);
   b.addZone('end', v3(endMin.x, endMin.y, endTop), v3(endMax.x, endMax.y, endTop + 1024));
   const finish = v3(c.x, c.y, endTop);
 
@@ -99,7 +103,7 @@ export function buildSkyline(): BuiltCourse {
       b.addDestination(dest, d.origin, d.yaw);
       const zb = rampZoneBox(first.ramp, first.face);
       b.addZone('checkpoint', zb.mins, zb.maxs, { index: s });
-      addRampGate(b, first.ramp, first.face, 64, TRIM);
+      addRampGate(b, first.ramp, first.face, 64, SIGN, 16, `CP ${s}`);
     }
     sections.push({ name: s === 0 ? 'Start' : `Checkpoint ${s}`, dest, ramps: sectionRamps[s], marker: s });
   }
@@ -108,7 +112,7 @@ export function buildSkyline(): BuiltCourse {
   // In the empty north half of the map, reached from the start room's back alcove or with !b 1.
   const BZ = 8000;
   const bStart = v3(-14200, 9000, BZ);
-  const bRoom = addStartRoom(b, { door: bStart, floor: 'builtin/floor_grey', wall: 'builtin/wall_grey', ceiling: 'builtin/wall_dark', trim: BONUS_GLOW, dest: 'sky_b1', group: 1 });
+  const bRoom = addStartRoom(b, { door: bStart, floor: 'builtin/floor_grey', wall: 'builtin/wall_grey', ceiling: 'builtin/wall_dark', trim: BONUS_GLOW, dest: 'sky_b1', group: 1, label: 'BONUS 1' });
   const bst = { mat: RAMP, sideMat: SIDE, trimMat: BONUS_GLOW };
   const bch = new RampChain(b, v3(bStart.x - 112, bStart.y - W * 0.55, BZ - 96), 0);
   const B: RampRecord[] = [];
@@ -126,6 +130,7 @@ export function buildSkyline(): BuiltCourse {
   b.addBox(bEndMin, bEndMax, { top: 'builtin/floor_cyan', sides: SIDE, bottom: SIDE });
   b.addTopTrim(bEndMin, bEndMax, BONUS_GLOW, 16);
   addBackstop(b, bEndMin, bEndMax, bFwd, 'builtin/wall_grey');
+  addEndSign(b, bEndMin, bEndMax, bFwd, BONUS_GLOW);
   b.addZone('end', v3(bEndMin.x, bEndMin.y, bTop), v3(bEndMax.x, bEndMax.y, bTop + 1024), { group: 1 });
   const bonus: Course = {
     id: 'surf_skyline bonus 1',

@@ -132,11 +132,14 @@ interface RenderPoly {
   normal: Vec3;
   mat: string;
   model: number;
+  /** Lies (lifted a fraction of a unit) on another surface: drawn as a decal batch (RenderBatch.decal). */
+  decal: boolean;
 }
 
 interface BatchAcc {
   model: number;
   material: string;
+  decal: boolean;
   positions: number[];
   normals: number[];
   uvs: number[];
@@ -464,29 +467,30 @@ export class MapBuilder {
       const f1 = Math.min(0.45, width / l1);
       const lerp = (p: Vec3, q: Vec3, t: number): Vec3 => v3(p.x + (q.x - p.x) * t, p.y + (q.y - p.y) * t, p.z + (q.z - p.z) * t);
       // ridge strip and bottom strip
-      this.addQuadOriented([a0, a1, lerp(a1, b1, f1), lerp(a0, b0, f0)], nrm, lift, mat);
-      this.addQuadOriented([lerp(b0, a0, f0), lerp(b1, a1, f1), b1, b0], nrm, lift, mat);
+      this.addQuadOriented([a0, a1, lerp(a1, b1, f1), lerp(a0, b0, f0)], nrm, lift, mat, true);
+      this.addQuadOriented([lerp(b0, a0, f0), lerp(b1, a1, f1), b1, b0], nrm, lift, mat, true);
     }
   }
 
   /** Render-only quad (any winding; it is oriented to face `normal`), offset by `lift`. */
-  private addQuadOriented(q: Vec3[], normal: Vec3, lift: Vec3, mat: string, model = 0): void {
+  private addQuadOriented(q: Vec3[], normal: Vec3, lift: Vec3, mat: string, decal: boolean): void {
     const pts = q.map((p) => add(p, lift));
     const n = cross(sub(pts[1], pts[0]), sub(pts[2], pts[0]));
     if (dot(n, normal) < 0) pts.reverse();
-    this.renderPolys.push({ points: pts, normal: v3clone(normal), mat, model });
+    this.renderPolys.push({ points: pts, normal: v3clone(normal), mat, model: 0, decal });
   }
 
   /**
    * Render-only flat polygon (no collision), e.g. glowing trims and signs. Points are oriented to face
-   * `normal` and pushed `lift` units along it.
+   * `normal` and pushed `lift` units along it. `onSurface` (default: when lifted) marks it as lying on
+   * another surface, so it is drawn as a decal (depth-biased, RenderBatch.decal) and never z-fights it.
    */
-  addDecal(points: Vec3[], normal: Vec3, mat: string, lift = 0.5): void {
+  addDecal(points: Vec3[], normal: Vec3, mat: string, lift = 0.5, onSurface = lift > 0): void {
     const n = norm(normal);
     const pts = points.map((p) => add(p, scale(n, lift)));
     const c = cross(sub(pts[1], pts[0]), sub(pts[2], pts[0]));
     if (dot(c, n) < 0) pts.reverse();
-    this.renderPolys.push({ points: pts, normal: n, mat, model: 0 });
+    this.renderPolys.push({ points: pts, normal: n, mat, model: 0, decal: onSurface });
   }
 
   /** Render-only glowing outline of a box's top edges (a band `width` wide on the top face, inset). */
@@ -676,13 +680,14 @@ export class MapBuilder {
       return m;
     };
     const batches = new Map<string, BatchAcc>();
-    const batchFor = (model: number, mat: string): BatchAcc => {
-      const key = `${model}|${mat}`;
+    const batchFor = (model: number, mat: string, decal = false): BatchAcc => {
+      const key = `${model}|${mat}|${decal ? 'decal' : ''}`;
       let b = batches.get(key);
       if (!b) {
         b = {
           model,
           material: mat,
+          decal,
           positions: [],
           normals: [],
           uvs: [],
@@ -694,10 +699,10 @@ export class MapBuilder {
       }
       return b;
     };
-    const emitPoly = (model: number, matName: string, pts: Vec3[], n: Vec3): void => {
+    const emitPoly = (model: number, matName: string, pts: Vec3[], n: Vec3, decal = false): void => {
       if (pts.length < 3) return;
       const m = material(matName);
-      const acc = batchFor(model, matName);
+      const acc = batchFor(model, matName, decal);
       const base = acc.positions.length / 3;
       const [tu, tv] = faceAxes(n);
       for (const p of pts) {
@@ -759,11 +764,11 @@ export class MapBuilder {
       // shade and texture with the polygon's own plane (Newell normal), on the side of the requested normal
       let nn = newellNormal(rp.points);
       if (dot(nn, rp.normal) < 0) nn = scale(nn, -1);
-      emitPoly(rp.model, rp.mat, rp.points, nn.x || nn.y || nn.z ? nn : rp.normal);
+      emitPoly(rp.model, rp.mat, rp.points, nn.x || nn.y || nn.z ? nn : rp.normal, rp.decal);
     }
     const out: RenderBatch[] = [];
     for (const acc of batches.values()) {
-      out.push({
+      const batch: RenderBatch = {
         model: acc.model,
         material: acc.material,
         positions: new Float32Array(acc.positions),
@@ -777,7 +782,9 @@ export class MapBuilder {
         isDisplacement: false,
         mins: acc.mins,
         maxs: acc.maxs,
-      });
+      };
+      if (acc.decal) batch.decal = true;
+      out.push(batch);
     }
 
     return {

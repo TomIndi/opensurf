@@ -178,6 +178,7 @@ uniform float uBrightness;
 uniform float uFullbright;
 uniform vec3 uAmbSky;
 uniform vec3 uAmbGround;
+uniform vec3 uSunLight;
 ${FOG_FUNCS}
 ${SKY_FUNCS}
 in vec2 vUv;
@@ -223,7 +224,7 @@ vec3 synthLight(vec3 n) {
   float sun = max(ndl * 0.8 + 0.2, 0.0);
   float fill = max(-dot(n, vec3(uSunDir.xy, 0.0)), 0.0) * 0.18;
   float facing = 0.94 + 0.06 * sin(atan(n.y, n.x) * 2.0 + 0.7) * (1.0 - abs(n.z));
-  return (amb + uSunColor * sun + uAmbSky * fill) * facing;
+  return (amb + uSunLight * sun + uAmbSky * fill) * facing;
 }
 
 void main() {
@@ -302,6 +303,7 @@ uniform float uTexStrength;
 uniform vec3 uTint;
 uniform vec3 uAmbSky;
 uniform vec3 uAmbGround;
+uniform vec3 uSunLight;
 uniform float uFullbright;
 ${FOG_FUNCS}
 ${SKY_FUNCS}
@@ -358,7 +360,7 @@ void main() {
 #ifdef USE_LIGHTMAP
   vec3 light = mix(texture(lightmap, vLmUv).rgb, vec3(1.0), uFullbright);
 #else
-  vec3 light = mix(mix(uAmbGround, uAmbSky, 0.75) + uSunColor * max(uSunDir.z, 0.0) * 0.6, vec3(1.0), uFullbright);
+  vec3 light = mix(mix(uAmbGround, uAmbSky, 0.75) + uSunLight * max(uSunDir.z, 0.0), vec3(1.0), uFullbright);
   light = max(light, vec3(0.45));
 #endif
   vec3 tex = texture(map, vUv * 0.5 + g * 0.02).rgb;
