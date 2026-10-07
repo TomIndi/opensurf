@@ -1,0 +1,659 @@
+/* Main menu, home page, help/about pages, pause menu. */
+
+.surf-ui .screen {
+  position: absolute;
+  inset: 0;
+  pointer-events: auto;
+}
+
+.surf-ui .menu-screen {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  animation: fade-in 0.35s;
+}
+
+.surf-ui .menu-bg {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+
+.surf-ui .menu-bg-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.surf-ui .menu-vignette {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(ellipse 85% 75% at 60% 45%, transparent 0%, rgba(3, 5, 9, 0.35) 60%, rgba(3, 5, 9, 0.85) 100%),
+    linear-gradient(90deg, rgba(3, 5, 9, 0.88) 0%, rgba(3, 5, 9, 0.45) 38%, rgba(3, 5, 9, 0) 60%);
+  pointer-events: none;
+}
+
+.surf-ui .menu-screen.on-page .menu-vignette {
+  background: rgba(3, 5, 9, 0.55);
+  transition: background 0.3s;
+}
+
+/* ------------------------------------------------------------ top bar */
+
+.surf-ui .topbar {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 2rem;
+  height: 3.75rem;
+  padding: 0 1.75rem;
+  background: linear-gradient(180deg, rgba(4, 7, 12, 0.9), rgba(4, 7, 12, 0.6));
+  border-bottom: 1px solid var(--line);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.surf-ui .brand {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  cursor: pointer;
+}
+
+.surf-ui .brand .logo-mark {
+  width: 2rem;
+  height: 2rem;
+}
+
+.surf-ui .brand-word {
+  font: italic 800 1.75rem/1 var(--font-head);
+  letter-spacing: 0.04em;
+  background: linear-gradient(180deg, #ffffff 30%, #a9d8ff 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  padding-right: 0.15em;
+}
+
+.surf-ui .topnav {
+  display: flex;
+  align-items: stretch;
+  height: 100%;
+  gap: 0.25rem;
+}
+
+.surf-ui .topnav button {
+  appearance: none;
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  height: 100%;
+  padding: 0 1.05rem;
+  border: 0;
+  background: transparent;
+  color: var(--text-2);
+  font: 600 1rem var(--font);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color 0.15s;
+}
+
+.surf-ui .topnav button .icon {
+  width: 1.05rem;
+  height: 1.05rem;
+  opacity: 0.8;
+}
+
+.surf-ui .topnav button::after {
+  content: '';
+  position: absolute;
+  left: 0.9rem;
+  right: 0.9rem;
+  bottom: -1px;
+  height: 2px;
+  background: var(--accent);
+  transform: scaleX(0);
+  transition: transform 0.2s var(--ease);
+}
+
+.surf-ui .topnav button:hover {
+  color: #fff;
+}
+
+.surf-ui .topnav button.active {
+  color: #fff;
+}
+
+.surf-ui .topnav button.active::after {
+  transform: scaleX(1);
+  box-shadow: 0 0 10px var(--accent-glow);
+}
+
+.surf-ui .topbar-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.surf-ui .topbar-right .btn-icon {
+  color: var(--text-2);
+}
+
+/* ------------------------------------------------------------ pages */
+
+.surf-ui .menu-body {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  min-height: 0;
+}
+
+.surf-ui .page {
+  position: absolute;
+  inset: 0;
+  display: none;
+}
+
+.surf-ui .page.active {
+  display: flex;
+  animation: page-in 0.28s var(--ease);
+}
+
+@keyframes page-in {
+  from {
+    opacity: 0;
+    transform: translateY(0.5rem);
+  }
+}
+
+.surf-ui .page-frame {
+  display: flex;
+  flex-direction: column;
+  width: min(92rem, calc(100% - 3.5rem));
+  margin: 1.5rem auto 1.75rem;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.surf-ui .menu-footer {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  height: 2rem;
+  padding: 0 1.75rem;
+  font-size: 0.75rem;
+  letter-spacing: 0.06em;
+  color: var(--text-3);
+  background: linear-gradient(0deg, rgba(4, 7, 12, 0.85), rgba(4, 7, 12, 0));
+}
+
+/* ------------------------------------------------------------ home */
+
+.surf-ui .page-home {
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 0 4.5rem 2.5rem;
+}
+
+.surf-ui .hero {
+  margin-top: max(4vh, 2rem);
+  max-width: 44rem;
+}
+
+.surf-ui .wordmark {
+  position: relative;
+  display: inline-block;
+  line-height: 0.82;
+}
+
+.surf-ui .wm-text {
+  position: relative;
+  display: inline-block;
+  font: italic 800 10.5rem/0.85 var(--font-head);
+  letter-spacing: 0.015em;
+  padding-right: 0.12em;
+  background: linear-gradient(176deg, #ffffff 0%, #e6f4ff 38%, #8cc9ff 70%, #3f8ef0 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  filter: drop-shadow(0 0.35rem 1.6rem rgba(60, 140, 255, 0.35));
+}
+
+.surf-ui .wm-lines {
+  position: absolute;
+  left: -3.4rem;
+  top: 38%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.55rem;
+}
+
+.surf-ui .wm-lines i {
+  display: block;
+  height: 0.3rem;
+  border-radius: 0.2rem;
+  background: linear-gradient(90deg, rgba(120, 190, 255, 0), #7fc4ff);
+  transform: skewX(-20deg);
+  animation: wm-line 2.8s var(--ease) infinite;
+}
+
+.surf-ui .wm-lines i:nth-child(1) {
+  width: 2.6rem;
+}
+
+.surf-ui .wm-lines i:nth-child(2) {
+  width: 1.7rem;
+  animation-delay: 0.15s;
+}
+
+.surf-ui .wm-lines i:nth-child(3) {
+  width: 2.2rem;
+  animation-delay: 0.3s;
+}
+
+@keyframes wm-line {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: skewX(-20deg) translateX(0);
+  }
+  50% {
+    opacity: 1;
+    transform: skewX(-20deg) translateX(-0.5rem);
+  }
+}
+
+.surf-ui .wm-ramp {
+  display: block;
+  margin-top: 0.6rem;
+  width: 100%;
+  height: 0.55rem;
+  background: linear-gradient(90deg, #3f8ef0, #8cd0ff 60%, rgba(140, 208, 255, 0));
+  clip-path: polygon(0 100%, 6% 0, 100% 0, 100% 100%);
+  opacity: 0.9;
+}
+
+.surf-ui .hero-tag {
+  margin-top: 1.6rem;
+  font: 600 1.85rem/1.15 var(--font-head);
+  letter-spacing: 0.02em;
+  color: #fff;
+}
+
+.surf-ui .hero-sub {
+  margin-top: 0.5rem;
+  font-size: 1.05rem;
+  color: var(--text-2);
+  letter-spacing: 0.02em;
+}
+
+.surf-ui .hero-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  margin-top: 2.2rem;
+}
+
+.surf-ui .hero-actions .btn-lg {
+  min-width: 13rem;
+}
+
+.surf-ui .hero-stats {
+  display: flex;
+  gap: 2.2rem;
+  margin-top: 2.4rem;
+}
+
+.surf-ui .hero-stat b {
+  display: block;
+  font: 700 1.75rem/1 var(--font-head);
+  color: #fff;
+  letter-spacing: 0.02em;
+}
+
+.surf-ui .hero-stat span {
+  display: block;
+  margin-top: 0.3rem;
+  font: 600 0.72rem var(--font);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+.surf-ui .home-featured {
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+}
+
+.surf-ui .section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+}
+
+.surf-ui .section-head .h-title {
+  font-size: 1.05rem;
+  letter-spacing: 0.16em;
+}
+
+.surf-ui .section-head .link {
+  margin-left: auto;
+}
+
+.surf-ui .link {
+  appearance: none;
+  border: 0;
+  background: none;
+  padding: 0;
+  color: var(--accent-2);
+  font: 600 0.85rem var(--font);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.surf-ui .link:hover {
+  color: #fff;
+}
+
+.surf-ui .home-strip {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 0.9rem;
+}
+
+/* ------------------------------------------------------------ help / about */
+
+.surf-ui .doc-page {
+  overflow: auto;
+  padding: 1.75rem 2.2rem 2.2rem;
+}
+
+.surf-ui .doc-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(22rem, 1fr));
+  gap: 1.25rem;
+}
+
+.surf-ui .doc-card {
+  padding: 1.1rem 1.25rem 1.2rem;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+}
+
+.surf-ui .doc-card h3 {
+  margin: 0 0 0.75rem;
+  font: 700 1.05rem var(--font-head);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.surf-ui .doc-card h3 .icon {
+  color: var(--accent);
+}
+
+.surf-ui .doc-card p {
+  margin: 0 0 0.65rem;
+  color: var(--text-2);
+  line-height: 1.5;
+}
+
+.surf-ui .doc-card a {
+  color: var(--accent-2);
+}
+
+.surf-ui .kv-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.92rem;
+}
+
+.surf-ui .kv-table td {
+  padding: 0.32rem 0;
+  border-bottom: 1px solid var(--line);
+  vertical-align: middle;
+}
+
+.surf-ui .kv-table td:first-child {
+  width: 42%;
+  color: var(--text);
+}
+
+.surf-ui .kv-table td:last-child {
+  color: var(--text-2);
+}
+
+.surf-ui .kv-table code,
+.surf-ui .doc-card code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  color: #cfe6ff;
+  background: rgba(77, 163, 255, 0.1);
+  padding: 0.05em 0.35em;
+  border-radius: 0.2rem;
+}
+
+.surf-ui .about-hero {
+  display: flex;
+  align-items: center;
+  gap: 1.2rem;
+  margin-bottom: 1.5rem;
+}
+
+.surf-ui .about-hero .logo-mark {
+  width: 4rem;
+  height: 4rem;
+}
+
+.surf-ui .about-hero .brand-word {
+  font-size: 3.4rem;
+}
+
+/* ------------------------------------------------------------ pause menu */
+
+.surf-ui .pause-screen {
+  display: flex;
+  animation: fade-in 0.2s;
+}
+
+.surf-ui .pause-shade {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(90deg, rgba(3, 6, 10, 0.92) 0%, rgba(3, 6, 10, 0.72) 26rem, rgba(3, 6, 10, 0.35) 100%),
+    radial-gradient(ellipse at 70% 50%, transparent, rgba(0, 0, 0, 0.35));
+  backdrop-filter: blur(3px) saturate(0.85);
+  -webkit-backdrop-filter: blur(3px) saturate(0.85);
+}
+
+.surf-ui .pause-side {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  width: 24rem;
+  flex: none;
+  padding: 3rem 0 2rem 3.2rem;
+}
+
+.surf-ui .pause-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.surf-ui .pause-brand .logo-mark {
+  width: 2.4rem;
+  height: 2.4rem;
+}
+
+.surf-ui .pause-brand .brand-word {
+  font-size: 2.2rem;
+}
+
+.surf-ui .pause-map {
+  margin-top: 2.4rem;
+}
+
+.surf-ui .pause-map .map-title {
+  font: 700 2rem/1.05 var(--font-head);
+  letter-spacing: 0.02em;
+  color: #fff;
+  word-break: break-word;
+}
+
+.surf-ui .map-title .prefix {
+  color: var(--text-3);
+  font-weight: 500;
+}
+
+.surf-ui .pause-map .pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.6rem;
+}
+
+.surf-ui .pause-run {
+  margin-top: 1rem;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.25rem 1rem;
+  font-size: 0.92rem;
+  color: var(--text-2);
+}
+
+.surf-ui .pause-run b {
+  color: #fff;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.surf-ui .pause-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  margin-top: 2.2rem;
+}
+
+.surf-ui .menu-item {
+  appearance: none;
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  width: 100%;
+  padding: 0.62rem 0.9rem 0.62rem 1rem;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-2);
+  font: 600 1.25rem/1.1 var(--font-head);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    color 0.15s,
+    background 0.15s,
+    padding 0.2s var(--ease);
+}
+
+.surf-ui .menu-item .icon {
+  width: 1.1rem;
+  height: 1.1rem;
+  opacity: 0.75;
+}
+
+.surf-ui .menu-item::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 22%;
+  bottom: 22%;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--accent);
+  transform: scaleY(0);
+  transition: transform 0.18s var(--ease);
+}
+
+.surf-ui .menu-item:hover,
+.surf-ui .menu-item.active {
+  color: #fff;
+  background: linear-gradient(90deg, rgba(77, 163, 255, 0.16), rgba(77, 163, 255, 0));
+  padding-left: 1.3rem;
+}
+
+.surf-ui .menu-item:hover::before,
+.surf-ui .menu-item.active::before {
+  transform: scaleY(1);
+}
+
+.surf-ui .menu-item.primary {
+  color: #fff;
+}
+
+.surf-ui .menu-item.primary .icon {
+  color: var(--green);
+  opacity: 1;
+}
+
+.surf-ui .menu-item.danger:hover {
+  background: linear-gradient(90deg, rgba(255, 90, 90, 0.16), rgba(255, 90, 90, 0));
+}
+
+.surf-ui .menu-item.danger:hover::before {
+  background: var(--red);
+}
+
+.surf-ui .menu-item .hint {
+  margin-left: auto;
+  font: 600 0.72rem var(--font);
+  letter-spacing: 0.08em;
+  color: var(--text-3);
+}
+
+.surf-ui .pause-sep {
+  height: 1px;
+  margin: 0.6rem 1rem;
+  background: var(--line);
+}
+
+.surf-ui .pause-foot {
+  margin-top: auto;
+  font-size: 0.78rem;
+  color: var(--text-3);
+  letter-spacing: 0.04em;
+  line-height: 1.6;
+}
+
+.surf-ui .pause-content {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+}
+
+.surf-ui .pause-content > .page-frame {
+  margin: 2.2rem 2.2rem 2.2rem 0.5rem;
+  width: auto;
+  flex: 1;
+}

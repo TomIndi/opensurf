@@ -1,0 +1,755 @@
+/* SURF UI — design tokens, typography and shared controls (Panorama-inspired: dark translucent panels,
+   condensed type, restrained accents). Sizes are in rem; the root font size scales with the viewport height
+   (16px at 1080p), so the whole UI stays crisp and proportionate from 720p to 4K. */
+
+:root {
+  font-size: clamp(12px, calc(min(100vh, 177.78vw) * 16 / 1080), 48px);
+  --font: 'Barlow Semi Condensed', 'Barlow', 'Roboto Condensed', 'Arial Narrow', 'Helvetica Neue', Arial, sans-serif;
+  --font-head: 'Barlow Condensed', 'Barlow Semi Condensed', 'Roboto Condensed', 'Arial Narrow', Arial, sans-serif;
+  --font-mono: ui-monospace, 'Cascadia Mono', 'Consolas', 'DejaVu Sans Mono', 'Liberation Mono', monospace;
+
+  --bg: #06080c;
+  --panel: rgba(13, 17, 24, 0.88);
+  --panel-solid: #0f141c;
+  --panel-2: rgba(22, 28, 38, 0.92);
+  --panel-3: rgba(33, 41, 54, 0.92);
+  --glass: rgba(10, 14, 20, 0.62);
+  --line: rgba(255, 255, 255, 0.07);
+  --line-2: rgba(255, 255, 255, 0.13);
+  --line-3: rgba(255, 255, 255, 0.22);
+  --text: #e8ecf1;
+  --text-2: #aab4c0;
+  --text-3: #6d7986;
+  --accent: #4da3ff;
+  --accent-2: #93d2ff;
+  --accent-deep: #1d5fb8;
+  --accent-glow: rgba(77, 163, 255, 0.35);
+  --green: #5bc94f;
+  --green-deep: #3a8f31;
+  --red: #ff5a5a;
+  --red-deep: #b8333b;
+  --gold: #f2c14e;
+  --yellow: #ecd76a;
+  --orange: #f08149;
+  --radius: 0.25rem;
+  --radius-lg: 0.45rem;
+  --shadow: 0 0.6rem 2.2rem rgba(0, 0, 0, 0.55);
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+#app {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+}
+
+#game-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  outline: none;
+}
+
+.surf-ui {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  pointer-events: none;
+  font-family: var(--font);
+  font-size: 0.95rem;
+  line-height: 1.35;
+  color: var(--text);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.surf-ui *,
+.surf-ui *::before,
+.surf-ui *::after {
+  box-sizing: border-box;
+}
+
+.surf-ui .interactive,
+.surf-ui button,
+.surf-ui input,
+.surf-ui select,
+.surf-ui textarea,
+.surf-ui a {
+  pointer-events: auto;
+}
+
+.surf-ui input,
+.surf-ui textarea,
+.surf-ui .selectable {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.surf-ui .icon {
+  width: 1.15em;
+  height: 1.15em;
+  flex: none;
+  display: inline-block;
+  vertical-align: -0.18em;
+}
+
+.surf-ui .hidden {
+  display: none !important;
+}
+
+.surf-ui .tnum {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
+}
+
+/* ------------------------------------------------------------ buttons */
+
+.surf-ui .btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5em;
+  height: 2.35rem;
+  padding: 0 1.1rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--line-2);
+  background: rgba(255, 255, 255, 0.055);
+  color: var(--text);
+  font: 600 0.9rem/1 var(--font);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background 0.15s,
+    border-color 0.15s,
+    color 0.15s,
+    transform 0.08s,
+    box-shadow 0.15s;
+}
+
+.surf-ui .btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: var(--line-3);
+}
+
+.surf-ui .btn:active {
+  transform: translateY(1px);
+}
+
+.surf-ui .btn:focus-visible,
+.surf-ui .chip:focus-visible,
+.surf-ui .tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.surf-ui .btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+  transform: none;
+}
+
+.surf-ui .btn-primary {
+  border-color: rgba(150, 255, 140, 0.35);
+  background: linear-gradient(180deg, #67c94b 0%, #46a034 55%, #3c8c2c 100%);
+  color: #fff;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.35);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.28),
+    0 0.25rem 1rem rgba(70, 180, 60, 0.18);
+}
+
+.surf-ui .btn-primary:hover {
+  background: linear-gradient(180deg, #78d85a 0%, #52b03e 55%, #449c33 100%);
+  border-color: rgba(180, 255, 170, 0.55);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.35),
+    0 0.3rem 1.4rem rgba(90, 210, 70, 0.3);
+}
+
+.surf-ui .btn-accent {
+  border-color: rgba(140, 200, 255, 0.4);
+  background: linear-gradient(180deg, #4f9df5 0%, #2f78d6 100%);
+  color: #fff;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+
+.surf-ui .btn-accent:hover {
+  background: linear-gradient(180deg, #62adff 0%, #3a87e6 100%);
+}
+
+.surf-ui .btn-danger:hover {
+  background: rgba(255, 80, 80, 0.18);
+  border-color: rgba(255, 100, 100, 0.5);
+  color: #ffd7d7;
+}
+
+.surf-ui .btn-ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-2);
+}
+
+.surf-ui .btn-ghost:hover {
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text);
+  border-color: transparent;
+}
+
+.surf-ui .btn-sm {
+  height: 1.8rem;
+  padding: 0 0.7rem;
+  font-size: 0.78rem;
+}
+
+.surf-ui .btn-lg {
+  height: 3rem;
+  padding: 0 1.8rem;
+  font-size: 1.15rem;
+  letter-spacing: 0.08em;
+}
+
+.surf-ui .btn-icon {
+  width: 2.2rem;
+  padding: 0;
+}
+
+.surf-ui .btn-icon.btn-sm {
+  width: 1.8rem;
+}
+
+/* ------------------------------------------------------------ inputs */
+
+.surf-ui .input,
+.surf-ui .select {
+  appearance: none;
+  height: 2.2rem;
+  padding: 0 0.7rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--line-2);
+  background: rgba(0, 0, 0, 0.35);
+  color: var(--text);
+  font: 500 0.92rem var(--font);
+  outline: none;
+  transition:
+    border-color 0.15s,
+    box-shadow 0.15s,
+    background 0.15s;
+}
+
+.surf-ui .input::placeholder {
+  color: var(--text-3);
+}
+
+.surf-ui .input:focus,
+.surf-ui .select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(77, 163, 255, 0.18);
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.surf-ui .select {
+  padding-right: 2rem;
+  cursor: pointer;
+  background-image: linear-gradient(45deg, transparent 50%, var(--text-2) 50%), linear-gradient(135deg, var(--text-2) 50%, transparent 50%);
+  background-position:
+    calc(100% - 1.05rem) 52%,
+    calc(100% - 0.75rem) 52%;
+  background-size:
+    0.3rem 0.3rem,
+    0.3rem 0.3rem;
+  background-repeat: no-repeat;
+}
+
+.surf-ui .select option {
+  background: #141a23;
+  color: var(--text);
+}
+
+.surf-ui .num-input {
+  width: 5.2rem;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.surf-ui textarea.input {
+  height: auto;
+  padding: 0.55rem 0.7rem;
+  resize: vertical;
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+/* range slider */
+.surf-ui input[type='range'].slider {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  height: 1.4rem;
+  background: transparent;
+  cursor: pointer;
+  --fill: 50%;
+}
+
+.surf-ui input[type='range'].slider::-webkit-slider-runnable-track {
+  height: 0.25rem;
+  border-radius: 1rem;
+  background: linear-gradient(90deg, var(--accent) 0 var(--fill), rgba(255, 255, 255, 0.14) var(--fill) 100%);
+}
+
+.surf-ui input[type='range'].slider::-moz-range-track {
+  height: 0.25rem;
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.surf-ui input[type='range'].slider::-moz-range-progress {
+  height: 0.25rem;
+  border-radius: 1rem;
+  background: var(--accent);
+}
+
+.surf-ui input[type='range'].slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 0.95rem;
+  height: 0.95rem;
+  margin-top: -0.35rem;
+  border-radius: 50%;
+  background: #fff;
+  border: 0;
+  box-shadow:
+    0 0 0 3px rgba(77, 163, 255, 0.35),
+    0 1px 3px rgba(0, 0, 0, 0.5);
+  transition: box-shadow 0.15s;
+}
+
+.surf-ui input[type='range'].slider:hover::-webkit-slider-thumb {
+  box-shadow:
+    0 0 0 5px rgba(77, 163, 255, 0.35),
+    0 1px 3px rgba(0, 0, 0, 0.5);
+}
+
+.surf-ui input[type='range'].slider::-moz-range-thumb {
+  width: 0.95rem;
+  height: 0.95rem;
+  border-radius: 50%;
+  background: #fff;
+  border: 0;
+  box-shadow: 0 0 0 3px rgba(77, 163, 255, 0.35);
+}
+
+.surf-ui input[type='range'].slider:focus {
+  outline: none;
+}
+
+/* toggle switch */
+.surf-ui .switch {
+  position: relative;
+  display: inline-block;
+  width: 2.5rem;
+  height: 1.35rem;
+  flex: none;
+  cursor: pointer;
+}
+
+.surf-ui .switch input {
+  position: absolute;
+  opacity: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  cursor: pointer;
+}
+
+.surf-ui .switch .knob {
+  position: absolute;
+  inset: 0;
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.14);
+  border: 1px solid var(--line-2);
+  transition: background 0.18s var(--ease);
+  pointer-events: none;
+}
+
+.surf-ui .switch .knob::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 0.18rem;
+  width: 0.95rem;
+  height: 0.95rem;
+  border-radius: 50%;
+  background: #cfd6de;
+  transform: translateY(-50%);
+  transition:
+    transform 0.18s var(--ease),
+    background 0.18s;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+}
+
+.surf-ui .switch input:checked + .knob {
+  background: var(--accent);
+  border-color: rgba(140, 200, 255, 0.6);
+}
+
+.surf-ui .switch input:checked + .knob::after {
+  transform: translate(1.1rem, -50%);
+  background: #fff;
+}
+
+.surf-ui .switch input:focus-visible + .knob {
+  outline: 2px solid var(--accent-2);
+  outline-offset: 2px;
+}
+
+/* segmented control */
+.surf-ui .segmented {
+  display: inline-flex;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.3);
+}
+
+.surf-ui .segmented button {
+  appearance: none;
+  border: 0;
+  border-right: 1px solid var(--line);
+  background: transparent;
+  color: var(--text-2);
+  font: 600 0.85rem var(--font);
+  letter-spacing: 0.04em;
+  height: 2rem;
+  padding: 0 0.85rem;
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    color 0.15s;
+  font-variant-numeric: tabular-nums;
+}
+
+.surf-ui .segmented button:last-child {
+  border-right: 0;
+}
+
+.surf-ui .segmented button:hover {
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text);
+}
+
+.surf-ui .segmented button.active {
+  background: rgba(77, 163, 255, 0.22);
+  color: #fff;
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+/* chips (tier filters etc.) */
+.surf-ui .chip {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35em;
+  height: 1.75rem;
+  padding: 0 0.65rem;
+  border-radius: 1rem;
+  border: 1px solid var(--line-2);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-2);
+  font: 700 0.8rem var(--font);
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    color 0.15s,
+    border-color 0.15s;
+}
+
+.surf-ui .chip:hover {
+  color: var(--text);
+  border-color: var(--line-3);
+}
+
+.surf-ui .chip.active {
+  color: #0b0f14;
+  background: var(--chip-color, var(--accent));
+  border-color: var(--chip-color, var(--accent));
+}
+
+.surf-ui .chip .chip-count {
+  font-weight: 500;
+  opacity: 0.65;
+  font-size: 0.72rem;
+}
+
+/* tier / info pills */
+.surf-ui .pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3em;
+  height: 1.3rem;
+  padding: 0 0.45rem;
+  border-radius: 0.2rem;
+  font: 700 0.72rem/1 var(--font);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.surf-ui .pill.tier {
+  color: #0b0f14;
+  background: var(--tier-color, #8a96a3);
+}
+
+.surf-ui .pill.soft {
+  color: var(--text-2);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.surf-ui .pill.good {
+  color: #bff5b4;
+  background: rgba(91, 201, 79, 0.18);
+}
+
+.surf-ui .pill.info {
+  color: #cfe6ff;
+  background: rgba(77, 163, 255, 0.2);
+}
+
+.surf-ui .pill .icon {
+  width: 0.9em;
+  height: 0.9em;
+}
+
+/* panels */
+.surf-ui .panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(14px) saturate(1.1);
+  -webkit-backdrop-filter: blur(14px) saturate(1.1);
+}
+
+.surf-ui .panel-head {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.85rem 1.1rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.surf-ui .h-title {
+  font: 700 1.35rem/1 var(--font-head);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #fff;
+}
+
+.surf-ui .h-sub {
+  font: 600 0.78rem/1.2 var(--font);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+.surf-ui .muted {
+  color: var(--text-3);
+}
+
+.surf-ui .kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.6em;
+  height: 1.55em;
+  padding: 0 0.4em;
+  border-radius: 0.2rem;
+  border: 1px solid var(--line-3);
+  border-bottom-width: 2px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+  font: 700 0.78em/1 var(--font);
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+/* scrollbars */
+.surf-ui ::-webkit-scrollbar {
+  width: 0.55rem;
+  height: 0.55rem;
+}
+
+.surf-ui ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.surf-ui ::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 1rem;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.surf-ui ::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.26);
+  background-clip: padding-box;
+}
+
+.surf-ui * {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+
+/* toasts */
+.surf-ui .toasts {
+  position: absolute;
+  right: 1.5rem;
+  bottom: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.5rem;
+  z-index: 90;
+}
+
+.surf-ui .toast {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  max-width: 26rem;
+  padding: 0.65rem 0.95rem;
+  border-radius: var(--radius);
+  background: rgba(16, 21, 29, 0.95);
+  border: 1px solid var(--line-2);
+  border-left: 3px solid var(--accent);
+  box-shadow: var(--shadow);
+  font-size: 0.9rem;
+  animation: toast-in 0.25s var(--ease);
+}
+
+.surf-ui .toast.error {
+  border-left-color: var(--red);
+}
+
+.surf-ui .toast.success {
+  border-left-color: var(--green);
+}
+
+.surf-ui .toast.leaving {
+  opacity: 0;
+  transform: translateX(1rem);
+  transition:
+    opacity 0.3s,
+    transform 0.3s;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(0.6rem);
+  }
+}
+
+/* drop overlay */
+.surf-ui .drop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 95;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(5, 10, 18, 0.78);
+  backdrop-filter: blur(6px);
+  opacity: 0;
+  transition: opacity 0.15s;
+  pointer-events: none;
+}
+
+.surf-ui .drop-overlay.show {
+  opacity: 1;
+}
+
+.surf-ui .drop-overlay .drop-box {
+  padding: 3rem 5rem;
+  border: 2px dashed var(--accent);
+  border-radius: 1rem;
+  text-align: center;
+  background: rgba(77, 163, 255, 0.08);
+}
+
+.surf-ui .drop-overlay .drop-box .icon {
+  width: 3rem;
+  height: 3rem;
+  color: var(--accent-2);
+}
+
+.surf-ui .drop-overlay .drop-title {
+  margin-top: 1rem;
+  font: 700 1.8rem var(--font-head);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* generic confirm dialog */
+.surf-ui .modal-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 85;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  pointer-events: auto;
+  animation: fade-in 0.15s;
+}
+
+.surf-ui .modal {
+  width: min(30rem, 90vw);
+  padding: 1.4rem 1.5rem 1.2rem;
+}
+
+.surf-ui .modal p {
+  margin: 0.7rem 0 1.3rem;
+  color: var(--text-2);
+}
+
+.surf-ui .modal .actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.6rem;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .surf-ui *,
+  .surf-ui *::before,
+  .surf-ui *::after {
+    animation-duration: 0.001s !important;
+    transition-duration: 0.001s !important;
+  }
+}

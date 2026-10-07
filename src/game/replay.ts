@@ -1,0 +1,415 @@
+// Run recording, PB replays and ghosts.
+//
+// A recording is one frame per tick: x, y, z, pitch, yaw, flags (FRAME_STRIDE floats, growable Float32Array).
+// Frame 0 is the tick the timer started (run time 0); frame k is run time k / tickrate. flags packs the
+// usercmd buttons (bits 0..17) and the ducked state (DUCKED_FLAG).
+//
+// The PB replay of each course is kept in memory and persisted in IndexedDB (db "surf", store "replays",
+// key "map|group"). Everything works without IndexedDB (node tests, private windows): replays then live for
+// the session only.
+import { QAngle, angleDiff } from '../core/angles';
+import { console_ } from '../core/cvars';
+import { Vec3 } from '../core/vec3';
+import { VIEW_OFFSET_DUCK, VIEW_OFFSET_STAND } from '../physics/playertypes';
+import { GhostState } from './api';
+import { IReplaySystem } from './contracts';
+
+export const FRAME_STRIDE = 6;
+export const DUCKED_FLAG = 1 << 20;
+const BUTTON_MASK = 0x3ffff;
+const GHOST_COLOR: [number, number, number] = [0.25, 0.95, 1.0];
+const DB_NAME = 'surf';
+const STORE = 'replays';
+const INITIAL_FRAMES = 4096;
+
+export interface ReplayData {
+  map: string;
+  group: number;
+  /** Run time in seconds. */
+  time: number;
+  /** Frames per second of `frames`. */
+  tickrate: number;
+  /** FRAME_STRIDE floats per frame. */
+  frames: Float32Array;
+  /** Date.now() when recorded. */
+  date: number;
+}
+
+export function replayKey(map: string, group: number): string {
+  return `${map.toLowerCase()}|${group | 0}`;
+}
+
+/** Number of frames in a replay. */
+export function frameCount(r: ReplayData): number {
+  return Math.floor(r.frames.length / FRAME_STRIDE);
+}
+
+/** Replay duration in seconds (last frame time). */
+export function replayDuration(r: ReplayData): number {
+  const n = frameCount(r);
+  return n > 1 && r.tickrate > 0 ? (n - 1) / r.tickrate : 0;
+}
+
+export interface ReplaySample {
+  origin: Vec3;
+  angles: QAngle;
+  ducked: boolean;
+  buttons: number;
+  /** Horizontal speed (u/s) from the frame positions. */
+  speed: number;
+  /** Clamped sample time in seconds. */
+  time: number;
+  /** t was at or past the last frame. */
+  finished: boolean;
+}
+
+/** Interpolated replay state at `t` seconds (clamped to the replay). Null for an empty replay. */
+export function sampleReplay(r: ReplayData, t: number): ReplaySample | null {
+  const n = frameCount(r);
+  if (n === 0) return null;
+  const f = r.frames;
+  const rate = r.tickrate > 0 ? r.tickrate : 100;
+  let pos = (Number.isFinite(t) ? t : 0) * rate;
+  if (pos < 0) pos = 0;
+  const last = n - 1;
+  const finished = pos >= last;
+  if (pos > last) pos = last;
+  const i = Math.min(Math.floor(pos), last);
+  const j = Math.min(i + 1, last);
+  const a = (pos - i) || 0;
+  const oi = i * FRAME_STRIDE;
+  const oj = j * FRAME_STRIDE;
+  const origin = {
+    x: f[oi] + (f[oj] - f[oi]) * a,
+    y: f[oi + 1] + (f[oj + 1] - f[oi + 1]) * a,
+    z: f[oi + 2] + (f[oj + 2] - f[oi + 2]) * a,
+  };
+  const pitch = f[oi + 3] + (f[oj + 3] - f[oi + 3]) * a;
+  const yaw = f[oi + 4] + angleDiff(f[oj + 4], f[oi + 4]) * a;
+  const flags = f[(a < 0.5 ? oi : oj) + 5] | 0;
+  // speed from the surrounding frame pair (the last frame reuses the previous pair)
+  const si = j > i ? i : Math.max(0, i - 1);
+  const sj = j > i ? j : i;
+  let speed = 0;
+  if (sj > si) {
+    const dx = f[sj * FRAME_STRIDE] - f[si * FRAME_STRIDE];
+    const dy = f[sj * FRAME_STRIDE + 1] - f[si * FRAME_STRIDE + 1];
+    speed = Math.sqrt(dx * dx + dy * dy) * rate;
+  }
+  return {
+    origin,
+    angles: { pitch, yaw, roll: 0 },
+    ducked: (flags & DUCKED_FLAG) !== 0,
+    buttons: flags & BUTTON_MASK,
+    speed,
+    time: pos / rate,
+    finished,
+  };
+}
+
+// ------------------------------------------------------------------------------------------ IndexedDB
+
+interface StoredReplay {
+  key: string;
+  map: string;
+  group: number;
+  time: number;
+  tickrate: number;
+  date: number;
+  frames: Float32Array | ArrayBuffer;
+}
+
+let dbPromise: Promise<IDBDatabase | null> | null = null;
+
+function idbAvailable(): boolean {
+  try {
+    return typeof indexedDB !== 'undefined' && indexedDB !== null;
+  } catch {
+    return false;
+  }
+}
+
+function openDbVersion(version?: number): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const req = version === undefined ? indexedDB.open(DB_NAME) : indexedDB.open(DB_NAME, version);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE, { keyPath: 'key' });
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+    req.onblocked = () => reject(new Error('indexedDB blocked'));
+  });
+}
+
+/** Opens db "surf" and makes sure the "replays" store exists (bumping the version if another module owns the db). */
+function openDb(): Promise<IDBDatabase | null> {
+  if (!idbAvailable()) return Promise.resolve(null);
+  if (!dbPromise) {
+    dbPromise = (async () => {
+      try {
+        let db = await openDbVersion();
+        if (!db.objectStoreNames.contains(STORE)) {
+          const v = db.version + 1;
+          db.close();
+          db = await openDbVersion(v);
+        }
+        db.onversionchange = () => {
+          db.close();
+          dbPromise = null;
+        };
+        return db;
+      } catch {
+        dbPromise = null;
+        return null;
+      }
+    })();
+  }
+  return dbPromise;
+}
+
+async function idbGet(key: string): Promise<StoredReplay | null> {
+  const db = await openDb();
+  if (!db) return null;
+  return new Promise((resolve) => {
+    try {
+      const req = db.transaction(STORE, 'readonly').objectStore(STORE).get(key);
+      req.onsuccess = () => resolve((req.result as StoredReplay | undefined) ?? null);
+      req.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+async function idbPut(value: StoredReplay): Promise<boolean> {
+  const db = await openDb();
+  if (!db) return false;
+  return new Promise((resolve) => {
+    try {
+      const tx = db.transaction(STORE, 'readwrite');
+      tx.objectStore(STORE).put(value);
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => resolve(false);
+      tx.onabort = () => resolve(false);
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+async function idbDelete(key: string): Promise<void> {
+  const db = await openDb();
+  if (!db) return;
+  await new Promise<void>((resolve) => {
+    try {
+      const tx = db.transaction(STORE, 'readwrite');
+      tx.objectStore(STORE).delete(key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+      tx.onabort = () => resolve();
+    } catch {
+      resolve();
+    }
+  });
+}
+
+function fromStored(s: StoredReplay): ReplayData | null {
+  const frames = s.frames instanceof Float32Array ? s.frames : s.frames instanceof ArrayBuffer ? new Float32Array(s.frames) : null;
+  if (!frames || !(s.time > 0) || !(s.tickrate > 0)) return null;
+  return { map: s.map, group: s.group | 0, time: s.time, tickrate: s.tickrate, frames, date: s.date || 0 };
+}
+
+// ------------------------------------------------------------------------------------------ the system
+
+interface Recording {
+  group: number;
+  buf: Float32Array;
+  count: number;
+  tickrate: number;
+}
+
+function cvarNum(name: string, fallback: number): number {
+  const c = console_.getCvar(name);
+  return c && Number.isFinite(c.num) ? c.num : fallback;
+}
+
+export class ReplaySystem implements IReplaySystem {
+  readonly mapName: string;
+  /**
+   * Seconds per recorded frame. When 0 (default) the `tickrate` cvar is used, and the frame rate is checked
+   * against the finished run time (frames / time) when a recording ends.
+   */
+  tickInterval = 0;
+  private rec: Recording | null = null;
+  /** Buffer of the last finished/cancelled recording, reused by the next attempt. */
+  private spare: Float32Array | null = null;
+  private readonly pbs = new Map<number, ReplayData>();
+  private readonly loading = new Map<number, Promise<boolean>>();
+  /** Course whose PB the ghost shows (set by beginRecording / loadPb). */
+  private activeGroup = 0;
+  private spec: ReplayData | null = null;
+
+  constructor(mapName: string) {
+    this.mapName = mapName.toLowerCase();
+  }
+
+  get recording(): boolean {
+    return this.rec !== null;
+  }
+
+  get spectating(): boolean {
+    return this.spec !== null;
+  }
+
+  /** Frames recorded so far in the current attempt. */
+  get recordedFrames(): number {
+    return this.rec ? this.rec.count : 0;
+  }
+
+  /** The PB replay of a course if loaded. */
+  getPb(group: number): ReplayData | null {
+    return this.pbs.get(group | 0) ?? null;
+  }
+
+  /** Installs a PB replay directly (imports, tests). */
+  setPb(data: ReplayData): void {
+    this.pbs.set(data.group | 0, data);
+  }
+
+  private currentTickrate(): number {
+    if (this.tickInterval > 0) return 1 / this.tickInterval;
+    const tr = cvarNum('tickrate', 100);
+    return tr > 0 ? tr : 100;
+  }
+
+  beginRecording(group: number): void {
+    const g = group | 0;
+    this.activeGroup = g;
+    const buf = this.rec?.buf ?? this.spare ?? new Float32Array(INITIAL_FRAMES * FRAME_STRIDE);
+    this.spare = null;
+    this.rec = { group: g, buf, count: 0, tickrate: this.currentTickrate() };
+    if (!this.pbs.has(g)) void this.loadPb(this.mapName, g);
+  }
+
+  recordTick(origin: Vec3, angles: QAngle, ducked: boolean, buttons: number): void {
+    const r = this.rec;
+    if (!r) return;
+    let o = r.count * FRAME_STRIDE;
+    if (o + FRAME_STRIDE > r.buf.length) {
+      const nb = new Float32Array(r.buf.length * 2);
+      nb.set(r.buf);
+      r.buf = nb;
+    }
+    const b = r.buf;
+    b[o++] = origin.x;
+    b[o++] = origin.y;
+    b[o++] = origin.z;
+    b[o++] = angles.pitch;
+    b[o++] = angles.yaw;
+    b[o] = (buttons & BUTTON_MASK) | (ducked ? DUCKED_FLAG : 0);
+    r.count++;
+  }
+
+  async endRecording(saveAsPb: boolean, time: number): Promise<void> {
+    const r = this.rec;
+    this.rec = null;
+    if (r) this.spare = r.buf;
+    if (!r || !saveAsPb || r.count === 0 || !(time > 0)) return;
+    let tickrate = r.tickrate;
+    // Frames cover run time 0 .. time (the finish tick may or may not have been recorded): if the cvar-based
+    // rate disagrees with the recording by more than 2 %, trust the recording.
+    const measured = r.count / time;
+    if (!(tickrate > 0) || Math.abs(measured - tickrate) / measured > 0.02) tickrate = measured;
+    const data: ReplayData = {
+      map: this.mapName,
+      group: r.group,
+      time,
+      tickrate,
+      frames: r.buf.slice(0, r.count * FRAME_STRIDE),
+      date: Date.now(),
+    };
+    this.pbs.set(r.group, data);
+    await idbPut({ key: replayKey(data.map, data.group), ...data });
+  }
+
+  cancelRecording(): void {
+    if (this.rec) this.spare = this.rec.buf;
+    this.rec = null;
+  }
+
+  async loadPb(map: string, group: number): Promise<boolean> {
+    const g = group | 0;
+    const m = map.toLowerCase();
+    if (m === this.mapName) this.activeGroup = g;
+    if (m === this.mapName && this.pbs.has(g)) return true;
+    const key = replayKey(m, g);
+    const pending = m === this.mapName ? this.loading.get(g) : undefined;
+    if (pending) return pending;
+    const p = (async () => {
+      const stored = await idbGet(key);
+      const data = stored ? fromStored(stored) : null;
+      if (!data) return false;
+      // a run saved meanwhile (endRecording) wins over the stored copy
+      if (m === this.mapName && !this.pbs.has(g)) this.pbs.set(g, data);
+      return true;
+    })();
+    if (m === this.mapName) {
+      this.loading.set(g, p);
+      void p.finally(() => this.loading.delete(g));
+    }
+    return p;
+  }
+
+  /** Forgets (and deletes from IndexedDB) the PB replay of a course. */
+  async deletePb(group: number): Promise<void> {
+    this.pbs.delete(group | 0);
+    await idbDelete(replayKey(this.mapName, group));
+  }
+
+  ghostAt(runTime: number): GhostState | null {
+    const data = this.pbs.get(this.activeGroup);
+    if (!data) return null;
+    const s = sampleReplay(data, runTime);
+    if (!s) return null;
+    return {
+      id: `pb:${data.group}`,
+      origin: s.origin,
+      angles: s.angles,
+      ducked: s.ducked,
+      color: [GHOST_COLOR[0], GHOST_COLOR[1], GHOST_COLOR[2]],
+      name: data.group > 0 ? `PB Replay (Bonus ${data.group})` : 'PB Replay',
+      visible: true,
+      trail: cvarNum('surf_ghost_trail', 1) !== 0,
+    };
+  }
+
+  spectate(group: number | null): boolean {
+    if (group === null) {
+      this.spec = null;
+      return true;
+    }
+    const data = this.pbs.get(group | 0);
+    if (!data || frameCount(data) === 0) return false;
+    this.activeGroup = group | 0;
+    this.spec = data;
+    return true;
+  }
+
+  /**
+   * First-person playback while spectating. `origin` is the EYE position (feet + view offset, ducked-aware),
+   * ready for ViewState.origin; `time` is the replay clock (clamped), `speed` horizontal u/s.
+   */
+  spectateView(t: number): { origin: Vec3; angles: QAngle; speed: number; time: number; finished: boolean } | null {
+    if (!this.spec) return null;
+    const s = sampleReplay(this.spec, t);
+    if (!s) return null;
+    s.origin.z += s.ducked ? VIEW_OFFSET_DUCK : VIEW_OFFSET_STAND;
+    return { origin: s.origin, angles: s.angles, speed: s.speed, time: s.time, finished: s.finished };
+  }
+
+  /** The replay being spectated (null when not spectating). */
+  spectatedReplay(): ReplayData | null {
+    return this.spec;
+  }
+}
