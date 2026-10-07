@@ -6,3 +6,4 @@ dist/
 .vite/
 test-results/
 screenshots/
+tests/audit_*
