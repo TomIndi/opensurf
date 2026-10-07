@@ -77,6 +77,34 @@ export interface MaterialDef {
   scroll: [number, number] | null;
   /** For built-in maps: optional procedural pattern id understood by the renderer (e.g. "grid"). */
   pattern?: string;
+  /**
+   * Optional ($basetexturetransform): UV transform as a 2x3 matrix [a, b, c, d, e, f] applied to the normalized
+   * texture coordinates before `scroll`: u' = a·u + b·v + c, v' = d·u + e·v + f.
+   */
+  textureTransform?: [number, number, number, number, number, number];
+  /** Optional (AnimatedTexture proxy on $basetexture): every frame (frames[0] === image) and frames per second. */
+  frames?: DecodedImage[];
+  frameRate?: number;
+  /**
+   * Optional (WorldVertexTransition, $basetexture2): second texture blended on displacements by
+   * RenderBatch.alphas (alpha 0 = image, 1 = image2), its sRGB fallback colour and its own UV transform.
+   */
+  image2?: DecodedImage | null;
+  fallbackColor2?: [number, number, number];
+  textureTransform2?: [number, number, number, number, number, number];
+  /** Optional ($detail): detail texture tiled `scale` times per base texture repeat. */
+  detail?: MaterialDetail;
+}
+
+/**
+ * Detail texture ($detail). blendMode follows $detailblendmode: 0 = mod2x (base · detail · 2, the common case),
+ * 1 = additive, 2 = alpha-blended over the base, others as in Source. blendFactor lerps the effect (0 = none).
+ */
+export interface MaterialDetail {
+  image: DecodedImage;
+  scale: [number, number];
+  blendFactor: number;
+  blendMode: number;
 }
 
 /** A batch of triangles sharing one material and one brush model. */
