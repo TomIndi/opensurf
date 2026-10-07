@@ -42,6 +42,8 @@ export interface CourseSection {
 export interface Course {
   id: string;
   type: 'linear' | 'staged';
+  /** Timer zone group: 0 = the main course, N = bonus N. */
+  group: number;
   sections: CourseSection[];
   /** Where the run ends: a point on the end platform inside the end zone. */
   finish: Vec3;
@@ -49,7 +51,10 @@ export interface Course {
 
 export interface BuiltCourse {
   map: LoadedMap;
+  /** The main course (zone group 0). */
   course: Course;
+  /** Bonus courses in order: bonuses[k] is zone group k + 1. */
+  bonuses: Course[];
   builder: MapBuilder;
 }
 

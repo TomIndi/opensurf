@@ -7,13 +7,15 @@
 //   Stage 3 (green)  - a long segmented curve: a 180 degree U-turn ramp.
 //   Stage 4 (orange) - a zig-zag into a booster column that throws you across a long gap, then the final
 //                      ramp onto the end platform.
+//   Bonus 1 (red)    - a zig-zag onto an up-ramp, a booster launch and a banked 90 degree curve; through the
+//                      glowing alcove behind the stage 1 spawn, or !b 1.
 // Booster landings are placed with predictFlight (trigger_push semantics) for the weakest launch that still
 // counts, so every launch between a slow, low exit and a fast, high one comes down on the landing ramp.
 import { qa } from '../../core/angles';
 import { Vec3, v3 } from '../../core/vec3';
 import { MapBuilder, RampRecord, rampHeightFor } from './builder';
-import { BuiltCourse, Course, CourseRamp, CourseSection, RampChain, rampPoint } from './course';
-import { PushVolume, addGlowBar, addStageRoom, addVoidGrid, predictFlight, pushVector } from './parts';
+import { BuiltCourse, Course, CourseRamp, CourseSection, RampChain, dirOf, rampLength, rampPoint } from './course';
+import { PushVolume, addBackstop, addBonusAlcove, addGlowBar, addStageRoom, addVoidGrid, bonusAlcoveOpening, predictFlight, pushVector } from './parts';
 
 const STAGE_COLORS = ['cyan', 'pink', 'green', 'orange'];
 
@@ -29,12 +31,17 @@ interface StageCtx {
 const RAMP = 'builtin/ramp_night';
 const SIDE = 'builtin/wall_black';
 
-/** A stage room opening toward +x at `door`. Returns its spawn point and zone box. */
-function stageRoom(c: StageCtx): { spawn: Vec3; mins: Vec3; maxs: Vec3 } {
+/**
+ * A stage room opening toward +x at `door` (optionally with a bonus teleporter alcove in its back wall).
+ * Returns its spawn point and zone box.
+ */
+function stageRoom(c: StageCtx, alcove?: { dest: string; glow: string }): { spawn: Vec3; mins: Vec3; maxs: Vec3 } {
   const { b, door } = c;
   const mins = v3(door.x - 576, door.y - 240, door.z);
   const maxs = v3(door.x, door.y + 240, door.z + 288);
-  addStageRoom(b, mins, maxs, '+x', { floor: 'builtin/floor_dark', wall: 'builtin/grid_dark', ceiling: 'builtin/wall_black', trim: c.glow }, 240, 48);
+  const style = { floor: 'builtin/floor_dark', wall: 'builtin/grid_dark', ceiling: 'builtin/wall_black', trim: c.glow };
+  addStageRoom(b, mins, maxs, '+x', style, 240, 48, alcove ? [bonusAlcoveOpening(door.y, door.z)] : []);
+  if (alcove) addBonusAlcove(b, mins.x, door.y, door.z, alcove.dest, { floor: style.floor, wall: style.wall, glow: alcove.glow });
   // glowing door frame
   addGlowBar(b, v3(door.x + 8, door.y - 192, door.z), v3(door.x + 8, door.y - 192, door.z + 240), 12, c.glow);
   addGlowBar(b, v3(door.x + 8, door.y + 192, door.z), v3(door.x + 8, door.y + 192, door.z + 240), 12, c.glow);
@@ -84,9 +91,10 @@ export function buildNeon(): BuiltCourse {
     v3(-14200, 11000, 5600),
   ];
   const dests = ['neon_s1', 'neon_s2', 'neon_s3', 'neon_s4'];
+  const BONUS_GLOW = 'builtin/glow_red';
   const rooms = doors.map((door, i) => {
     const ctx: StageCtx = { b, index: i, glow: `builtin/glow_${STAGE_COLORS[i]}`, door };
-    const r = stageRoom(ctx);
+    const r = stageRoom(ctx, i === 0 ? { dest: 'neon_b1', glow: BONUS_GLOW } : undefined);
     const box = { mins: v3(r.mins.x - 32, r.mins.y - 32, door.z - 16), maxs: v3(door.x + 16, r.maxs.y + 32, door.z + 304) };
     b.addDestination(dests[i], r.spawn, 0);
     if (i === 0) {
@@ -219,7 +227,7 @@ export function buildNeon(): BuiltCourse {
     endMax = v3(ex.x + 640 + 1536, ex.y + 640, top);
     b.addBox(endMin, endMax, { top: 'builtin/floor_dark', sides: SIDE, bottom: SIDE });
     b.addTopTrim(endMin, endMax, c.glow, 16);
-    b.addBox(v3(endMax.x, endMin.y, top - 64), v3(endMax.x + 64, endMax.y, top + 512), { sides: 'builtin/grid_dark', top: SIDE });
+    addBackstop(b, endMin, endMax, v3(1, 0, 0), 'builtin/grid_dark');
     b.addZone('end', v3(endMin.x, endMin.y, top), v3(endMax.x, endMax.y, top + 1024));
     finish = v3((endMin.x + endMax.x) / 2, ex.y, top);
     stageRamps.push([
@@ -233,8 +241,61 @@ export function buildNeon(): BuiltCourse {
     allRamps.push(R1, R2, R3, R4, R5);
   }
 
+  // ================================================================ bonus 1 (red): zig-zag, booster, banked curve
+  // Beside stage 3 (same band of the map), reached from the stage 1 room's back alcove or with !b 1.
+  const bonusRamps: CourseRamp[] = [];
+  let bEndMin = v3();
+  let bEndMax = v3();
+  let bFinish = v3();
+  const bDoor = v3(-2400, -1400, 5200);
+  const bRoomCtx: StageCtx = { b, index: 4, glow: BONUS_GLOW, door: bDoor };
+  const bRoom = stageRoom(bRoomCtx);
+  b.addDestination('neon_b1', bRoom.spawn, 0);
+  b.addZone('start', bRoom.mins, bRoom.maxs, { group: 1, spawn: { origin: bRoom.spawn, yaw: 0 } });
+  const bRoomBox = { mins: v3(bRoom.mins.x - 32, bRoom.mins.y - 32, bDoor.z - 16), maxs: v3(bDoor.x + 16, bRoom.maxs.y + 32, bDoor.z + 304) };
+  {
+    const st = { mat: RAMP, sideMat: SIDE, trimMat: BONUS_GLOW };
+    const ch = new RampChain(b, v3(bDoor.x - 112, bDoor.y - W * 0.45, bDoor.z - 96), 0);
+    const R1 = ch.straight({ gap: 0, drop: 0, length: 3000, descent: 7, dropIn: { angle: 22, length: 960, steps: 8 }, side: 'left', width: W, ...st, name: 'b1 drop-in' });
+    const R2 = ch.straight({ gap: 512, shift: 800, travel: 500, speed: 900, land: 560, length: 2600, descent: 6, side: 'right', width: W, ...st, name: 'b1 zig' });
+    const R3 = ch.straight({ gap: 576, shift: -800, travel: 500, speed: 1100, land: 560, length: 2400, descent: -5, side: 'left', width: W, ...st, name: 'b1 up-ramp' });
+    const ridgeEnd = rampPoint(R3, 'left', 2400, 0);
+    const exit3 = rampPoint(R3, 'left', 2400, 0.42);
+    const boost: PushVolume = {
+      mins: v3(ridgeEnd.x - 320, ridgeEnd.y - 64, ridgeEnd.z - R3.height),
+      maxs: v3(ridgeEnd.x + 160, ridgeEnd.y + W + 64, ridgeEnd.z + 1600),
+      push: pushVector(-78, 0, 2600),
+    };
+    b.addPush(boost.mins, boost.maxs, qa(-78, 0, 0), 2600);
+    boosterFrame(b, boost.mins, boost.maxs, 'builtin/glow_yellow');
+    const fl = predictFlight(v3(exit3.x - 200, exit3.y, exit3.z + 20), v3(950, 0, 90), { pushes: [boost], untilZ: exit3.z - 420 });
+    const R4w = 384;
+    const R4land = 920;
+    ch.moveTo(v3(fl.pos.x - R4land, fl.pos.y - R4w * 0.42, fl.pos.z + R4land * Math.tan((7 * Math.PI) / 180) + 0.42 * rampHeight(R4w)), 0, 7);
+    const R4 = ch.straight({ gap: 0, drop: 0, length: 2800, descent: 7, side: 'left', width: R4w, ...st, name: 'b1 landing' });
+    const R5 = ch.curve({ gap: 576, speed: 1550, land: 500, radius: 2400, angle: 90, segments: 18, descent: 4, nz: 0.56, side: 'left', width: W, ...st, name: 'b1 banked curve' });
+    const ex = rampPoint(R5, 'left', rampLength(R5), 0.42);
+    const fwd = dirOf(ch.yaw);
+    const top = ex.z - 800;
+    const c = v3(ex.x + fwd.x * 1500, ex.y + fwd.y * 1500, top);
+    bEndMin = v3(c.x - 768, c.y - 768, top - 64);
+    bEndMax = v3(c.x + 768, c.y + 768, top);
+    b.addBox(bEndMin, bEndMax, { top: 'builtin/floor_dark', sides: SIDE, bottom: SIDE });
+    b.addTopTrim(bEndMin, bEndMax, BONUS_GLOW, 16);
+    addBackstop(b, bEndMin, bEndMax, fwd, 'builtin/grid_dark');
+    b.addZone('end', v3(bEndMin.x, bEndMin.y, top), v3(bEndMax.x, bEndMax.y, top + 1024), { group: 1 });
+    bFinish = c;
+    bonusRamps.push(
+      { ramp: R1, face: 'left' },
+      { ramp: R2, face: 'right' },
+      { ramp: R3, face: 'left' },
+      { ramp: R4, face: 'left', landAt: R4land },
+      { ramp: R5, face: 'left' },
+    );
+  }
+
   // ================================================================ void + neon grid floor
-  const lowest = Math.min(...allRamps.map((r) => Math.min(...r.ribs.flat().map((p) => p.z))), endMin.z);
+  const lowest = Math.min(...[...allRamps, ...bonusRamps.map((r) => r.ramp)].map((r) => Math.min(...r.ribs.flat().map((p) => p.z))), endMin.z, bEndMin.z);
   const floorZ = lowest - 1600;
   const bands: [number, number][] = [
     [-16000, -9000],
@@ -243,6 +304,9 @@ export function buildNeon(): BuiltCourse {
     [7000, 16000],
   ];
   sections.forEach((s, i) => {
+    // the bonus shares stage 3's band: each cell falls back to whichever course is nearer
+    const bonusHere = i === 2;
+    const bonusBoxes = [bRoomBox, { mins: bEndMin, maxs: bEndMax }];
     addVoidGrid(b, {
       cell: 768,
       x0: -16000,
@@ -250,9 +314,12 @@ export function buildNeon(): BuiltCourse {
       y0: bands[i][0],
       y1: bands[i][1],
       floorZ: floorZ - 512,
-      owners: [{ dest: s.dest, pieces: s.ramps.map((r) => ({ ramp: r.ramp })) }],
-      ramps: s.ramps.map((r) => r.ramp),
-      boxes: [rooms[i].box, ...(i === 3 ? [{ mins: endMin, maxs: endMax }] : [])],
+      owners: [
+        { dest: s.dest, pieces: s.ramps.map((r) => ({ ramp: r.ramp })), boxes: [rooms[i].box] },
+        ...(bonusHere ? [{ dest: 'neon_b1', pieces: bonusRamps.map((r) => ({ ramp: r.ramp })), boxes: bonusBoxes }] : []),
+      ],
+      ramps: [...s.ramps.map((r) => r.ramp), ...(bonusHere ? bonusRamps.map((r) => r.ramp) : [])],
+      boxes: [rooms[i].box, ...(i === 3 ? [{ mins: endMin, maxs: endMax }] : []), ...(bonusHere ? bonusBoxes : [])],
     });
   });
   // the floor: black with a glowing grid
@@ -262,8 +329,9 @@ export function buildNeon(): BuiltCourse {
     b.addDecal([v3(-16000, k - 6, floorZ), v3(16000, k - 6, floorZ), v3(16000, k + 6, floorZ), v3(-16000, k + 6, floorZ)], v3(0, 0, 1), 'builtin/glow_purple', 1.5);
   }
 
-  const course: Course = { id: 'surf_neon', type: 'staged', sections, finish };
-  return { map: b.build(), course, builder: b };
+  const course: Course = { id: 'surf_neon', type: 'staged', group: 0, sections, finish };
+  const bonus: Course = { id: 'surf_neon bonus 1', type: 'linear', group: 1, sections: [{ name: 'Bonus 1', dest: 'neon_b1', ramps: bonusRamps, marker: 0 }], finish: bFinish };
+  return { map: b.build(), course, bonuses: [bonus], builder: b };
 }
 
 function rampHeight(w: number): number {

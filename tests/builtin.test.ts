@@ -122,19 +122,34 @@ interface RunResult {
   maxSpeed: number;
   /** Worst single-tick speed loss while surfing (landing impacts excluded). */
   worstSurfLoss: number;
+  /** With `afterFinish`: the player came to rest on the end platform (no teleport after finishing). */
+  restedAtEnd: boolean;
 }
 
-/** Runs the autopilot through a built map (from the start, or from section `section`'s restart point). */
-function runCourse(bc: BuiltCourse, o: { tick?: number; pilot?: AutopilotOptions; section?: number; maxTime?: number; offset?: Vec3 } = {}): RunResult {
-  const tick = o.tick ?? 100;
+/** A host on a built map with the entity system and timer running, zones loaded, the player at the spawn. */
+function newHost(bc: BuiltCourse, tick: number): Host {
   const host = new Host(bc.map, tick);
   host.entities = new EntitySystem(host as never);
   host.timer = new SurfTimer(host as never);
   host.entities.spawn();
   host.timer.setZones(bc.map.zones, 'builtin');
-  host.timer.restart(0);
-  const pilot = new Autopilot(bc.course, bc.map.collision, o.pilot ?? {});
-  const dests = bc.course.sections.map((s) => bc.builder.destination(s.dest)!);
+  return host;
+}
+
+/**
+ * Runs the autopilot through a built map: the main course (from the start, or from section `section`'s restart
+ * point) or bonus `group` (from its start, as after !b N).
+ */
+function runCourse(
+  bc: BuiltCourse,
+  o: { tick?: number; pilot?: AutopilotOptions; section?: number; maxTime?: number; offset?: Vec3; group?: number; afterFinish?: number } = {},
+): RunResult {
+  const tick = o.tick ?? 100;
+  const host = newHost(bc, tick);
+  const course = o.group ? bc.bonuses[o.group - 1] : bc.course;
+  host.timer.restart(course.group);
+  const pilot = new Autopilot(course, bc.map.collision, o.pilot ?? {});
+  const dests = course.sections.map((s) => bc.builder.destination(s.dest)!);
   if (o.section) {
     const d = dests[o.section];
     const off = o.offset ?? v3();
@@ -152,7 +167,9 @@ function runCourse(bc: BuiltCourse, o: { tick?: number; pilot?: AutopilotOptions
   let worstSurfLoss = 0;
   let prevSpeed = -1;
   const maxTicks = Math.round((o.maxTime ?? 150) / ft);
-  for (let i = 0; i < maxTicks; i++) {
+  let stopAt = maxTicks;
+  let tpAtFinish = 0;
+  for (let i = 0; i < stopAt; i++) {
     host.tickCount++;
     host.time = host.tickCount * ft;
     // base velocity hand-off (ARCHITECTURE tick order, step 2)
@@ -186,12 +203,15 @@ function runCourse(bc: BuiltCourse, o: { tick?: number; pilot?: AutopilotOptions
       prevSpeed = -1;
       if (fails.length > 3) break;
     }
-    if (host.timer.getHud().state === 'finished') {
+    if (!finished && host.timer.getHud().state === 'finished') {
       finished = true;
-      break;
+      tpAtFinish = host.teleports.length;
+      // keep going (the pilot walks to the finish point) to see where the run comes to rest
+      stopAt = i + 1 + Math.round((o.afterFinish ?? 0) / ft);
     }
   }
-  return { finished, fails, time: host.timer.getHud().time, pilot, host, maxSpeed, worstSurfLoss };
+  const restedAtEnd = finished && host.teleports.length === tpAtFinish && ps.onGround && Math.abs(ps.origin.z - course.finish.z) < 2 && Math.hypot(ps.velocity.x, ps.velocity.y) < 300;
+  return { finished, fails, time: host.timer.getHud().time, pilot, host, maxSpeed, worstSurfLoss, restedAtEnd };
 }
 
 function hullFree(map: LoadedMap, p: Vec3): boolean {
@@ -501,7 +521,7 @@ for (const info of BUILTIN_MAPS) {
         expect(floorBelow(map, s.origin)).toBeLessThan(4);
       }
       const dests = map.entities.filter((e) => e.classname === 'info_teleport_destination');
-      expect(dests.length).toBe(bc.course.sections.length);
+      expect(dests.length).toBe(bc.course.sections.length + bc.bonuses.reduce((n, c) => n + c.sections.length, 0));
       for (const d of dests) {
         expect(hullFree(map, d.origin)).toBe(true);
         // a room floor right below, or a ramp face a short drop below
@@ -510,17 +530,32 @@ for (const info of BUILTIN_MAPS) {
       for (const z of map.zones) if (z.spawn) expect(hullFree(map, z.spawn.origin)).toBe(true);
     });
 
-    it('zones: non-degenerate, start covers the spawn, ordered checkpoints/stages at section starts, an end zone', () => {
+    it('zones: non-degenerate, start covers the spawn, ordered checkpoints/stages at section starts, an end zone; each bonus has its own start and end', () => {
       for (const z of map.zones) {
-        expect(z.group).toBe(0);
+        expect(z.group).toBeGreaterThanOrEqual(0);
+        expect(z.group).toBeLessThanOrEqual(bc.bonuses.length);
         for (const k of ['x', 'y', 'z'] as const) expect(z.maxs[k] - z.mins[k]).toBeGreaterThanOrEqual(64);
       }
-      const start = map.zones.filter((z) => z.type === 'start');
+      const main = map.zones.filter((z) => z.group === 0);
+      const start = main.filter((z) => z.type === 'start');
       expect(start.length).toBe(1);
       expect(insideBox(map.spawns[0].origin, start[0].mins, start[0].maxs)).toBe(true);
-      expect(map.zones.filter((z) => z.type === 'end').length).toBe(1);
+      expect(main.filter((z) => z.type === 'end').length).toBe(1);
+      // every map has a bonus (zone group 1..N, in order), each just a start and an end zone
+      expect(bc.bonuses.length).toBeGreaterThanOrEqual(1);
+      bc.bonuses.forEach((bonus, k) => {
+        expect(bonus.group).toBe(k + 1);
+        const zs = map.zones.filter((z) => z.group === bonus.group);
+        expect(zs.map((z) => z.type).sort()).toEqual(['end', 'start']);
+        const bs = zs.find((z) => z.type === 'start')!;
+        const d = bc.builder.destination(bonus.sections[0].dest)!;
+        expect(bs.spawn).toBeTruthy();
+        expect(bs.spawn!.origin).toEqual(d.origin);
+        expect(insideBox(d.origin, bs.mins, bs.maxs)).toBe(true);
+        expect(insideBox(bonus.finish, zs.find((z) => z.type === 'end')!.mins, zs.find((z) => z.type === 'end')!.maxs, 1)).toBe(true);
+      });
       const marker = info.type === 'staged' ? 'stage' : 'checkpoint';
-      const marks = map.zones.filter((z) => z.type === marker).map((z) => z.index);
+      const marks = main.filter((z) => z.type === marker).map((z) => z.index);
       const n = bc.course.sections.length;
       expect(marks).toEqual(info.type === 'staged' ? Array.from({ length: n - 1 }, (_, i) => i + 2) : Array.from({ length: n - 1 }, (_, i) => i + 1));
       expect(map.zones.some((z) => z.type === (info.type === 'staged' ? 'checkpoint' : 'stage'))).toBe(false);
@@ -556,7 +591,9 @@ for (const info of BUILTIN_MAPS) {
         const hi = v3(p.x + HULL_MAXS.x, p.y + HULL_MAXS.y, p.z + HULL_MAXS.z);
         return boxes.filter((x) => boxIntersectsBrush(lo, hi, x.b)).map((x) => x.dest);
       };
-      bc.course.sections.forEach((s, si) => {
+      // bonus sections: every fall in a bonus goes back to its start
+      const bonusSections = new Set(bc.bonuses.flatMap((c) => c.sections));
+      [...bc.course.sections, ...bonusSections].forEach((s, si) => {
         for (const cr of s.ramps) {
           const len = rampLength(cr.ramp);
           for (let a = len * 0.1; a < len * 0.95; a += len / 7) {
@@ -566,7 +603,7 @@ for (const info of BUILTIN_MAPS) {
             const h = hit(below);
             expect(h.length, `${cr.ramp.name} @${a.toFixed(0)}`).toBeGreaterThan(0);
             // staged maps: always this stage; linear maps: this section, or the previous one near a section start
-            if (info.type === 'staged' || a > 900) expect(h, `${cr.ramp.name} @${a.toFixed(0)}`).toContain(s.dest);
+            if (info.type === 'staged' || a > 900 || bonusSections.has(s)) expect(h, `${cr.ramp.name} @${a.toFixed(0)}`).toContain(s.dest);
             else expect(h.some((d) => d === s.dest || d === bc.course.sections[Math.max(0, si - 1)].dest)).toBe(true);
             // riding the face: no trigger at all
             const ride = v3(p.x, p.y, p.z + 32);
@@ -628,10 +665,12 @@ for (const info of BUILTIN_MAPS) {
       const lines: string[] = [];
       for (const tick of [64, 100, 128]) {
         for (const p of styles) {
-          const r = runCourse(bc, { tick, pilot: p });
+          const r = runCourse(bc, { tick, pilot: p, afterFinish: 3 });
           lines.push(`${tick} tick ${JSON.stringify(p)}: ${r.finished ? 'finished' : 'DNF'} in ${r.time.toFixed(2)} s, max ${r.maxSpeed.toFixed(0)} u/s, fails ${r.fails.length}`);
           expect(r.fails, `${tick} ${JSON.stringify(p)}`).toEqual([]);
           expect(r.finished, `${tick} ${JSON.stringify(p)}`).toBe(true);
+          // ...and comes to rest on the end platform (the backstop catches fast arrivals)
+          expect(r.restedAtEnd, `${tick} ${JSON.stringify(p)}`).toBe(true);
           // the run went through every checkpoint/stage in order
           const marks = r.host.chats.filter((c) => /^\[Surf\] (CP|Stage) \d+/.test(c)).map((c) => Number(/(\d+)/.exec(c.slice(7))![1]));
           const n = bc.course.sections.length;
@@ -683,6 +722,70 @@ for (const info of BUILTIN_MAPS) {
         check(`${info.id}: restart from ${bc.course.sections[s].name}`, own, 1.25);
       }
       console.log(tables.join('\n\n'));
+    });
+
+    it("the start room's back alcove is a teleporter to bonus 1: walking in puts you in the bonus start zone with the timer on bonus 1", () => {
+      for (const tick of [64, 128]) {
+        const host = newHost(bc, tick);
+        host.timer.restart(0);
+        expect(host.timer.getHud().bonus).toBe(0);
+        const ps = host.player;
+        const cmd = newUserCmd();
+        const ev = newMoveEvents();
+        const d = bc.builder.destination(bc.bonuses[0].sections[0].dest)!;
+        let arrived = -1;
+        for (let i = 0; i < 4 * tick && arrived < 0; i++) {
+          host.tickCount++;
+          host.time = host.tickCount / tick;
+          // turn around and walk to the back wall
+          cmd.viewangles.yaw = 180;
+          cmd.forwardmove = 450;
+          playerMove(ps, cmd, host.collision, host.moveVars, host.tickInterval, ev);
+          const n = host.teleports.length;
+          host.entities.tick();
+          host.timer.tick();
+          if (host.teleports.length > n) arrived = i;
+        }
+        expect(arrived, `@${tick}`).toBeGreaterThan(0);
+        expect(Math.hypot(ps.origin.x - d.origin.x, ps.origin.y - d.origin.y, ps.origin.z - d.origin.z)).toBeLessThan(1);
+        host.timer.tick();
+        const hud = host.timer.getHud();
+        expect(hud.bonus).toBe(1);
+        expect(hud.state).toBe('startzone');
+      }
+    });
+
+    it('bonus 1: the autopilot completes it from !b 1 at 64/100/128 tick in several styles, never failing, every gap with margin', () => {
+      const styles: AutopilotOptions[] = [{}, { style: 'coarse' }, { band: [0.15, 0.35] }, { band: [0.5, 0.75] }];
+      const lines: string[] = [];
+      for (const bonus of bc.bonuses) {
+        for (const tick of [64, 100, 128]) {
+          for (const p of styles) {
+            const r = runCourse(bc, { tick, pilot: p, group: bonus.group, afterFinish: 3 });
+            const tag = `bonus ${bonus.group} @${tick} ${JSON.stringify(p)}`;
+            lines.push(`${tag}: ${r.finished ? 'finished' : 'DNF'} in ${r.time.toFixed(2)} s, max ${r.maxSpeed.toFixed(0)} u/s`);
+            expect(r.fails, tag).toEqual([]);
+            expect(r.finished, tag).toBe(true);
+            expect(r.restedAtEnd, tag).toBe(true);
+            expect(r.host.timer.getHud().bonus, tag).toBe(bonus.group);
+            expect(r.worstSurfLoss, tag).toBeLessThan(60);
+            expect(r.time).toBeGreaterThan(10);
+            if (tick === 100 && !p.style && !p.band) {
+              const rows = analyzeGaps(r.pilot, r.pilot.events, bc.builder);
+              expect(rows.length).toBe(r.pilot.ramps.length - 1);
+              lines.push(formatGapTable(`${info.id} bonus ${bonus.group}`, rows));
+              for (const g of rows) {
+                expect(g.ok, `${tag}: ${g.from} -> ${g.to}`).toBe(true);
+                if (g.kind === 'gap') {
+                  expect(g.margin, `${tag}: ${g.from} -> ${g.to}`).toBeGreaterThanOrEqual(1.3);
+                  expect(g.landAlong!).toBeLessThan(g.nextLength - 300);
+                }
+              }
+            }
+          }
+        }
+      }
+      console.log(lines.join('\n'));
     });
   });
 }

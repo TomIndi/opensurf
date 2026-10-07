@@ -44,6 +44,11 @@ export interface BoxMaterials {
   top?: string | null;
   bottom?: string | null;
   sides?: string | null;
+  /** Per-side overrides of `sides` for axis-aligned faces (outward normal along +x, -x, +y or -y). */
+  '+x'?: string | null;
+  '-x'?: string | null;
+  '+y'?: string | null;
+  '-y'?: string | null;
 }
 
 export type MaterialSpec = string | null | BoxMaterials;
@@ -188,6 +193,8 @@ function boxMatFn(spec: MaterialSpec): (n: Vec3) => string | null {
   return (n) => {
     if (n.z > 0.7) return spec.top === undefined ? (spec.sides ?? null) : spec.top;
     if (n.z < -0.7) return spec.bottom === undefined ? (spec.sides ?? null) : spec.bottom;
+    const key = n.x > 0.99 ? '+x' : n.x < -0.99 ? '-x' : n.y > 0.99 ? '+y' : n.y < -0.99 ? '-y' : null;
+    if (key && spec[key] !== undefined) return spec[key];
     return spec.sides ?? null;
   };
 }

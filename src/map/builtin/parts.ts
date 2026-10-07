@@ -46,6 +46,108 @@ export function rampZoneBox(r: RampRecord, face: 'left' | 'right', from = 0, len
   return { mins, maxs };
 }
 
+/** A doorway in one wall of a MapBuilder.addRoom room (see addRoom). */
+export interface RoomOpening {
+  side: '+x' | '-x' | '+y' | '-y';
+  a0: number;
+  a1: number;
+  z0: number;
+  z1: number;
+}
+
+/** Half width and height of a bonus teleporter doorway. */
+const ALCOVE_HALF = 80;
+const ALCOVE_H = 176;
+const ALCOVE_DEPTH = 160;
+
+/** The doorway (in a room's -x wall, centred on y = `cy`, floor at `floorZ`) of a bonus teleporter alcove. */
+export function bonusAlcoveOpening(cy: number, floorZ: number): RoomOpening {
+  return { side: '-x', a0: cy - ALCOVE_HALF, a1: cy + ALCOVE_HALF, z0: floorZ, z1: floorZ + ALCOVE_H };
+}
+
+/**
+ * A small alcove behind the -x wall (inner face at x = `wallX`, `thick` units thick) of a start room, reached
+ * through bonusAlcoveOpening(cy, floorZ): walking in teleports you to `dest` (a bonus start), like the bonus
+ * teleporters in KSF spawn rooms. The doorway is framed in `glow` and the back of the alcove glows.
+ */
+export function addBonusAlcove(b: MapBuilder, wallX: number, cy: number, floorZ: number, dest: string, style: { floor: string; wall: string; glow: string }, thick = 16): void {
+  const t = thick;
+  const hw = ALCOVE_HALF;
+  const H = ALCOVE_H;
+  const x1 = wallX - t; // outer face of the room wall = open side of the alcove
+  const x0 = x1 - ALCOVE_DEPTH;
+  b.addBox(v3(x0 - t, cy - hw - t, floorZ - t), v3(x1, cy + hw + t, floorZ), { top: style.floor, sides: style.wall, bottom: style.wall });
+  b.addBox(v3(x0 - t, cy - hw - t, floorZ + H), v3(x1, cy + hw + t, floorZ + H + t), { bottom: style.wall, sides: style.wall, top: style.wall });
+  b.addBox(v3(x0, cy - hw - t, floorZ), v3(x1, cy - hw, floorZ + H), style.wall);
+  b.addBox(v3(x0, cy + hw, floorZ), v3(x1, cy + hw + t, floorZ + H), style.wall);
+  b.addBox(v3(x0 - t, cy - hw - t, floorZ), v3(x0, cy + hw + t, floorZ + H), { sides: style.wall, top: style.wall, bottom: style.wall, '+x': style.glow });
+  // the doorway frame, on the room side of the wall
+  const fx = wallX + 4;
+  addGlowBar(b, v3(fx, cy - hw - 6, floorZ), v3(fx, cy - hw - 6, floorZ + H + 12), 8, style.glow);
+  addGlowBar(b, v3(fx, cy + hw + 6, floorZ), v3(fx, cy + hw + 6, floorZ + H + 12), 8, style.glow);
+  addGlowBar(b, v3(fx, cy - hw - 6, floorZ + H + 8), v3(fx, cy + hw + 6, floorZ + H + 8), 8, style.glow);
+  // the teleporter fills the alcove behind the wall
+  b.addTeleport(v3(x0, cy - hw, floorZ), v3(x1 - 8, cy + hw, floorZ + H), dest);
+}
+
+export interface StartRoomSpec {
+  /** Centre of the doorway in the room's +x wall, at floor level (the room extends 640 units toward -x). */
+  door: Vec3;
+  floor: string;
+  wall: string;
+  ceiling: string;
+  trim: string;
+  /** Teleport destination at the spawn spot (fail teleports of the first section / the bonus go here). */
+  dest: string;
+  /** Zone group of the start zone: 0 = main course, N = bonus N. */
+  group: number;
+  /** Also a player spawn point (info_player_*). */
+  playerSpawn?: boolean;
+  /** A teleporter alcove in the back wall to a bonus start. */
+  alcove?: { dest: string; glow: string };
+}
+
+/**
+ * A start room (640 x 512, 288 high) opening toward +x onto the first ramp, with a start zone covering the
+ * floor, a spawn spot 128 units in front of the back wall facing the doorway and, optionally, a bonus
+ * teleporter alcove in the back wall. Returns the spawn spot and the room's interior box.
+ */
+export function addStartRoom(b: MapBuilder, s: StartRoomSpec): { spawn: Vec3; mins: Vec3; maxs: Vec3 } {
+  const Z = s.door.z;
+  const mins = v3(s.door.x - 640, s.door.y - 256, Z);
+  const maxs = v3(s.door.x, s.door.y + 256, Z + 288);
+  const openings: RoomOpening[] = [{ side: '+x', a0: s.door.y - 208, a1: s.door.y + 208, z0: Z, z1: Z + 240 }];
+  if (s.alcove) openings.push(bonusAlcoveOpening(s.door.y, Z));
+  b.addRoom(mins, maxs, { floor: s.floor, wall: s.wall, ceiling: s.ceiling }, openings);
+  b.addTopTrim(v3(mins.x, mins.y, Z - 16), v3(maxs.x, maxs.y, Z), s.trim, 6);
+  if (s.alcove) addBonusAlcove(b, mins.x, s.door.y, Z, s.alcove.dest, { floor: s.floor, wall: s.wall, glow: s.alcove.glow });
+  const spawn = v3(s.door.x - 512, s.door.y, Z + 1);
+  if (s.playerSpawn) b.addSpawn(spawn, 0);
+  b.addDestination(s.dest, spawn, 0);
+  b.addZone('start', v3(mins.x + 16, mins.y + 16, Z), v3(s.door.x - 16, maxs.y - 16, Z + 160), { group: s.group, spawn: { origin: spawn, yaw: 0 } });
+  return { spawn, mins, maxs };
+}
+
+/**
+ * Walls (64 thick, 512 high) around an end platform [mins, maxs] (top at maxs.z) on every side except the ones
+ * facing runs arriving along the horizontal direction `fwd`: a fast arrival bounces off them instead of
+ * sliding or flying off into the void after finishing.
+ */
+export function addBackstop(b: MapBuilder, mins: Vec3, maxs: Vec3, fwd: Vec3, mat: string): void {
+  const z0 = mins.z;
+  const z1 = maxs.z + 512;
+  const T = 64;
+  const wallPx = fwd.x > -0.2;
+  const wallNx = fwd.x < 0.2;
+  // x walls span the platform's y extent; y walls run the full side, around the corners of the x walls
+  if (wallPx) b.addBox(v3(maxs.x, mins.y, z0), v3(maxs.x + T, maxs.y, z1), { sides: mat, top: mat });
+  if (wallNx) b.addBox(v3(mins.x - T, mins.y, z0), v3(mins.x, maxs.y, z1), { sides: mat, top: mat });
+  const xa = mins.x - (wallNx ? T : 0);
+  const xb = maxs.x + (wallPx ? T : 0);
+  if (fwd.y > -0.2) b.addBox(v3(xa, maxs.y, z0), v3(xb, maxs.y + T, z1), { sides: mat, top: mat });
+  if (fwd.y < 0.2) b.addBox(v3(xa, mins.y - T, z0), v3(xb, mins.y, z1), { sides: mat, top: mat });
+}
+
 export interface RoomStyle {
   floor: string;
   wall: string;
@@ -57,11 +159,20 @@ export interface RoomStyle {
  * A stage room: interior [mins, maxs] with a doorway in the wall on the `exit` side spanning the whole
  * interior width except `jamb` units each side (height `doorH`). Returns the doorway center at floor level.
  */
-export function addStageRoom(b: MapBuilder, mins: Vec3, maxs: Vec3, exit: '+x' | '-x' | '+y' | '-y', style: RoomStyle, doorH = 224, jamb = 48): Vec3 {
+export function addStageRoom(
+  b: MapBuilder,
+  mins: Vec3,
+  maxs: Vec3,
+  exit: '+x' | '-x' | '+y' | '-y',
+  style: RoomStyle,
+  doorH = 224,
+  jamb = 48,
+  extraOpenings: RoomOpening[] = [],
+): Vec3 {
   const alongX = exit === '+y' || exit === '-y';
   const a0 = (alongX ? mins.x : mins.y) + jamb;
   const a1 = (alongX ? maxs.x : maxs.y) - jamb;
-  b.addRoom(mins, maxs, { floor: style.floor, wall: style.wall, ceiling: style.ceiling }, [{ side: exit, a0, a1, z0: mins.z, z1: mins.z + doorH }]);
+  b.addRoom(mins, maxs, { floor: style.floor, wall: style.wall, ceiling: style.ceiling }, [{ side: exit, a0, a1, z0: mins.z, z1: mins.z + doorH }, ...extraOpenings]);
   if (style.trim) b.addTopTrim(v3(mins.x, mins.y, mins.z - 16), v3(maxs.x, maxs.y, mins.z), style.trim, 6);
   const c = v3((mins.x + maxs.x) / 2, (mins.y + maxs.y) / 2, mins.z);
   if (exit === '+x') c.x = maxs.x;
