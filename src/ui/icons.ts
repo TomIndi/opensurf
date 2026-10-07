@@ -56,13 +56,22 @@ export function icon(name: IconName, cls = 'icon'): SVGSVGElement {
   return svg(ICONS[name], cls);
 }
 
-/** The SURF logo mark: a stylized surf ramp (triangular prism) with a carving trail. */
-export const LOGO_MARK = `<svg viewBox="0 0 64 64" aria-hidden="true" class="logo-mark">
+let logoSeq = 0;
+
+/**
+ * The SURF logo mark: a stylized surf ramp (triangular prism) with a carving trail. Each call gets unique
+ * gradient ids — Chrome doesn't render url(#id) fills whose gradient lives in a display:none subtree.
+ */
+export function logoMarkSvg(): string {
+  const a = `lm${++logoSeq}a`;
+  const b = `lm${logoSeq}b`;
+  return `<svg viewBox="0 0 64 64" aria-hidden="true" class="logo-mark">
   <defs>
-    <linearGradient id="lm-a" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#9be7ff"/><stop offset="1" stop-color="#3d8bff"/></linearGradient>
-    <linearGradient id="lm-b" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#2a5bb8"/><stop offset="1" stop-color="#132a5c"/></linearGradient>
+    <linearGradient id="${a}" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#9be7ff"/><stop offset="1" stop-color="#3d8bff"/></linearGradient>
+    <linearGradient id="${b}" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#2a5bb8"/><stop offset="1" stop-color="#132a5c"/></linearGradient>
   </defs>
-  <path d="M6 52 L30 10 L40 52 Z" fill="url(#lm-a)"/>
-  <path d="M30 10 L58 52 L40 52 Z" fill="url(#lm-b)"/>
+  <path d="M6 52 L30 10 L40 52 Z" fill="url(#${a})"/>
+  <path d="M30 10 L58 52 L40 52 Z" fill="url(#${b})"/>
   <path d="M12 44 C 22 38, 30 30, 36 20" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" opacity=".9"/>
 </svg>`;
+}

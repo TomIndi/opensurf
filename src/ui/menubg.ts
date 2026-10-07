@@ -84,7 +84,7 @@ export class MenuBackground {
     if (!ctx) throw new Error('2d canvas unavailable');
     this.ctx = ctx;
     this.reduced = typeof matchMedia !== 'undefined' && matchMedia('(prefers-reduced-motion: reduce)').matches;
-    for (let i = 0; i < 14; i++) this.ramps.push(this.spawn(this.rand() * FAR));
+    for (let i = 0; i < 16; i++) this.ramps.push(this.spawn(this.rand() * FAR));
     for (let i = 0; i < 140; i++) this.stars.push({ x: this.rand(), y: this.rand() * 0.55, r: 0.3 + this.rand() * 1.1, a: 0.15 + this.rand() * 0.6 });
     for (let i = 0; i < 46; i++) this.streaks.push(this.spawnStreak(this.rand() * FAR));
     window.addEventListener('resize', () => this.resize());
@@ -105,17 +105,20 @@ export class MenuBackground {
   }
 
   private spawn(zOffset: number): Ramp {
+    // long surf ramps floating below the camera, staggered left/right like a surf map seen in flight
     const side = this.rand() < 0.5 ? -1 : 1;
-    const w = 260 + this.rand() * 360;
+    const w = 320 + this.rand() * 420;
+    const h = w * (0.6 + this.rand() * 0.3);
+    const peak = -160 - this.rand() * 520;
     return {
-      x: side * (180 + this.rand() * 900),
-      y: -260 + this.rand() * 300,
+      x: side * (200 + this.rand() * 1500),
+      y: peak - h,
       z: this.camZ + zOffset,
-      len: 700 + this.rand() * 1700,
+      len: 1600 + this.rand() * 2800,
       w,
-      h: w * (0.5 + this.rand() * 0.3),
-      skew: (this.rand() - 0.5) * w * 0.3,
-      tone: 0.75 + this.rand() * 0.4,
+      h,
+      skew: (this.rand() - 0.5) * w * 0.2,
+      tone: 0.85 + this.rand() * 0.3,
     };
   }
 
@@ -223,8 +226,8 @@ export class MenuBackground {
 
     // camera
     const f = Math.min(W, H * 1.6) * 0.75;
-    const camX = Math.sin(this.time * 0.13) * 160;
-    const camY = 240 + Math.sin(this.time * 0.21) * 40;
+    const camX = Math.sin(this.time * 0.13) * 220;
+    const camY = Math.sin(this.time * 0.21) * 50;
     const yaw = Math.sin(this.time * 0.09) * 0.07;
     const roll = Math.sin(this.time * 0.17) * 0.025;
     const cy = Math.cos(yaw);
@@ -284,10 +287,12 @@ export class MenuBackground {
     const A1: P3 = [A0[0], A0[1], z1];
     // the lit face is the one facing the camera's side
     const leftLit = r.x > 0;
-    const faces: { pts: P3[]; lit: boolean }[] = [
+    const faces: { pts: P3[]; lit: boolean; cap?: boolean }[] = [
       { pts: [L0, A0, A1, L1], lit: leftLit },
       { pts: [A0, R0, R1, A1], lit: !leftLit },
     ];
+    // the ramp's near end (a triangle) when it is ahead of the camera
+    if (z0 > this.camZ + NEAR) faces.push({ pts: [L0, A0, R0], lit: false, cap: true });
     for (const face of faces) {
       const cam = clipNear(face.pts.map(toCam));
       if (cam.length < 3) continue;
@@ -307,7 +312,7 @@ export class MenuBackground {
           farPt = scr[i];
         }
       });
-      const base = face.lit ? th.rampLit : th.rampDark;
+      const base = face.cap ? capColor(th) : face.lit ? th.rampLit : th.rampDark;
       const c0 = fogMix(base, th.fog, zmin / FAR, r.tone);
       const c1 = fogMix(base, th.fog, zmax / FAR, r.tone);
       const grad = ctx.createLinearGradient(nearPt[0], nearPt[1], farPt[0], farPt[1]);
@@ -336,6 +341,10 @@ export class MenuBackground {
       ctx.globalAlpha = 1;
     }
   }
+}
+
+function capColor(th: MenuBgTheme): [number, number, number] {
+  return [Math.round((th.rampLit[0] + th.rampDark[0]) / 2), Math.round((th.rampLit[1] + th.rampDark[1]) / 2), Math.round((th.rampLit[2] + th.rampDark[2]) / 2)];
 }
 
 function fogMix(c: [number, number, number], fog: [number, number, number], depth: number, tone: number): string {

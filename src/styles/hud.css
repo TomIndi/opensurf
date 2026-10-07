@@ -1,0 +1,775 @@
+/* In-game HUD. Every size is multiplied by --hud-k (hud_scaling / 0.85), on top of the rem viewport scale. */
+
+.surf-ui .hud {
+  --hud-k: 1;
+  --hud-color: #7fc0ff;
+  --u: calc(1rem * var(--hud-k));
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  font-family: var(--font);
+  color: #fff;
+}
+
+.surf-ui .hud.hud-hidden > :not(.hud-topleft):not(.chat.open),
+.surf-ui .hud.hud-hidden .hud-pos {
+  display: none;
+}
+
+.surf-ui .hud-crosshair {
+  position: absolute;
+  image-rendering: pixelated;
+  pointer-events: none;
+}
+
+/* shared text legibility over bright maps */
+.surf-ui .hud-timer,
+.surf-ui .hud-speedo,
+.surf-ui .hud-side,
+.surf-ui .hud-keys,
+.surf-ui .chat {
+  text-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.85),
+    0 0 1px rgba(0, 0, 0, 0.9);
+}
+
+/* ------------------------------------------------------------ speedometer */
+
+.surf-ui .hud-speedo {
+  position: absolute;
+  left: 50%;
+  top: calc(50% + 5.6 * var(--u));
+  transform: translateX(-50%);
+  font: 700 calc(2.15 * var(--u)) / 1 var(--font);
+  letter-spacing: 0.02em;
+  color: #fff;
+  transition: color 0.18s;
+  -webkit-text-stroke: calc(0.03 * var(--u)) rgba(0, 0, 0, 0.6);
+}
+
+.surf-ui .hud-speedo.trend-gain {
+  color: #5dff6e;
+}
+
+.surf-ui .hud-speedo.trend-loss {
+  color: #ff5454;
+}
+
+/* ------------------------------------------------------------ showkeys */
+
+.surf-ui .hud-keys {
+  position: absolute;
+  left: 50%;
+  bottom: calc(11.2 * var(--u));
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: calc(0.22 * var(--u));
+}
+
+.surf-ui .hud-keys .kr {
+  display: flex;
+  align-items: center;
+  gap: calc(0.22 * var(--u));
+}
+
+.surf-ui .hud-keys .k {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: calc(1.9 * var(--u));
+  height: calc(1.9 * var(--u));
+  border-radius: calc(0.2 * var(--u));
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(0, 0, 0, 0.32);
+  color: rgba(255, 255, 255, 0.4);
+  font: 700 calc(0.85 * var(--u)) / 1 var(--font);
+  letter-spacing: 0.04em;
+  transition:
+    background 0.05s,
+    color 0.05s,
+    border-color 0.05s;
+}
+
+.surf-ui .hud-keys .k.wide {
+  width: calc(3.04 * var(--u));
+  font-size: calc(0.72 * var(--u));
+  letter-spacing: 0.1em;
+}
+
+.surf-ui .hud-keys .k.on {
+  background: rgba(255, 255, 255, 0.88);
+  border-color: #fff;
+  color: #0b0f14;
+  text-shadow: none;
+}
+
+.surf-ui .hud-keys .turn {
+  width: calc(1.4 * var(--u));
+  text-align: center;
+  font-size: calc(0.8 * var(--u));
+  color: rgba(255, 255, 255, 0.12);
+  transition: color 0.05s;
+}
+
+.surf-ui .hud-keys .turn.on {
+  color: var(--hud-color);
+}
+
+/* ------------------------------------------------------------ timer panel */
+
+.surf-ui .hud-timer {
+  position: absolute;
+  left: 50%;
+  bottom: calc(1.6 * var(--u));
+  transform: translateX(-50%);
+  min-width: calc(17 * var(--u));
+  padding: calc(0.45 * var(--u)) calc(1.2 * var(--u)) calc(0.55 * var(--u));
+  border-radius: calc(0.35 * var(--u));
+  background: linear-gradient(180deg, rgba(8, 12, 18, 0.58), rgba(8, 12, 18, 0.72));
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  box-shadow: 0 calc(0.4 * var(--u)) calc(1.4 * var(--u)) rgba(0, 0, 0, 0.35);
+  text-align: center;
+}
+
+.surf-ui .hud-timer::before {
+  content: '';
+  position: absolute;
+  left: 18%;
+  right: 18%;
+  top: -1px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--st-color, var(--hud-color));
+  box-shadow: 0 0 calc(0.6 * var(--u)) var(--st-color, var(--hud-color));
+  opacity: 0.9;
+  transition: background 0.2s;
+}
+
+.surf-ui .ht-label {
+  height: calc(1 * var(--u));
+  font: 700 calc(0.78 * var(--u)) / calc(1 * var(--u)) var(--font);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--st-color, var(--text-2));
+}
+
+.surf-ui .ht-label:empty {
+  height: calc(0.2 * var(--u));
+}
+
+.surf-ui .ht-main {
+  font: 700 calc(2.45 * var(--u)) / 1.05 var(--font);
+  letter-spacing: 0.01em;
+  color: var(--st-main, #fff);
+  white-space: nowrap;
+}
+
+.surf-ui .ht-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: calc(0.6 * var(--u));
+  margin-top: calc(0.2 * var(--u));
+  font: 600 calc(0.98 * var(--u)) / 1.2 var(--font);
+  color: rgba(255, 255, 255, 0.92);
+  white-space: nowrap;
+}
+
+.surf-ui .ht-speed i,
+.surf-ui .ht-rec i {
+  font-style: normal;
+  color: rgba(255, 255, 255, 0.5);
+  font-weight: 500;
+}
+
+.surf-ui .ht-dot {
+  width: calc(0.28 * var(--u));
+  height: calc(0.28 * var(--u));
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.35);
+}
+
+.surf-ui .ht-course {
+  color: var(--hud-color);
+}
+
+.surf-ui .ht-tags:not(:empty) {
+  padding: 0 calc(0.35 * var(--u));
+  border-radius: calc(0.15 * var(--u));
+  background: rgba(236, 215, 106, 0.2);
+  color: var(--yellow);
+  font-size: calc(0.72 * var(--u));
+  letter-spacing: 0.12em;
+}
+
+.surf-ui .ht-rec {
+  display: flex;
+  justify-content: center;
+  gap: calc(1.2 * var(--u));
+  margin-top: calc(0.15 * var(--u));
+  font: 600 calc(0.82 * var(--u)) / 1.2 var(--font);
+  color: rgba(255, 255, 255, 0.82);
+  white-space: nowrap;
+}
+
+.surf-ui .ht-rec b {
+  font-weight: 600;
+}
+
+/* state colors (SurfTimer: start zone green, running white, finished gold, practice yellow) */
+.surf-ui .hud-timer.st-start {
+  --st-color: #4dff5c;
+  --st-main: #4dff5c;
+}
+
+.surf-ui .hud-timer.st-running {
+  --st-color: var(--hud-color);
+  --st-main: #ffffff;
+}
+
+.surf-ui .hud-timer.st-finished {
+  --st-color: #f2c14e;
+  --st-main: #f2c14e;
+}
+
+.surf-ui .hud-timer.st-practice {
+  --st-color: #ecd76a;
+  --st-main: #ecd76a;
+}
+
+.surf-ui .hud-timer.st-stopped {
+  --st-color: #9aa6b2;
+  --st-main: #b8c2cc;
+}
+
+.surf-ui .hud-timer.st-disabled {
+  --st-color: #6d7986;
+  --st-main: #aab4c0;
+}
+
+.surf-ui .hud-timer.st-disabled .ht-main {
+  font-size: calc(1.7 * var(--u));
+}
+
+.surf-ui .hud-timer.st-disabled .ht-label {
+  text-transform: none;
+  letter-spacing: 0.04em;
+  font-weight: 500;
+}
+
+.surf-ui .hud-timer.st-start .ht-main {
+  letter-spacing: 0.02em;
+}
+
+/* split delta flash */
+.surf-ui .ht-split {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 0.5 * var(--u));
+  transform: translateX(-50%);
+  padding: calc(0.1 * var(--u)) calc(0.6 * var(--u));
+  border-radius: calc(0.25 * var(--u));
+  font: 700 calc(1.25 * var(--u)) / 1.2 var(--font);
+  opacity: 0;
+  white-space: nowrap;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.surf-ui .ht-split.faster {
+  color: #5dff6e;
+}
+
+.surf-ui .ht-split.slower {
+  color: #ff5a5a;
+}
+
+.surf-ui .ht-split.tie {
+  color: #ecd76a;
+}
+
+.surf-ui .ht-split.show {
+  opacity: 1;
+}
+
+.surf-ui .ht-split.anim {
+  animation: split-flash 3s var(--ease) forwards;
+}
+
+@keyframes split-flash {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, calc(0.6 * var(--u))) scale(0.9);
+  }
+  8% {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1.08);
+  }
+  16% {
+    transform: translate(-50%, 0) scale(1);
+  }
+  80% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, calc(-0.3 * var(--u)));
+  }
+}
+
+/* ------------------------------------------------------------ sidebar (SurfTimer sidebar / KSF key hint) */
+
+.surf-ui .hud-side {
+  position: absolute;
+  right: calc(1.2 * var(--u));
+  top: 50%;
+  transform: translateY(-50%);
+  min-width: calc(12.5 * var(--u));
+  padding: calc(0.55 * var(--u)) calc(0.8 * var(--u)) calc(0.6 * var(--u));
+  border-radius: calc(0.3 * var(--u));
+  background: rgba(8, 12, 18, 0.42);
+  border-left: 2px solid var(--hud-color);
+  font: 500 calc(0.82 * var(--u)) / 1.45 var(--font);
+  color: rgba(255, 255, 255, 0.65);
+}
+
+.surf-ui .hs-title {
+  font: 700 calc(0.95 * var(--u)) / 1.3 var(--font);
+  color: #fff;
+  margin-bottom: calc(0.2 * var(--u));
+  max-width: calc(14 * var(--u));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.surf-ui .hs-row {
+  display: flex;
+  justify-content: space-between;
+  gap: calc(1 * var(--u));
+}
+
+.surf-ui .hs-row b {
+  color: rgba(255, 255, 255, 0.95);
+  font-weight: 600;
+}
+
+.surf-ui .hs-wr b {
+  color: #f2c14e;
+}
+
+/* ------------------------------------------------------------ cl_showfps / cl_showpos (Source style) */
+
+.surf-ui .hud-topleft {
+  position: absolute;
+  left: 0.35rem;
+  top: 0.3rem;
+  font: 600 0.82rem/1.25 var(--font-mono);
+  color: #fff;
+  text-shadow:
+    1px 1px 0 #000,
+    0 0 2px #000;
+  white-space: pre;
+}
+
+.surf-ui .hud-fps.fps-good {
+  color: #7dff7d;
+}
+
+.surf-ui .hud-fps.fps-ok {
+  color: #ffe46b;
+}
+
+.surf-ui .hud-fps.fps-bad {
+  color: #ff6060;
+}
+
+.surf-ui .hud-pos {
+  margin-top: 0.15rem;
+}
+
+/* ------------------------------------------------------------ spectate banner */
+
+.surf-ui .hud-spec {
+  position: absolute;
+  left: 50%;
+  top: calc(1.2 * var(--u));
+  transform: translateX(-50%);
+  display: none;
+  align-items: center;
+  gap: calc(0.6 * var(--u));
+  padding: calc(0.35 * var(--u)) calc(0.9 * var(--u));
+  border-radius: calc(0.3 * var(--u));
+  background: rgba(8, 12, 18, 0.65);
+  font: 600 calc(1 * var(--u)) var(--font);
+}
+
+.surf-ui .hud-spec.show {
+  display: flex;
+}
+
+.surf-ui .spec-tag {
+  padding: calc(0.05 * var(--u)) calc(0.4 * var(--u));
+  border-radius: calc(0.15 * var(--u));
+  background: #b33a3a;
+  font-size: calc(0.75 * var(--u));
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+/* ------------------------------------------------------------ hint box / center print */
+
+.surf-ui .hud-hint {
+  position: absolute;
+  left: 50%;
+  top: 66%;
+  transform: translate(-50%, 0);
+  max-width: min(46 * var(--u), 80vw);
+  padding: calc(0.55 * var(--u)) calc(1.1 * var(--u));
+  border-radius: calc(0.3 * var(--u));
+  background: rgba(0, 0, 0, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  font: 600 calc(1.05 * var(--u)) / 1.35 var(--font);
+  text-align: center;
+  white-space: pre-line;
+  opacity: 0;
+  transition:
+    opacity 0.25s,
+    transform 0.25s var(--ease);
+}
+
+.surf-ui .hud-hint.show {
+  opacity: 1;
+  transform: translate(-50%, calc(-0.3 * var(--u)));
+}
+
+.surf-ui .hud-center {
+  position: absolute;
+  left: 50%;
+  top: 30%;
+  transform: translate(-50%, -50%) scale(0.96);
+  max-width: 80vw;
+  font: 700 calc(2 * var(--u)) / 1.2 var(--font);
+  letter-spacing: 0.02em;
+  text-align: center;
+  white-space: pre-line;
+  text-shadow:
+    0 2px 6px rgba(0, 0, 0, 0.9),
+    0 0 2px #000;
+  opacity: 0;
+  transition:
+    opacity 0.25s,
+    transform 0.3s var(--ease);
+}
+
+.surf-ui .hud-center.show {
+  opacity: 1;
+  transform: translate(-50%, -50%) scale(1);
+}
+
+/* ------------------------------------------------------------ chat */
+
+.surf-ui .chat {
+  --u: calc(1rem * var(--hud-k, 1));
+  position: absolute;
+  left: calc(1.4 * var(--u));
+  bottom: 22vh;
+  width: calc(34 * var(--u));
+  max-width: 46vw;
+  font: 600 calc(0.98 * var(--u)) / 1.36 var(--font);
+  color: #fff;
+  pointer-events: none;
+  z-index: 5;
+}
+
+.surf-ui .chat-feed {
+  max-height: calc(1.36em * 9 + 0.6em);
+  overflow: hidden;
+  padding: 0.3em 0.5em;
+  display: flex;
+  flex-direction: column;
+  -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 1.2em);
+  mask-image: linear-gradient(180deg, transparent 0, #000 1.2em);
+}
+
+.surf-ui .chat-feed > :first-child {
+  margin-top: auto;
+}
+
+.surf-ui .chat-msg {
+  padding: 0.02em 0;
+  overflow-wrap: anywhere;
+  transition: opacity 1s;
+  animation: chat-in 0.18s var(--ease);
+}
+
+.surf-ui .chat-msg.faded {
+  opacity: 0;
+}
+
+@keyframes chat-in {
+  from {
+    opacity: 0;
+    transform: translateX(-0.4em);
+  }
+}
+
+.surf-ui .chat.open .chat-feed {
+  height: calc(1.36em * 12 + 0.6em);
+  max-height: none;
+  overflow-y: auto;
+  pointer-events: auto;
+  background: rgba(6, 9, 14, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 0;
+  border-radius: 0.3em 0.3em 0 0;
+  -webkit-mask-image: none;
+  mask-image: none;
+}
+
+.surf-ui .chat.open .chat-msg.faded {
+  opacity: 1;
+  transition: none;
+}
+
+.surf-ui .chat-input-row {
+  display: none;
+  align-items: center;
+  gap: 0.45em;
+  padding: 0.35em 0.5em;
+  background: rgba(6, 9, 14, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 0 0 0.3em 0.3em;
+  pointer-events: auto;
+}
+
+.surf-ui .chat.open .chat-input-row {
+  display: flex;
+}
+
+.surf-ui .chat-label {
+  flex: none;
+  color: #c6d3e0;
+}
+
+.surf-ui .chat.team .chat-label {
+  color: #99ccff;
+}
+
+.surf-ui .chat-input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: #fff;
+  font: inherit;
+  text-shadow: inherit;
+  caret-color: #fff;
+}
+
+/* ------------------------------------------------------------ scoreboard */
+
+.surf-ui .scoreboard {
+  position: absolute;
+  left: 50%;
+  top: 12%;
+  transform: translateX(-50%);
+  width: min(60rem, 92vw);
+  max-height: 76%;
+  display: flex;
+  flex-direction: column;
+  background: rgba(10, 14, 20, 0.9);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 20;
+  animation: sb-in 0.14s var(--ease);
+}
+
+@keyframes sb-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -0.5rem);
+  }
+}
+
+.surf-ui .sb-head {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem 1.4rem 0.9rem;
+  background: linear-gradient(90deg, rgba(77, 163, 255, 0.18), rgba(77, 163, 255, 0) 70%);
+  border-bottom: 1px solid var(--line);
+}
+
+.surf-ui .sb-server {
+  font: 600 0.78rem var(--font);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--accent-2);
+}
+
+.surf-ui .sb-map {
+  font: 700 1.7rem/1.1 var(--font-head);
+  color: #fff;
+}
+
+.surf-ui .sb-map .prefix {
+  color: var(--text-3);
+  font-weight: 500;
+}
+
+.surf-ui .sb-head-r {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.surf-ui .sb-team {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.45rem 1.4rem;
+  font: 700 0.8rem var(--font);
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: #9fd2ff;
+  background: rgba(77, 163, 255, 0.07);
+  border-bottom: 1px solid var(--line);
+}
+
+.surf-ui .sb-team span:last-child {
+  margin-left: auto;
+  color: var(--text-3);
+  letter-spacing: 0.08em;
+}
+
+.surf-ui .sb-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.98rem;
+}
+
+.surf-ui .sb-table th {
+  padding: 0.5rem 0.8rem;
+  font: 600 0.72rem var(--font);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+}
+
+.surf-ui .sb-table td {
+  padding: 0.5rem 0.8rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  white-space: nowrap;
+}
+
+.surf-ui .sb-table th:first-child,
+.surf-ui .sb-table td:first-child {
+  padding-left: 1.4rem;
+  width: 4rem;
+}
+
+.surf-ui .sb-table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.surf-ui .sb-table th.num {
+  text-align: right;
+}
+
+.surf-ui .sb-table th:last-child,
+.surf-ui .sb-table td:last-child {
+  padding-right: 1.4rem;
+}
+
+.surf-ui .sb-table tr.local td {
+  background: rgba(77, 163, 255, 0.13);
+  color: #fff;
+}
+
+.surf-ui .sb-table tr.local td:first-child {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.surf-ui .sb-rank {
+  font-weight: 700;
+  color: var(--text-2);
+}
+
+.surf-ui .sb-table tr.r1 .sb-rank {
+  color: var(--gold);
+}
+
+.surf-ui .sb-player {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-weight: 600;
+}
+
+.surf-ui .sb-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.6rem;
+  height: 1.6rem;
+  border-radius: 0.2rem;
+  background: linear-gradient(135deg, #2c4a74, #19283f);
+  color: #9fd2ff;
+}
+
+.surf-ui .sb-avatar .icon {
+  width: 1rem;
+  height: 1rem;
+}
+
+.surf-ui .sb-avatar.bot {
+  background: linear-gradient(135deg, #5a3c22, #2e2013);
+  color: #ffc98a;
+}
+
+.surf-ui .sb-tag {
+  padding: 0.05rem 0.35rem;
+  border-radius: 0.15rem;
+  font: 700 0.65rem var(--font);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-2);
+}
+
+.surf-ui .sb-time {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.surf-ui .sb-empty {
+  padding: 1.6rem;
+  text-align: center;
+  color: var(--text-3);
+}
+
+.surf-ui .sb-foot {
+  display: flex;
+  gap: 1.5rem;
+  padding: 0.6rem 1.4rem;
+  font-size: 0.8rem;
+  color: var(--text-3);
+  border-top: 1px solid var(--line);
+}
+
+.surf-ui .sb-foot b {
+  color: var(--text-2);
+  font-weight: 600;
+}

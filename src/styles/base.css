@@ -146,6 +146,10 @@ body {
     box-shadow 0.15s;
 }
 
+.surf-ui a.btn {
+  text-decoration: none;
+}
+
 .surf-ui .btn:hover {
   background: rgba(255, 255, 255, 0.12);
   border-color: var(--line-3);

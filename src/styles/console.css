@@ -1,0 +1,190 @@
+/* Developer console (Source-style window). */
+
+.surf-ui .devcon {
+  position: absolute;
+  left: 6vw;
+  top: 7vh;
+  width: 56vw;
+  height: 62vh;
+  min-width: 26rem;
+  min-height: 14rem;
+  z-index: 80;
+  display: flex;
+  flex-direction: column;
+  background: rgba(12, 15, 20, 0.95);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-lg);
+  box-shadow:
+    0 1.2rem 3rem rgba(0, 0, 0, 0.6),
+    0 0 0 1px rgba(0, 0, 0, 0.6);
+  resize: both;
+  overflow: hidden;
+  pointer-events: auto;
+  animation: con-in 0.14s var(--ease);
+}
+
+@keyframes con-in {
+  from {
+    opacity: 0;
+    transform: translateY(-0.6rem);
+  }
+}
+
+.surf-ui .devcon.dragging {
+  opacity: 0.92;
+  user-select: none;
+}
+
+.surf-ui .devcon-title {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  height: 2.3rem;
+  padding: 0 0.4rem 0 0.85rem;
+  flex: none;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02));
+  border-bottom: 1px solid var(--line);
+  font: 700 0.9rem var(--font);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  cursor: move;
+}
+
+.surf-ui .devcon-title .icon {
+  color: var(--accent);
+}
+
+.surf-ui .devcon-hint {
+  margin-left: 0.6rem;
+  font: 500 0.72rem var(--font);
+  letter-spacing: 0.06em;
+  text-transform: none;
+  color: var(--text-3);
+}
+
+.surf-ui .devcon-title .btn-icon {
+  margin-left: auto;
+}
+
+.surf-ui .devcon-output {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0.5rem 0.8rem;
+  font: 400 0.84rem/1.42 var(--font-mono);
+  color: #d9dee4;
+  background: rgba(0, 0, 0, 0.25);
+  cursor: text;
+}
+
+.surf-ui .devcon-output .cl {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  min-height: 1.42em;
+}
+
+.surf-ui .cl-default {
+  color: #d9dee4;
+}
+
+.surf-ui .cl-error {
+  color: #ff6b6b;
+}
+
+.surf-ui .cl-warn {
+  color: #ffcf66;
+}
+
+.surf-ui .cl-info {
+  color: #8cc8ff;
+}
+
+.surf-ui .cl-success {
+  color: #7ee787;
+}
+
+.surf-ui .cl-echo {
+  color: #8f9aa6;
+}
+
+.surf-ui .devcon-inputrow {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.6rem 0.55rem 0.8rem;
+  border-top: 1px solid var(--line);
+  flex: none;
+}
+
+.surf-ui .devcon-prompt {
+  font: 700 0.95rem var(--font-mono);
+  color: var(--accent);
+}
+
+.surf-ui .devcon-input {
+  flex: 1;
+  min-width: 0;
+  height: 2rem;
+  padding: 0 0.6rem;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
+  font: 400 0.9rem var(--font-mono);
+  outline: none;
+}
+
+.surf-ui .devcon-input:focus {
+  border-color: rgba(77, 163, 255, 0.7);
+}
+
+.surf-ui .devcon-popup {
+  position: absolute;
+  left: 2.1rem;
+  right: 5.5rem;
+  bottom: 3.1rem;
+  max-height: min(14.5rem, calc(100% - 6rem));
+  overflow-y: auto;
+  background: rgba(16, 20, 27, 0.98);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  z-index: 2;
+  padding: 0.2rem 0;
+}
+
+.surf-ui .devcon-sug {
+  display: flex;
+  align-items: baseline;
+  gap: 0.8rem;
+  padding: 0.22rem 0.7rem;
+  font: 400 0.84rem/1.35 var(--font-mono);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.surf-ui .devcon-sug:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.surf-ui .devcon-sug.sel {
+  background: rgba(77, 163, 255, 0.25);
+}
+
+.surf-ui .sug-name {
+  color: #fff;
+}
+
+.surf-ui .sug-value {
+  color: var(--accent-2);
+}
+
+.surf-ui .sug-help {
+  margin-left: auto;
+  color: var(--text-3);
+  font-family: var(--font);
+  font-size: 0.8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 50%;
+}

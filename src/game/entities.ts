@@ -15,6 +15,7 @@
 import { QAngle, angleVectors, qa, qaClone } from '../core/angles';
 import { Cvar, registerCvar } from '../core/cvars';
 import { Vec3, v3, v3clone, v3parse } from '../core/vec3';
+import { isSolidBrushEntity } from '../bsp/bspcollision';
 import { parseOutputValue } from '../bsp/entities';
 import { EntityOutput, MapEntity } from '../map/types';
 import { boxIntersectsBrush } from '../physics/collision';
@@ -136,6 +137,41 @@ const PLAYER_COSMETIC_KEYS = new Set([
   'movetype', 'fademindist', 'fademaxdist', 'fadescale', 'shadowcastdist',
 ]);
 
+/**
+ * Classes that can affect gameplay but are not simulated (moving/breakable brushes stay where the map put
+ * them; physics pushers do nothing). Reported in diagnostics() and, with `developer 1`, at spawn.
+ */
+const UNSIMULATED_GAMEPLAY_CLASSES = new Set([
+  'func_door',
+  'func_door_rotating',
+  'func_movelinear',
+  'func_rotating',
+  'func_tracktrain',
+  'func_tanktrain',
+  'func_train',
+  'func_plat',
+  'func_platrot',
+  'func_physbox',
+  'func_physbox_multiplayer',
+  'func_breakable',
+  'func_breakable_surf',
+  'func_conveyor',
+  'func_pushable',
+  'func_water_analog',
+  'momentary_rot_button',
+  'trigger_catapult',
+  'trigger_wind',
+  'trigger_playermovement',
+  'trigger_apply_impulse',
+  'trigger_impact',
+  'point_push',
+  'env_physexplosion',
+  'game_ui',
+  'env_entity_maker',
+  'logic_measure_movement',
+  'logic_script',
+]);
+
 // ------------------------------------------------------------------------------------------ helpers
 
 /** Source FIELD_BOOLEAN keyvalue parsing: atoi(value) != 0 ("Allow entities that match criteria" is false). */
@@ -238,6 +274,8 @@ export class PlayerEnt {
   targetname = '';
   classname = 'player';
   health = 100;
+  /** Damage filter entity name (SetDamageFilter); consulted by trigger_hurt. */
+  damageFilter = '';
 }
 
 type Activator = Ent | PlayerEnt | null;
@@ -325,6 +363,17 @@ class EventQueue {
   }
 }
 
+/** The fog an env_fog_controller describes (player input SetFogController <name>). */
+export interface FogControllerState {
+  name: string;
+  enabled: boolean;
+  /** sRGB 0..1 (fogcolor). */
+  color: [number, number, number];
+  start: number;
+  end: number;
+  maxDensity: number;
+}
+
 /** Fired after a trigger_teleport moved the player (the timer uses it for stage heuristics). */
 export interface MapTeleportEvent {
   /** Classname of the trigger (trigger_teleport, trigger_teleport_relative, point_teleport...). */
@@ -373,6 +422,20 @@ class Ent {
 
   hasFlag(f: number): boolean {
     return (this.spawnflags & f) !== 0;
+  }
+
+  /** A MapEntity view of the current state (for helpers that take one). */
+  srcLike(): MapEntity {
+    return {
+      index: this.index,
+      classname: this.classname,
+      targetname: this.targetname,
+      kv: this.kv,
+      outputs: [],
+      origin: this.origin,
+      angles: this.angles,
+      model: this.model,
+    };
   }
 
   addConnection(o: EntityOutput): void {
@@ -478,6 +541,15 @@ class FilterTeam extends FilterEnt {
     // The local player plays on CT (team 3); entities have no team.
     const team = e instanceof PlayerEnt ? 3 : 0;
     return kvInt(this.kv.filterteam) === team;
+  }
+}
+
+/** filter_damage_type: only meaningful as a damage filter (passes everything as an activator filter). */
+class FilterDamageType extends FilterEnt {
+  /** Damage of `type` passes this filter (CFilterDamageType: exact type match, then negation). */
+  passesDamage(type: number): boolean {
+    const r = type === kvInt(this.kv.damagetype);
+    return this.negated ? !r : r;
   }
 }
 
@@ -819,6 +891,7 @@ class TriggerHurt extends BaseTrigger {
     const now = this.sys.now;
     if (now < this.nextHurt - TIME_EPS) return;
     this.nextHurt = now + HURT_INTERVAL;
+    if (!this.sys.playerTakesDamage(kvInt(this.kv.damagetype))) return;
     if (this.damage >= INSTAKILL_DAMAGE) {
       this.fire('onhurt', p);
       this.fire('onhurtplayer', p);
@@ -1262,7 +1335,7 @@ class PointCommand extends PointEnt {
 }
 
 class EnvHudHint extends PointEnt {
-  override input(name: string, param: string, activator: Activator): boolean {
+  override input(name: string, _param: string, activator: Activator): boolean {
     if (name !== 'showhudhint' && name !== 'hidehudhint') return false;
     if (!(activator instanceof PlayerEnt) && !this.hasFlag(SF_ALL_PLAYERS)) return true;
     if (name === 'showhudhint') this.sys.ui((ui) => ui.hint(this.kv.message ?? ''));
@@ -1304,6 +1377,25 @@ class PointTeleport extends PointEnt {
       t.origin = v3clone(this.origin);
       t.angles = qaClone(this.angles);
     }
+    return true;
+  }
+}
+
+/** point_template spawnflags */
+const SF_TEMPLATE_DONT_REMOVE = 0x01;
+const SF_TEMPLATE_PRESERVE_NAMES = 0x02;
+
+/**
+ * point_template: its Template01..16 entities are removed at map load (unless "don't remove template
+ * entities") and a fresh copy of them is created on every ForceSpawn, names suffixed "&NNNN" (with
+ * references between them fixed up) unless "preserve entity names". Fires OnEntitySpawned.
+ */
+class PointTemplate extends PointEnt {
+  templates: MapEntity[] = [];
+
+  override input(name: string, _param: string, activator: Activator): boolean {
+    if (name !== 'forcespawn') return false;
+    this.sys.spawnTemplate(this, activator);
     return true;
   }
 }
@@ -1529,6 +1621,8 @@ export interface EntityDiagnostics {
   unknownInputs: Map<string, number>;
   /** Target names that matched no entity -> count. */
   missingTargets: Map<string, number>;
+  /** Gameplay-relevant classes present in the map that are not simulated -> count. */
+  unsimulatedClasses: Map<string, number>;
 }
 
 /**
@@ -1552,13 +1646,25 @@ export class EntitySystem implements IEntitySystem {
   private readonly queue = new EventQueue();
   private touching: BaseTrigger[] = [];
   private readonly overlapList: BaseTrigger[] = [];
+  private readonly endedScratch: BaseTrigger[] = [];
+  /** Models of removed template entities (hidden until a ForceSpawn creates them). */
+  private readonly hiddenModels = new Set<number>();
+  /** Index for entities created at runtime (point_template). */
+  private nextIndex = 0;
+  private templateInstance = 0;
   private stamp = 0;
   private spawned = false;
   private readonly logged = new Set<string>();
   private readonly unknownInputs = new Map<string, number>();
   private readonly missingTargets = new Map<string, number>();
+  private readonly unsimulated = new Map<string, number>();
   private readonly developer: Cvar;
   private readonly teleportListeners: Array<(ev: MapTeleportEvent) => void> = [];
+  /**
+   * Called when map logic switches the player's fog (`!activator SetFogController fog_sea`). The renderer
+   * contract has no dynamic fog yet; the core may forward this when it does.
+   */
+  onFogController: ((fog: FogControllerState) => void) | null = null;
   private mapTeleportDepth = 0;
   /** False while spawn() runs the map-spawn logic: no client is connected yet in a real server. */
   private playerPresent = true;
@@ -1605,10 +1711,43 @@ export class EntitySystem implements IEntitySystem {
     if (this.spawned) return;
     this.spawned = true;
     this.now = this.host.time;
-    for (const src of this.host.map.entities) {
+    const mapEnts = this.host.map.entities;
+    this.nextIndex = mapEnts.length;
+    // point_template entities: collect templates; the removed ones don't exist until ForceSpawn
+    const templateOf = new Map<number, MapEntity[]>();
+    const removed = new Set<number>();
+    for (const src of mapEnts) {
+      if (src.classname.toLowerCase() !== 'point_template') continue;
+      const names = new Set<string>();
+      for (let i = 1; i <= 16; i++) {
+        const n = src.kv[`template${String(i).padStart(2, '0')}`];
+        if (n) names.add(n.toLowerCase());
+      }
+      const list = mapEnts.filter((e) => e !== src && e.targetname && names.has(e.targetname.toLowerCase()));
+      templateOf.set(src.index, list);
+      const sf = parseInt(src.kv.spawnflags ?? '0', 10) || 0;
+      if (!(sf & SF_TEMPLATE_DONT_REMOVE)) for (const e of list) removed.add(e.index);
+    }
+    for (const src of mapEnts) {
+      if (removed.has(src.index)) {
+        // a template brush entity is not in the world until spawned
+        if (src.model > 0) {
+          this.hiddenModels.add(src.model);
+          this.setModelVisible(src.model, false);
+          this.setModelSolid(src.model, false);
+        }
+        continue;
+      }
       const e = this.create(src);
+      if (e instanceof PointTemplate) e.templates = templateOf.get(src.index) ?? [];
       this.ents.push(e);
       if (e.targetname) this.indexName(e);
+      const cls = src.classname.toLowerCase();
+      if (UNSIMULATED_GAMEPLAY_CLASSES.has(cls)) this.unsimulated.set(cls, (this.unsimulated.get(cls) ?? 0) + 1);
+    }
+    if (this.unsimulated.size) {
+      const list = [...this.unsimulated].map(([c, n]) => (n > 1 ? `${c} x${n}` : c)).join(', ');
+      this.devLog('unsimulated', `not simulated on this map: ${list}`);
     }
     for (const e of this.ents) e.spawn();
     for (const e of this.ents) e.activate();
@@ -1714,6 +1853,16 @@ export class EntitySystem implements IEntitySystem {
     return true;
   }
 
+  /**
+   * Pushes every brush entity's current visibility/alpha/colour (and hidden triggers / removed templates) to
+   * the renderer again: call after the renderer (re)built the map's meshes.
+   */
+  reapplyRender(): void {
+    for (const m of this.hiddenModels) this.setModelVisible(m, false);
+    for (const t of this.triggers) this.setModelVisible(t.model, false);
+    for (const e of this.ents) if (e instanceof BrushEnt) e.applyRender(false);
+  }
+
   /** Queues an input like an output would (console ent_fire). The player is the activator. */
   fireInput(target: string, input: string, param = '', delay = 0): void {
     this.queue.push({ time: this.now + delay, target, input, param, activator: this.player, caller: null });
@@ -1726,6 +1875,7 @@ export class EntitySystem implements IEntitySystem {
       pendingEvents: this.queue.size,
       unknownInputs: new Map(this.unknownInputs),
       missingTargets: new Map(this.missingTargets),
+      unsimulatedClasses: new Map(this.unsimulated),
     };
   }
 
@@ -1836,6 +1986,58 @@ export class EntitySystem implements IEntitySystem {
         console.error(e);
       }
     }
+  }
+
+  /** @internal point_template ForceSpawn: creates a fresh copy of the template's entities. */
+  spawnTemplate(pt: PointTemplate, activator: Activator): void {
+    if (!pt.templates.length) {
+      pt.fire('onentityspawned', activator);
+      return;
+    }
+    const preserve = pt.hasFlag(SF_TEMPLATE_PRESERVE_NAMES);
+    const instance = ++this.templateInstance;
+    const names = new Set(pt.templates.map((t) => t.targetname.toLowerCase()));
+    const fix = (v: string): string => (!preserve && v && names.has(v.toLowerCase()) ? `${v}&${String(instance).padStart(4, '0')}` : v);
+    const created: Ent[] = [];
+    for (const src of pt.templates) {
+      const kv: Record<string, string> = {};
+      for (const [k, v] of Object.entries(src.kv)) kv[k] = k === 'classname' || k === 'model' ? v : fix(v);
+      const copy: MapEntity = {
+        index: this.nextIndex++,
+        classname: src.classname,
+        targetname: fix(src.targetname),
+        kv,
+        outputs: src.outputs.map((o) => ({ ...o, target: fix(o.target) })),
+        origin: v3clone(src.origin),
+        angles: qaClone(src.angles),
+        model: src.model,
+      };
+      const e = this.create(copy);
+      this.ents.push(e);
+      if (e.targetname) this.indexName(e);
+      created.push(e);
+    }
+    this.debugList = null;
+    for (const e of created) if (e.model > 0) this.hiddenModels.delete(e.model);
+    for (const e of created) e.spawn();
+    for (const e of created) {
+      e.activate();
+      if (e instanceof BrushEnt) {
+        // back in the world: drawn per its render state, solid if its class is
+        e.applyRender(false);
+        if (e.isOn && isSolidBrushEntity(e.srcLike())) this.setModelSolid(e.model, true);
+      }
+    }
+    pt.fire('onentityspawned', activator);
+  }
+
+  /** @internal Would the player's damage filter (SetDamageFilter) let damage of `type` through? */
+  playerTakesDamage(type: number): boolean {
+    const name = this.player.damageFilter;
+    if (!name) return true;
+    const f = this.findFilter(name);
+    if (f instanceof FilterDamageType) return f.passesDamage(type);
+    return true;
   }
 
   /** @internal */
@@ -1990,6 +2192,8 @@ export class EntitySystem implements IEntitySystem {
         return new FilterTeam(this, src);
       case 'filter_multi':
         return new FilterMulti(this, src);
+      case 'filter_damage_type':
+        return new FilterDamageType(this, src);
       case 'logic_relay':
         return new LogicRelay(this, src);
       case 'logic_auto':
@@ -2016,6 +2220,8 @@ export class EntitySystem implements IEntitySystem {
         return new GameText(this, src);
       case 'point_teleport':
         return new PointTeleport(this, src);
+      case 'point_template':
+        return new PointTemplate(this, src);
     }
     if (cls.startsWith('filter_')) return new FilterEnt(this, src); // damage type, mass, context...: accept
     if (src.model > 0) {
@@ -2132,7 +2338,8 @@ export class EntitySystem implements IEntitySystem {
     if (this.touching.length) {
       let w = 0;
       const touching = this.touching;
-      const ended: BaseTrigger[] = [];
+      const ended = this.endedScratch;
+      ended.length = 0;
       for (let i = 0; i < touching.length; i++) {
         const t = touching[i];
         if (t.killed) continue;
@@ -2140,10 +2347,12 @@ export class EntitySystem implements IEntitySystem {
         else ended.push(t);
       }
       touching.length = w;
-      for (const t of ended) {
+      for (let i = 0; i < ended.length; i++) {
+        const t = ended[i];
         t.engineTouching = false;
         t.endTouch(p);
       }
+      ended.length = 0;
     }
 
     // touch-activated buttons (contact = hull expanded by one unit)
@@ -2270,6 +2479,28 @@ export class EntitySystem implements IEntitySystem {
       case 'kill':
       case 'killhierarchy':
         return; // never remove the local player
+      case 'setdamagefilter':
+        this.player.damageFilter = param.trim();
+        return;
+      case 'setfogcontroller': {
+        const f = this.findFirst(param.trim(), null, null, null);
+        if (f instanceof Ent && f.classname.toLowerCase() === 'env_fog_controller' && this.onFogController) {
+          const c = parseColor(f.kv.fogcolor);
+          try {
+            this.onFogController({
+              name: f.targetname,
+              enabled: kvBool(f.kv.fogenable),
+              color: [c[0] / 255, c[1] / 255, c[2] / 255],
+              start: kvNum(f.kv.fogstart, 0),
+              end: kvNum(f.kv.fogend, 0),
+              maxDensity: kvNum(f.kv.fogmaxdensity, 1),
+            });
+          } catch (e) {
+            console.error(e);
+          }
+        }
+        return;
+      }
     }
     if (SILENT_INPUTS.has(name)) return;
     this.reportUnknown('player', rawInput, true);

@@ -119,6 +119,7 @@ const LABELS: Record<string, string> = {
   mwheelup: 'WHEEL ↑',
   mwheeldown: 'WHEEL ↓',
   semicolon: ';',
+  '`': '~',
   ins: 'INS',
   del: 'DEL',
   home: 'HOME',
