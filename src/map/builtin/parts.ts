@@ -259,3 +259,224 @@ export function addRampGate(b: MapBuilder, r: RampRecord, face: 'left' | 'right'
   addGlowBar(b, v3(pOut.x, pOut.y, lo), v3(pOut.x, pOut.y, hi), size, mat);
   addGlowBar(b, v3(pIn.x, pIn.y, hi), v3(pOut.x, pOut.y, hi), size, mat);
 }
+
+/** Part of a ramp (along-ridge range) owned by a void-grid owner. */
+export interface RampPiece {
+  ramp: RampRecord;
+  from?: number;
+  to?: number;
+}
+
+export interface VoidOwner {
+  /** Teleport destination for falls in this owner's cells. */
+  dest: string;
+  /** Course geometry that attracts cells to this owner (nearest owner wins). */
+  pieces: RampPiece[];
+  boxes?: { mins: Vec3; maxs: Vec3 }[];
+}
+
+export interface VoidGridSpec {
+  x0: number;
+  x1: number;
+  y0: number;
+  y1: number;
+  /** Cell size (default 512). */
+  cell?: number;
+  /** Bottom of the trigger volumes. */
+  floorZ: number;
+  owners: VoidOwner[];
+  /** Every legit surface (all ramps and solid boxes runs can be on or fly over). */
+  ramps: RampRecord[];
+  boxes?: { mins: Vec3; maxs: Vec3 }[];
+  /** Clearance below the lowest surface around a cell (default 96). */
+  margin?: number;
+  /** How many cells around an empty cell are searched for its height (default 3). */
+  reach?: number;
+}
+
+/**
+ * Fills the void under a whole map region with fail teleports. The region is cut into cells; each cell belongs
+ * to the owner (section/stage) whose course geometry is nearest, and its trigger's top sits `margin` units
+ * below the lowest legit surface over the cell - or, for cells with nothing above them (gaps, open air), below
+ * the lowest surface within `reach` cells - so runs that fly over the void never touch it. Cells with equal
+ * owner and height are merged into larger boxes. Returns the trigger model numbers.
+ */
+export function addVoidGrid(b: MapBuilder, s: VoidGridSpec): number[] {
+  const cell = s.cell ?? 512;
+  const margin = s.margin ?? 96;
+  const reach = s.reach ?? 3;
+  const nx = Math.max(1, Math.ceil((s.x1 - s.x0) / cell));
+  const ny = Math.max(1, Math.ceil((s.y1 - s.y0) / cell));
+  const top = new Float64Array(nx * ny).fill(Infinity);
+  const owner = new Int32Array(nx * ny).fill(-1);
+  // ---- lowest legit surface per cell
+  for (let j = 0; j < ny; j++) {
+    for (let i = 0; i < nx; i++) {
+      const cx0 = s.x0 + i * cell;
+      const cy0 = s.y0 + j * cell;
+      const cx1 = Math.min(s.x1, cx0 + cell);
+      const cy1 = Math.min(s.y1, cy0 + cell);
+      let z = Infinity;
+      for (const r of s.ramps) z = Math.min(z, rampBottomInRect(r, cx0, cx1, cy0, cy1));
+      for (const bx of s.boxes ?? []) {
+        if (bx.maxs.x < cx0 || bx.mins.x > cx1 || bx.maxs.y < cy0 || bx.mins.y > cy1) continue;
+        z = Math.min(z, bx.mins.z);
+      }
+      top[j * nx + i] = z;
+    }
+  }
+  // ---- empty cells: lowest surface within `reach` cells
+  const filled = Float64Array.from(top);
+  for (let j = 0; j < ny; j++) {
+    for (let i = 0; i < nx; i++) {
+      if (Number.isFinite(top[j * nx + i])) continue;
+      let z = Infinity;
+      for (let dj = -reach; dj <= reach; dj++) {
+        for (let di = -reach; di <= reach; di++) {
+          const ii = i + di;
+          const jj = j + dj;
+          if (ii < 0 || jj < 0 || ii >= nx || jj >= ny) continue;
+          z = Math.min(z, top[jj * nx + ii]);
+        }
+      }
+      filled[j * nx + i] = z;
+    }
+  }
+  // ---- owners: nearest course geometry (sampled every 64 units along ridges and bottom edges)
+  const samples: { x: number; y: number; o: number }[] = [];
+  s.owners.forEach((ow, oi) => {
+    for (const pc of ow.pieces) {
+      const len = rampLength(pc.ramp);
+      const from = Math.max(0, pc.from ?? 0);
+      const to = Math.min(len, pc.to ?? len);
+      for (let a = from; a <= to + 1e-6; a += 64) {
+        for (const face of pc.ramp.side === 'right' ? (['right'] as const) : pc.ramp.side === 'left' ? (['left'] as const) : (['left', 'right'] as const)) {
+          for (const depth of [0, 0.5, 1]) {
+            const p = rampPoint(pc.ramp, face, Math.min(a, to), depth);
+            samples.push({ x: p.x, y: p.y, o: oi });
+          }
+        }
+      }
+    }
+    for (const bx of ow.boxes ?? []) {
+      for (let x = bx.mins.x; x <= bx.maxs.x + 1e-6; x += 64) {
+        for (let y = bx.mins.y; y <= bx.maxs.y + 1e-6; y += 64) samples.push({ x: Math.min(x, bx.maxs.x), y: Math.min(y, bx.maxs.y), o: oi });
+      }
+    }
+  });
+  for (let j = 0; j < ny; j++) {
+    for (let i = 0; i < nx; i++) {
+      const cx = s.x0 + (i + 0.5) * cell;
+      const cy = s.y0 + (j + 0.5) * cell;
+      let best = -1;
+      let bd = Infinity;
+      for (const p of samples) {
+        const d = (p.x - cx) * (p.x - cx) + (p.y - cy) * (p.y - cy);
+        if (d < bd) {
+          bd = d;
+          best = p.o;
+        }
+      }
+      owner[j * nx + i] = best;
+    }
+  }
+  // ---- quantize heights (so neighbours merge) and greedily merge rectangles of equal owner + height
+  const q = new Float64Array(nx * ny);
+  for (let k = 0; k < q.length; k++) q[k] = Number.isFinite(filled[k]) ? Math.floor((filled[k] - margin) / 32) * 32 : NaN;
+  const used = new Uint8Array(nx * ny);
+  const out: number[] = [];
+  for (let j = 0; j < ny; j++) {
+    for (let i = 0; i < nx; i++) {
+      const k = j * nx + i;
+      if (used[k] || Number.isNaN(q[k]) || owner[k] < 0) continue;
+      const o = owner[k];
+      const h = q[k];
+      const same = (ii: number, jj: number): boolean => {
+        const kk = jj * nx + ii;
+        return !used[kk] && owner[kk] === o && q[kk] === h;
+      };
+      let w = 1;
+      while (i + w < nx && same(i + w, j)) w++;
+      let hgt = 1;
+      outer: while (j + hgt < ny) {
+        for (let ii = i; ii < i + w; ii++) if (!same(ii, j + hgt)) break outer;
+        hgt++;
+      }
+      for (let jj = j; jj < j + hgt; jj++) for (let ii = i; ii < i + w; ii++) used[jj * nx + ii] = 1;
+      if (h <= s.floorZ + 1) continue;
+      const mins = v3(s.x0 + i * cell, s.y0 + j * cell, s.floorZ);
+      const maxs = v3(Math.min(s.x1, s.x0 + (i + w) * cell), Math.min(s.y1, s.y0 + (j + hgt) * cell), h);
+      out.push(b.addTeleport(mins, maxs, s.owners[o].dest));
+    }
+  }
+  return out;
+}
+
+export interface PushVolume {
+  mins: Vec3;
+  maxs: Vec3;
+  /** Push velocity (pushdir * speed). */
+  push: Vec3;
+}
+
+/**
+ * Predicts a run's flight (player origin, standing hull, no air control) with Source's trigger_push
+ * semantics: while the hull touches a push volume the base velocity is the push - its vertical part is
+ * applied as an acceleration (StartGravity), the horizontal part moves the player - and once the player is
+ * out, the remaining (horizontal) base velocity is added to the velocity. Stops when the run descends
+ * through `untilZ` or after `maxT` seconds.
+ */
+export function predictFlight(
+  start: Vec3,
+  vel: Vec3,
+  opts: { pushes?: PushVolume[]; untilZ: number; tick?: number; maxT?: number; gravity?: number; stop?: (p: Vec3, v: Vec3) => boolean },
+): { pos: Vec3; vel: Vec3; t: number; boosted: boolean } {
+  // (throws when the run never descends through untilZ: a design error)
+  const ft = 1 / (opts.tick ?? 100);
+  const g = opts.gravity ?? 800;
+  const p = v3(start.x, start.y, start.z);
+  const v = v3(vel.x, vel.y, vel.z);
+  const bv = v3();
+  let flag = false;
+  let boosted = false;
+  const maxT = opts.maxT ?? 10;
+  let t = 0;
+  while (t < maxT) {
+    if (!flag && (bv.x || bv.y || bv.z)) {
+      v.x += bv.x * (1 + ft * 0.5);
+      v.y += bv.y * (1 + ft * 0.5);
+      v.z += bv.z * (1 + ft * 0.5);
+      bv.x = bv.y = bv.z = 0;
+    }
+    flag = false;
+    v.z -= g * 0.5 * ft;
+    v.z += bv.z * ft;
+    bv.z = 0;
+    const z0 = p.z;
+    p.x += (v.x + bv.x) * ft;
+    p.y += (v.y + bv.y) * ft;
+    p.z += v.z * ft;
+    v.z -= g * 0.5 * ft;
+    t += ft;
+    for (const pv of opts.pushes ?? []) {
+      if (p.x + 16 <= pv.mins.x || p.x - 16 >= pv.maxs.x) continue;
+      if (p.y + 16 <= pv.mins.y || p.y - 16 >= pv.maxs.y) continue;
+      if (p.z + 72 <= pv.mins.z || p.z >= pv.maxs.z) continue;
+      bv.x = pv.push.x + (flag ? bv.x : 0);
+      bv.y = pv.push.y + (flag ? bv.y : 0);
+      bv.z = pv.push.z + (flag ? bv.z : 0);
+      flag = true;
+      boosted = true;
+    }
+    if (v.z < 0 && z0 >= opts.untilZ && p.z < opts.untilZ) return { pos: p, vel: v, t, boosted };
+    if (opts.stop && opts.stop(p, v)) return { pos: p, vel: v, t, boosted };
+  }
+  throw new Error(`predictFlight: the run never comes down through z=${opts.untilZ.toFixed(0)} (apex too low or too long)`);
+}
+
+/** Push velocity of a trigger_push with Hammer `pushdir` angles (pitch < 0 = upward) and `speed`. */
+export function pushVector(pitch: number, yaw: number, speed: number): Vec3 {
+  const p = (pitch * Math.PI) / 180;
+  const y = (yaw * Math.PI) / 180;
+  return v3(Math.cos(p) * Math.cos(y) * speed, Math.cos(p) * Math.sin(y) * speed, -Math.sin(p) * speed);
+}

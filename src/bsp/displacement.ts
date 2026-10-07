@@ -34,6 +34,11 @@ export interface DisplacementMesh {
   indices: Uint32Array;
   /** Front-facing normal of the base face (plane normal, flipped for back-side faces). */
   faceNormal: [number, number, number];
+  /**
+   * Per-vertex sums of the adjacent triangles' unnormalized (area-weighted) normals, kept for seam welding
+   * (smoothDisplacementSeams); null once welded.
+   */
+  normalSums: Float64Array | null;
 }
 
 /**
@@ -161,9 +166,11 @@ export function buildDisplacementMesh(bsp: BspFile, index: number): Displacement
     alphas,
     indices,
     faceNormal: [fnx, fny, fnz],
+    normalSums: null,
   };
   const acc = accumulateNormals(mesh);
   finishNormals(mesh, acc);
+  mesh.normalSums = acc;
   return mesh;
 }
 
@@ -223,57 +230,96 @@ function finishNormals(m: DisplacementMesh, acc: Float64Array): void {
 export function smoothDisplacementSeams(meshes: DisplacementMesh[], tolerance = 0.1): void {
   if (meshes.length < 2) return;
   const q = 1 / Math.max(1e-4, tolerance);
-  type Ref = { m: number; v: number };
-  const groups = new Map<string, Ref[]>();
-  const accs: Float64Array[] = meshes.map((m) => accumulateNormals(m));
+  // border vertex records: mesh, vertex, quantized position
+  let count = 0;
+  for (const m of meshes) count += 4 * (m.size - 1);
+  const recMesh = new Int32Array(count);
+  const recVert = new Int32Array(count);
+  const qx = new Float64Array(count);
+  const qy = new Float64Array(count);
+  const qz = new Float64Array(count);
+  const buckets = new Map<number, number[]>();
+  let n = 0;
   for (let mi = 0; mi < meshes.length; mi++) {
     const m = meshes[mi];
-    const n = m.size;
+    const sz = m.size;
     const P = m.positions;
-    for (let r = 0; r < n; r++) {
-      for (let c = 0; c < n; c++) {
-        if (r !== 0 && r !== n - 1 && c !== 0 && c !== n - 1) continue;
-        const v = r * n + c;
-        const key = `${Math.round(P[v * 3] * q)},${Math.round(P[v * 3 + 1] * q)},${Math.round(P[v * 3 + 2] * q)}`;
-        let g = groups.get(key);
-        if (!g) groups.set(key, (g = []));
-        g.push({ m: mi, v });
+    for (let r = 0; r < sz; r++) {
+      for (let c = 0; c < sz; c++) {
+        if (r !== 0 && r !== sz - 1 && c !== 0 && c !== sz - 1) continue;
+        const v = r * sz + c;
+        const x = Math.round(P[v * 3] * q);
+        const y = Math.round(P[v * 3 + 1] * q);
+        const z = Math.round(P[v * 3 + 2] * q);
+        recMesh[n] = mi;
+        recVert[n] = v;
+        qx[n] = x;
+        qy[n] = y;
+        qz[n] = z;
+        const h = (Math.imul(x | 0, 73856093) ^ Math.imul(y | 0, 19349663) ^ Math.imul(z | 0, 83492791)) | 0;
+        const b = buckets.get(h);
+        if (b) b.push(n);
+        else buckets.set(h, [n]);
+        n++;
       }
     }
   }
-  for (const g of groups.values()) {
-    if (g.length < 2) continue;
-    let multi = false;
-    for (let i = 1; i < g.length; i++) if (g[i].m !== g[0].m) multi = true;
-    if (!multi) continue;
-    // Sum only the contributions that face the same way as the first vertex (keeps back-to-back
-    // displacements, e.g. both sides of a thin wall, apart).
-    const a0 = accs[g[0].m];
-    const o0 = g[0].v * 3;
-    const ref = [a0[o0], a0[o0 + 1], a0[o0 + 2]];
-    let sx = 0;
-    let sy = 0;
-    let sz = 0;
-    const members: Ref[] = [];
-    for (const r of g) {
-      const a = accs[r.m];
-      const o = r.v * 3;
-      if (a[o] * ref[0] + a[o + 1] * ref[1] + a[o + 2] * ref[2] < 0) continue;
-      sx += a[o];
-      sy += a[o + 1];
-      sz += a[o + 2];
-      members.push(r);
-    }
-    const len = Math.sqrt(sx * sx + sy * sy + sz * sz);
-    if (!(len > 1e-12) || members.length < 2) continue;
-    for (const r of members) {
-      const N = meshes[r.m].normals;
-      const o = r.v * 3;
-      N[o] = sx / len;
-      N[o + 1] = sy / len;
-      N[o + 2] = sz / len;
+  const sums = meshes.map((m) => m.normalSums ?? accumulateNormals(m));
+  const members: number[] = [];
+  for (const bucket of buckets.values()) {
+    if (bucket.length < 2) continue;
+    // a bucket may hold several positions (hash collisions): group by exact quantized position
+    for (let i = 0; i < bucket.length; i++) {
+      const a = bucket[i];
+      if (a < 0) continue;
+      members.length = 0;
+      members.push(a);
+      let multi = false;
+      for (let j = i + 1; j < bucket.length; j++) {
+        const b = bucket[j];
+        if (b < 0 || qx[b] !== qx[a] || qy[b] !== qy[a] || qz[b] !== qz[a]) continue;
+        members.push(b);
+        if (recMesh[b] !== recMesh[a]) multi = true;
+        bucket[j] = -1;
+      }
+      if (!multi) continue;
+      // Sum the contributions facing the same way as the first one (keeps back-to-back displacements, e.g.
+      // both sides of a thin wall, apart).
+      const s0 = sums[recMesh[a]];
+      const o0 = recVert[a] * 3;
+      const rx = s0[o0];
+      const ry = s0[o0 + 1];
+      const rz = s0[o0 + 2];
+      let ax = 0;
+      let ay = 0;
+      let az = 0;
+      let used = 0;
+      for (let t = 0; t < members.length; t++) {
+        const k = members[t];
+        const S = sums[recMesh[k]];
+        const o = recVert[k] * 3;
+        if (S[o] * rx + S[o + 1] * ry + S[o + 2] * rz < 0) {
+          members[t] = -1;
+          continue;
+        }
+        ax += S[o];
+        ay += S[o + 1];
+        az += S[o + 2];
+        used++;
+      }
+      const len = Math.sqrt(ax * ax + ay * ay + az * az);
+      if (!(len > 1e-12) || used < 2) continue;
+      for (const k of members) {
+        if (k < 0) continue;
+        const N = meshes[recMesh[k]].normals;
+        const o = recVert[k] * 3;
+        N[o] = ax / len;
+        N[o + 1] = ay / len;
+        N[o + 2] = az / len;
+      }
     }
   }
+  for (const m of meshes) m.normalSums = null;
 }
 
 /** Builds every displacement's mesh (null entries for malformed ones) and welds the seams. */

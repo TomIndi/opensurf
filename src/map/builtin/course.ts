@@ -123,6 +123,13 @@ export class RampChain {
     this.yaw = yaw;
   }
 
+  /** Moves the cursor (the next ramp's `gap`/`drop` are measured from here). */
+  moveTo(p: Vec3, yaw = this.yaw, descent = this.lastDescent): void {
+    this.pos = v3clone(p);
+    this.yaw = yaw;
+    this.lastDescent = descent;
+  }
+
   /** Point `along` units ahead, `left` units to the left and `up` units up from the cursor. */
   at(along: number, left = 0, up = 0, yaw = this.yaw): Vec3 {
     const d = dirOf(yaw);

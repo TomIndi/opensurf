@@ -57,17 +57,18 @@ const FACE_SIZE = 56;
 
 /**
  * Picks the lighting lump that matches `bsp.faces`: LDR faces use the LDR lighting lump, faces read from
- * LUMP_FACES_HDR use the HDR lump. When the LDR faces exist but only HDR lighting was compiled, the HDR face
- * lump's light offsets are used (same face order), or the LDR offsets as a last resort. Null without lighting.
+ * LUMP_FACES_HDR use the HDR lump. When the LDR faces exist but only HDR lighting was compiled (or
+ * `preferHdr` asks for HDR), the HDR face lump's light offsets are used (same face order), or the LDR offsets
+ * as a last resort. Null without lighting.
  */
-export function selectLightingSource(bsp: BspFile): LightingSource | null {
+export function selectLightingSource(bsp: BspFile, preferHdr = false): LightingSource | null {
   const facesLump = bsp.facesLump ?? LUMP_FACES;
   const ldr = bsp.lighting && bsp.lighting.length > 0 ? bsp.lighting : null;
   const hdr = bsp.lightingHDR && bsp.lightingHDR.length > 0 ? bsp.lightingHDR : null;
   if (facesLump === LUMP_FACES_HDR) return hdr ? { data: hdr, hdr: true, offsets: null } : null;
-  if (ldr) return { data: ldr, hdr: false, offsets: null };
+  if (ldr && !(preferHdr && hdr)) return { data: ldr, hdr: false, offsets: null };
   if (!hdr) return null;
-  // LDR faces, HDR lighting only: take the offsets from the HDR face lump when it matches.
+  // LDR faces with HDR lighting: take the offsets from the HDR face lump when it matches.
   let hdrFaces: Uint8Array;
   try {
     hdrFaces = bsp.getLump(LUMP_FACES_HDR);
@@ -80,6 +81,7 @@ export function selectLightingSource(bsp: BspFile): LightingSource | null {
     for (let i = 0; i < offsets.length; i++) offsets[i] = dv.getInt32(i * FACE_SIZE + 20, true);
     return { data: hdr, hdr: true, offsets };
   }
+  if (ldr) return { data: ldr, hdr: false, offsets: null }; // no HDR offsets to pair with: stay LDR
   return { data: hdr, hdr: true, offsets: null };
 }
 

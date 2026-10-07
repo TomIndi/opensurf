@@ -320,24 +320,51 @@ export class MapBuilder {
     // horizontal unit directions of every segment
     const dirs: [number, number][] = [];
     for (let i = 0; i < n - 1; i++) dirs.push(hnorm(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y));
+    for (let i = 1; i < n - 1; i++) {
+      const c = dirs[i - 1][0] * dirs[i][0] + dirs[i - 1][1] * dirs[i][1];
+      if (c < 0.7) throw new Error(`MapBuilder(${this.name}): ramp turns too sharply at point ${i}`);
+    }
+    // Every segment's surf face is an exact plane: through the ridge segment, spanned by the ridge direction and
+    // the nominal cross-section edge (width out, height down). At a joint the face's bottom corner lies on the
+    // line where the two neighbouring face planes meet, so both segments share that edge exactly - no fold
+    // inside a face (a fold makes Source's multi-plane clipping eat speed) and no step at the seam. For level
+    // curves this is the classic miter; for straight runs with changing descent, a vertical cross-section.
+    const w = o.width;
+    const h = o.height;
+    const faceSides: (1 | -1)[] = o.side === 'left' ? [1] : o.side === 'right' ? [-1] : [1, -1];
+    const faceBottoms: Vec3[][] = faceSides.map((sgn) => {
+      const edges: Vec3[] = [];
+      const normals: Vec3[] = [];
+      for (let k = 0; k < n - 1; k++) {
+        const D = sub(pts[k + 1], pts[k]);
+        const e = v3(-dirs[k][1] * w * sgn, dirs[k][0] * w * sgn, -h);
+        let nrm = norm(cross(D, e));
+        if (nrm.z < 0) nrm = scale(nrm, -1);
+        edges.push(e);
+        normals.push(nrm);
+      }
+      const out: Vec3[] = [];
+      for (let i = 0; i < n; i++) {
+        const p = pts[i];
+        if (i === 0 || i === n - 1) {
+          out.push(add(p, edges[i === 0 ? 0 : n - 2]));
+          continue;
+        }
+        const L = cross(normals[i - 1], normals[i]);
+        const ll = Math.hypot(L.x, L.y, L.z);
+        if (ll < 1e-9 || Math.abs(L.z) < 1e-6 * ll) {
+          out.push(add(p, edges[i - 1]));
+          continue;
+        }
+        out.push(add(p, scale(L, -h / L.z)));
+      }
+      return out;
+    });
     const ribs: Vec3[][] = [];
     for (let i = 0; i < n; i++) {
-      const dIn = dirs[Math.max(0, i - 1)];
-      const dOut = dirs[Math.min(n - 2, i)];
-      const m = hnorm(dIn[0] + dOut[0], dIn[1] + dOut[1]);
-      const c = m[0] * dIn[0] + m[1] * dIn[1];
-      if (c < 0.7) throw new Error(`MapBuilder(${this.name}): ramp turns too sharply at point ${i}`);
-      const s = 1 / c;
-      const left = v3(-m[1] * s, m[0] * s, 0); // horizontal, perpendicular to the miter direction, widened
       const p = pts[i];
-      const w = o.width;
-      const h = o.height;
-      const bottomAt = (lat: number): Vec3 => v3(p.x + left.x * lat, p.y + left.y * lat, p.z - h);
-      let rib: Vec3[];
-      if (o.side === 'left') rib = [v3clone(p), bottomAt(w), bottomAt(0)];
-      else if (o.side === 'right') rib = [v3clone(p), bottomAt(-w), bottomAt(0)];
-      else rib = [v3clone(p), bottomAt(w), bottomAt(-w)];
-      ribs.push(rib);
+      if (o.side === 'both') ribs.push([v3clone(p), faceBottoms[0][i], faceBottoms[1][i]]);
+      else ribs.push([v3clone(p), faceBottoms[0][i], v3(p.x, p.y, p.z - h)]);
     }
     const mat = o.mat ?? 'builtin/ramp_grey';
     const sideMat = o.sideMat === undefined ? mat : o.sideMat;
