@@ -8,7 +8,7 @@
 // of one ramp share their cross-section ("rib") vertices exactly, so seams have no step, gap or
 // protruding edge for the player box to snag on. Every surf face is checked to have a normal.z in
 // [RAMP_MIN_NZ, RAMP_MAX_NZ]: steep enough to never count as ground (< 0.7), shallow enough to be a
-// comfortable classic 53-63 degree surf.
+// comfortable classic 48-63 degree surf (KSF maps are mostly ~52 degrees, normal.z 0.62).
 import { QAngle, qa } from '../../core/angles';
 import { Vec3, v3, v3clone } from '../../core/vec3';
 import { fallbackMaterial } from '../../bsp/materials';
@@ -72,7 +72,7 @@ export interface RampOptions {
 }
 
 export interface RampPathOptions extends Omit<RampOptions, 'start' | 'end'> {
-  /** Ridge polyline (>= 2 points). Joints are mitered so neighbouring segments share their cross-section. */
+  /** Ridge polyline (>= 2 points). Neighbouring segments share their joint cross-section (see addRampPath). */
   points: Vec3[];
 }
 
@@ -94,12 +94,13 @@ export interface RampRecord {
   surfNormals: Vec3[];
 }
 
+/** A brush trigger the builder created (its entity keyvalues and its brush model's box). */
 export interface TriggerRecord {
   classname: string;
   model: number;
   mins: Vec3;
   maxs: Vec3;
-  entity: MapEntity;
+  kv: Record<string, string>;
 }
 
 interface RenderBrush {
@@ -191,28 +192,9 @@ function boxMatFn(spec: MaterialSpec): (n: Vec3) => string | null {
   };
 }
 
-/** Horizontal yaw (degrees) of a direction. */
-export function yawOf(d: Vec3): number {
-  return (Math.atan2(d.y, d.x) * 180) / Math.PI;
-}
-
 /** Ramp height that gives a straight (level) ramp of the given face width the requested normal.z. */
 export function rampHeightFor(width: number, normalZ = DEFAULT_RAMP_NZ): number {
   return (width * Math.sqrt(1 - normalZ * normalZ)) / normalZ;
-}
-
-/**
- * Points along a horizontal arc for curved ramp ridges: center, radius, start/end angle (degrees, CCW from +x),
- * start/end height, `segments` pieces (segments + 1 points). Heights are interpolated linearly in angle.
- */
-export function arcPoints(center: Vec3, radius: number, a0: number, a1: number, z0: number, z1: number, segments: number): Vec3[] {
-  const out: Vec3[] = [];
-  for (let i = 0; i <= segments; i++) {
-    const t = i / segments;
-    const a = ((a0 + (a1 - a0) * t) * Math.PI) / 180;
-    out.push(v3(center.x + Math.cos(a) * radius, center.y + Math.sin(a) * radius, z0 + (z1 - z0) * t));
-  }
-  return out;
 }
 
 export interface ZoneOptions {
@@ -242,7 +224,7 @@ export class MapBuilder {
   private readonly spawns: SpawnPoint[] = [];
   private readonly zones: ZoneDef[] = [];
   readonly ramps: RampRecord[] = [];
-  readonly triggers: { classname: string; model: number; mins: Vec3; maxs: Vec3; kv: Record<string, string> }[] = [];
+  readonly triggers: TriggerRecord[] = [];
   private readonly destinations = new Map<string, { origin: Vec3; yaw: number }>();
 
   constructor(name: string, opts: BuilderOptions = {}) {
@@ -330,8 +312,9 @@ export class MapBuilder {
 
   /**
    * A surf ramp along a ridge polyline. Each segment is the convex hull of the cross-sections ("ribs") at
-   * its two ends; interior ribs are mitered (bisector plane, widened by 1/cos of the half turn) and shared
-   * by both neighbours, so the surf faces meet exactly.
+   * its two ends. Every surf face is an exact plane and neighbouring segments share their joint rib, so the
+   * faces meet along a single line (see the construction notes below); collision brushes overlap across the
+   * joints so no brush edge is exposed at a seam.
    */
   addRampPath(o: RampPathOptions): RampRecord {
     const pts = o.points.map(v3clone);
@@ -448,7 +431,7 @@ export class MapBuilder {
       this.renderStrips.push({ mat, top, bottom, normals, u, vBottom });
     }
     // Collision uses overlapping segments (see seamlessSegments): no brush edge at the visible seams.
-    for (const b of segs.length > 1 ? seamlessSegments(segs, ribs) : segs) {
+    for (const b of segs.length > 1 ? seamlessSegments(segs, ribs, o.side === 'both') : segs) {
       this.worldBrushes.push(b);
       rec.brushes.push(b);
     }
@@ -823,7 +806,7 @@ export class MapBuilder {
  * same time, and the epsilon back-off then picks the edge plane, which faces against the motion: the classic
  * surf "rampbug" that eats most of the player's speed.
  */
-function seamlessSegments(segs: Brush[], ribs: Vec3[][]): Brush[] {
+function seamlessSegments(segs: Brush[], ribs: Vec3[][], both: boolean): Brush[] {
   const n = segs.length;
   const near = (p: Vec3, rib: Vec3[]): boolean => rib.some((q) => Math.abs(p.x - q.x) < 0.05 && Math.abs(p.y - q.y) < 0.05 && Math.abs(p.z - q.z) < 0.05);
   interface SegInfo {
@@ -876,8 +859,11 @@ function seamlessSegments(segs: Brush[], ribs: Vec3[][]): Brush[] {
       if (far && me.verts.every((v) => dot(v, far.normal) <= far.dist + 0.01)) planes.push(far);
     }
     const b = brushFromPlanes(planes, CONTENTS_SOLID, 0);
-    // never lose the exact segment: fall back to it if anything went wrong
-    out.push(b && b.mins.x <= segs[i].mins.x + 0.01 && b.maxs.x >= segs[i].maxs.x - 0.01 && b.mins.z <= segs[i].mins.z + 0.01 ? b : segs[i]);
+    // never lose the surf surface: the extended brush must contain both ribs' ridge points exactly and their
+    // face-bottom corners up to the underside shave allowed above; otherwise keep the exact segment
+    const inside = (p: Vec3, tol: number): boolean => !!b && b.sides.every((sd) => sd.bevel || dot(p, sd.plane.normal) <= sd.plane.dist + tol);
+    const ok = [ribs[i], ribs[i + 1]].every((r) => inside(r[0], 0.01) && inside(r[1], 4.01) && (!both || inside(r[2], 4.01)));
+    out.push(ok ? b! : segs[i]);
   }
   return out;
 }

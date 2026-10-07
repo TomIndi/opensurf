@@ -8,7 +8,7 @@
 import { v3 } from '../../core/vec3';
 import { MapBuilder, RampRecord } from './builder';
 import { BuiltCourse, Course, CourseRamp, CourseSection, RampChain, rampPoint } from './course';
-import { addRampGate, addVoidTeleports, boxSurface, rampBottomInRect, rampZoneBox, stageDestination } from './parts';
+import { addRampGate, addVoidGrid, rampBottomInRect, rampZoneBox, stageDestination } from './parts';
 
 export function buildTutorial(): BuiltCourse {
   const b = new MapBuilder('surf_tutorial', {
@@ -112,27 +112,15 @@ export function buildTutorial(): BuiltCourse {
   }
 
   // ---------------------------------------------------------------- the void: fail teleports + ground far below
-  const groundZ = Math.min(...R.map((r) => rampBottomInRect(r, -1e9, 1e9, -1e9, 1e9)), endTop - 64) - 1400;
-  const Y0 = -4000;
-  const Y1 = 4000;
-  let a0 = X0 - 1200;
-  for (let s = 0; s < sections.length; s++) {
-    const next = sections[s + 1]?.ramps[0].ramp;
-    // a section's void reaches 448 units into the next section's first ramp: missing it sends you back here
-    const a1 = next ? next.points[0].x + 448 : endMax.x + 256;
-    addVoidTeleports(b, {
-      axis: 'x',
-      a0,
-      a1,
-      b0: Y0,
-      b1: Y1,
-      floorZ: groundZ - 512,
-      dest: sections[s].dest,
-      ramps: [...sections[s].ramps.map((c) => c.ramp), ...(next ? [next] : [])],
-      extra: [boxSurface(endMin, endMax)],
-    });
-    a0 = a1;
-  }
+  const lowest = Math.min(...R.map((r) => rampBottomInRect(r, -1e9, 1e9, -1e9, 1e9)), endTop - 64);
+  const groundZ = lowest - 1400;
+  const owners = sections.map((s, i) => {
+    const next = sections[i + 1]?.ramps[0].ramp;
+    // missing the next section's first ramp (its first 448 units) sends you back to this section
+    const pieces = [...s.ramps.map((c) => ({ ramp: c.ramp })), ...(next ? [{ ramp: next, to: 448 }] : [])];
+    return { dest: s.dest, pieces, boxes: i === sections.length - 1 ? [{ mins: endMin, maxs: endMax }] : [] };
+  });
+  addVoidGrid(b, { x0: -16384, x1: 16384, y0: -4096, y1: 4096, cell: 512, floorZ: groundZ - 512, owners, ramps: R, boxes: [{ mins: endMin, maxs: endMax }] });
   // a wide, muted ground far below for a sense of height (fades into the haze)
   b.setMaterialColor('builtin/grid_ground', [0.36, 0.45, 0.52]);
   b.addBox(v3(-16384, -16384, groundZ - 64), v3(16384, 16384, groundZ), { top: 'builtin/grid_ground', sides: null, bottom: null });

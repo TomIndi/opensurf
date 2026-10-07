@@ -6,8 +6,8 @@
 //   collision  brush models (brush entities placed in world space), CollisionWorld over world brushes, solid
 //              brush entities and displacement prisms; brush entities that start disabled are made non-solid
 //   textures   pakfile, materials (VMT/VTF or procedural stand-ins), 2D sky, baked cubemaps
-//   geometry   face areas, render batches + lightmap atlas, props (static props and model entities) packed in
-//              the map, lit by vrad's leaf ambient cubes
+//   geometry   face areas, render batches + lightmap atlas + info_overlay decals, props (static props and
+//              model entities) packed in the map, lit like the engine's light cache (leaf ambient + world lights)
 // followed by the cheap entity-derived data (sky_camera, env_fog_controller, spawns, zones, bounds).
 //
 // Nothing in the returned LoadedMap references `data`: every array is decoded or copied, so the (possibly
@@ -403,7 +403,9 @@ export async function loadBspMap(
   const stats = {} as RenderBuildStats;
   const { batches, lightmap } = buildRenderBatches(bsp, materials, areas, { ...opts.render, entities, warnings, stats });
   let props: RenderProp[] = [];
-  if (opts.props !== false) {
+  if (opts.props !== false && bsp.gameLumps.length + entities.length > 0) {
+    progress('geometry', 'Loading props', 3);
+    await yieldToEventLoop();
     try {
       const hdrLighting = selectLightingSource(bsp, opts.render?.lighting === 'hdr')?.hdr ?? false;
       props = buildMapProps(bsp, entities, pak, materials, {
@@ -414,7 +416,7 @@ export async function loadBspMap(
         world: collision,
       });
     } catch (e) {
-      warnings.push(`static props: ${(e as Error).message}`);
+      warnings.push(`props: ${(e as Error).message}`);
     }
   }
   lap('geometry');

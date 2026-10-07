@@ -20,14 +20,14 @@ export const BUILTIN_MAPS: BuiltinMapInfo[] = [
   {
     id: 'surf_tutorial',
     name: 'surf_tutorial',
-    description: 'Learn to surf: a long, wide first ramp, then straight follow-ups, a zigzag, a transfer and growing gaps. 4 checkpoints.',
+    description: 'Learn to surf: a long, wide first ramp, then straight follow-ups, a zigzag, a transfer and growing gaps. 3 checkpoints.',
     tier: 1,
     type: 'linear',
   },
   {
     id: 'surf_neon',
     name: 'surf_neon',
-    description: 'Glowing ramps in the dark: 4 stages with a long ramp, an up-ramp, a curved ramp and a booster.',
+    description: 'Glowing ramps in the dark: 4 stages with a long warm-up, an up-ramp into a booster, a 180 degree curve and a booster launch.',
     tier: 2,
     type: 'staged',
   },

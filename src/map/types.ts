@@ -252,6 +252,8 @@ export interface RenderProp {
   alpha?: number;
   /** Optional: index into LoadedMap.entities for entity-placed props (prop_dynamic...); omitted for static props. */
   entity?: number;
+  /** Optional: BSP area the prop stands in (like RenderBatch.area: props in Sky3D.area belong to the 3D skybox). */
+  area?: number;
   /**
    * Optional: light cube at the prop's lighting origin - vrad's leaf ambient cube plus the direct light of the
    * map's compiled lights, as the engine lights models (linear RGB, 1 = fully lit, like the lightmap), faces

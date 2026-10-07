@@ -1659,7 +1659,7 @@ describe('loadBspMap (box world)', () => {
     setTimeout(() => (timerRan = true), 0);
     const map = await p;
     expect(timerRan).toBe(true);
-    expect(phases).toEqual(['parse', 'collision', 'textures', 'geometry']);
+    expect(phases).toEqual(['parse', 'collision', 'textures', 'geometry', 'geometry']); // + 'Loading props'
     expect(logs.length).toBe(1);
     expect(logs[0]).toMatch(/\[loadmap\] box_world: \d+ ms/);
     expect(map.name).toBe('box_world');
@@ -1842,6 +1842,37 @@ describe.skipIf(MAPS.length + LARGE.length === 0)('real maps', () => {
         expect(bad).toBe(0);
       });
 
+      it('samples polygon lightmaps continuously across face seams (luxel-centre mapping)', () => {
+        const lm = map.render.lightmap!;
+        const seen = new Map<string, number[]>();
+        for (const b of map.render.batches) {
+          if (!b.lightmapUVs || b.isDisplacement || b.decal) continue;
+          for (let i = 0; i < b.positions.length / 3; i++) {
+            const key =
+              `${Math.round(b.positions[i * 3] * 8)},${Math.round(b.positions[i * 3 + 1] * 8)},${Math.round(b.positions[i * 3 + 2] * 8)}|` +
+              `${Math.round(b.normals[i * 3] * 100)},${Math.round(b.normals[i * 3 + 1] * 100)},${Math.round(b.normals[i * 3 + 2] * 100)}`;
+            const px = sampleAtlas(lm, b.lightmapUVs[i * 2], b.lightmapUVs[i * 2 + 1]);
+            const v = px[0] + px[1] + px[2];
+            const list = seen.get(key);
+            if (list) list.push(v);
+            else seen.set(key, [v]);
+          }
+        }
+        let err = 0;
+        let n = 0;
+        for (const list of seen.values()) {
+          for (const v of list.slice(1)) {
+            err += Math.abs(v - list[0]) / (v + list[0] + 1e-3);
+            n++;
+          }
+        }
+        if (n < 100) return;
+        console.log(`[geometry test] ${name}: polygon seam light error ${(err / n).toFixed(4)} over ${n} shared vertices`);
+        // measured 0.005-0.043 on the KSF maps; shifting the uvs by half a texel is worse on the big samples
+        // (utopia 0.0104 -> 0.013-0.015, omnific 0.0143 -> 0.023-0.026, mesa 0.0431 -> 0.047-0.049)
+        expect(err / n).toBeLessThan(0.08);
+      });
+
       it('lays displacement lightmaps out continuously across displacement seams', () => {
         const disp = map.render.batches.filter((b) => b.isDisplacement && b.lightmapUVs);
         if (!disp.length) return;
@@ -1958,6 +1989,14 @@ describe.skipIf(MAPS.length + LARGE.length === 0)('real maps', () => {
           if (p.alpha !== undefined) expect(p.alpha > 0 && p.alpha <= 1).toBe(true);
         }
         if (props.length) expect(lit / props.length).toBeGreaterThan(0.9);
+        if (props.length) expect(props.filter((p) => p.area !== undefined).length / props.length).toBeGreaterThan(0.9);
+        const sky3d = map.render.sky3d;
+        if (sky3d && name === 'surf_lt_omnific') {
+          // its 3dsb_* models stand in the 3D skybox
+          const skyProps = props.filter((p) => p.area === sky3d.area);
+          expect(skyProps.length).toBeGreaterThan(0);
+          expect(skyProps.some((p) => /3dsb/.test(p.model))).toBe(true);
+        }
         console.log(`[geometry test] ${name}: ${props.length} props (${props.filter((p) => p.entity !== undefined).length} from entities), ${lit} lit`);
       });
 

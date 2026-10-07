@@ -5,11 +5,14 @@
 //   Stage 1 (cyan)   - warm-up: a long ramp, a straight follow-up, a classic ^ double ramp, a zigzag.
 //   Stage 2 (pink)   - an up-ramp into a booster that launches you over a big gap.
 //   Stage 3 (green)  - a long segmented curve: a 180 degree U-turn ramp.
-//   Stage 4 (orange) - a mid-air booster up to a higher ramp, then the final ramp onto the end platform.
+//   Stage 4 (orange) - a zig-zag into a booster column that throws you across a long gap, then the final
+//                      ramp onto the end platform.
+// Booster landings are placed with predictFlight (trigger_push semantics) for the weakest launch that still
+// counts, so every launch between a slow, low exit and a fast, high one comes down on the landing ramp.
 import { qa } from '../../core/angles';
 import { Vec3, v3 } from '../../core/vec3';
 import { MapBuilder, RampRecord, rampHeightFor } from './builder';
-import { BuiltCourse, Course, CourseRamp, CourseSection, RampChain, dirOf, leftOf, rampPoint } from './course';
+import { BuiltCourse, Course, CourseRamp, CourseSection, RampChain, rampPoint } from './course';
 import { PushVolume, addGlowBar, addStageRoom, addVoidGrid, predictFlight, pushVector } from './parts';
 
 const STAGE_COLORS = ['cyan', 'pink', 'green', 'orange'];
@@ -22,7 +25,8 @@ interface StageCtx {
   door: Vec3;
 }
 
-const RAMP = 'builtin/ramp_dark';
+/** Blue-black ramp faces (custom colour, set in buildNeon). */
+const RAMP = 'builtin/ramp_night';
 const SIDE = 'builtin/wall_black';
 
 /** A stage room opening toward +x at `door`. Returns its spawn point and zone box. */
@@ -39,10 +43,10 @@ function stageRoom(c: StageCtx): { spawn: Vec3; mins: Vec3; maxs: Vec3 } {
 }
 
 /**
- * A glowing portal frame across the flight path at `center` (facing +x), with a trigger_teleport filling it
- * (and reaching well below, so a run that drops a little short still gets in).
+ * A glowing portal frame across the flight path at `center`, for runs travelling along +x (`dir` 1) or -x
+ * (`dir` -1), with a trigger_teleport filling it - reaching well below, so a run that drops short still gets in.
  */
-function portal(c: StageCtx, center: Vec3, dest: string, halfW = 640, up = 448, down = 896): void {
+function portal(c: StageCtx, center: Vec3, dir: 1 | -1, dest: string, halfW = 640, up = 448, down = 896): void {
   const { b } = c;
   const x = center.x;
   const y0 = center.y - halfW;
@@ -54,12 +58,14 @@ function portal(c: StageCtx, center: Vec3, dest: string, halfW = 640, up = 448, 
   addGlowBar(b, v3(x, y1, z0), v3(x, y1, z1), 32, g);
   addGlowBar(b, v3(x, y0, z1), v3(x, y1, z1), 32, g);
   addGlowBar(b, v3(x, y0, z0), v3(x, y1, z0), 32, g);
-  // inner rings
   for (const k of [0.33, 0.66]) {
     const zz = z0 + (z1 - z0) * k;
     addGlowBar(b, v3(x, y0, zz), v3(x, y1, zz), 6, g);
   }
-  b.addTeleport(v3(x - 64, y0, z0), v3(x + 192, y1, z1), dest);
+  // the volume starts a little before the frame and goes on behind it
+  const xa = dir > 0 ? x - 64 : x - 192;
+  const xb = dir > 0 ? x + 192 : x + 64;
+  b.addTeleport(v3(xa, y0, z0), v3(xb, y1, z1), dest);
 }
 
 export function buildNeon(): BuiltCourse {
@@ -67,9 +73,9 @@ export function buildNeon(): BuiltCourse {
     sky: 'sky_night_neon',
     fog: { enabled: true, color: [0.05, 0.03, 0.1], start: 3000, end: 22000, maxDensity: 0.85 },
   });
+  b.setMaterialColor(RAMP, [0.2, 0.21, 0.28]);
   const sections: CourseSection[] = [];
   const allRamps: RampRecord[] = [];
-  const boxes: { mins: Vec3; maxs: Vec3 }[] = [];
   const stageRamps: CourseRamp[][] = [];
   const doors: Vec3[] = [
     v3(-14200, -12500, 5600),
@@ -81,7 +87,7 @@ export function buildNeon(): BuiltCourse {
   const rooms = doors.map((door, i) => {
     const ctx: StageCtx = { b, index: i, glow: `builtin/glow_${STAGE_COLORS[i]}`, door };
     const r = stageRoom(ctx);
-    boxes.push({ mins: v3(r.mins.x - 32, r.mins.y - 32, door.z - 16), maxs: v3(door.x + 16, r.maxs.y + 32, door.z + 304) });
+    const box = { mins: v3(r.mins.x - 32, r.mins.y - 32, door.z - 16), maxs: v3(door.x + 16, r.maxs.y + 32, door.z + 304) };
     b.addDestination(dests[i], r.spawn, 0);
     if (i === 0) {
       b.addSpawn(r.spawn, 0);
@@ -89,7 +95,7 @@ export function buildNeon(): BuiltCourse {
     } else {
       b.addZone('stage', r.mins, r.maxs, { index: i + 1, spawn: { origin: r.spawn, yaw: 0 } });
     }
-    return { ctx, ...r };
+    return { ctx, box, ...r };
   });
   const ramp = (i: number) => ({ mat: RAMP, sideMat: SIDE, trimMat: `builtin/glow_${STAGE_COLORS[i]}` });
   const W = 352;
@@ -104,14 +110,15 @@ export function buildNeon(): BuiltCourse {
     const R3 = ch.straight({ gap: 512, speed: 1150, land: 560, length: 3000, descent: 6, side: 'both', width: W, ...ramp(0), name: 's1 double ramp' });
     const R4 = ch.straight({ gap: 576, shift: 800, travel: 500, speed: 1300, land: 600, length: 3000, descent: 6, side: 'right', width: W, ...ramp(0), name: 's1 zig' });
     const exit = rampPoint(R4, 'right', 3000, 0.42);
-    portal(c, v3(exit.x + 900, exit.y, exit.z - 200), dests[1]);
+    const pc = v3(exit.x + 900, exit.y, exit.z - 200);
+    portal(c, pc, 1, dests[1]);
     stageRamps.push([
       { ramp: R1, face: 'left' },
       { ramp: R2, face: 'left' },
       { ramp: R3, face: 'left' },
       { ramp: R4, face: 'right' },
     ]);
-    sections.push({ name: 'Stage 1', dest: dests[0], ramps: stageRamps[0], marker: 1, exit: v3(exit.x + 900, exit.y, exit.z - 200) });
+    sections.push({ name: 'Stage 1', dest: dests[0], ramps: stageRamps[0], marker: 1, exit: pc });
     allRamps.push(R1, R2, R3, R4);
   }
 
@@ -142,7 +149,7 @@ export function buildNeon(): BuiltCourse {
     const R5 = ch.straight({ gap: 704, speed: 1500, land: 640, length: 3000, descent: 6, side: 'left', width: W, ...ramp(1), name: 's2 final' });
     const exit = rampPoint(R5, 'left', 3000, 0.42);
     const pc = v3(exit.x + 900, exit.y, exit.z - 200);
-    portal(c, pc, dests[2]);
+    portal(c, pc, 1, dests[2]);
     stageRamps.push([
       { ramp: R1, face: 'left' },
       { ramp: R2, face: 'left' },
@@ -164,9 +171,9 @@ export function buildNeon(): BuiltCourse {
     const R3 = ch.curve({ gap: 576, speed: 1350, land: 560, radius: 2400, angle: 180, segments: 36, descent: 5, side: 'left', width: W, ...ramp(2), name: 's3 u-turn' });
     const R4 = ch.straight({ gap: 576, speed: 1500, land: 600, length: 3000, descent: 6, side: 'left', width: W, ...ramp(2), name: 's3 final' });
     const exit = rampPoint(R4, 'left', 3000, 0.42);
-    const dir = dirOf(180);
-    const pc = v3(exit.x + dir.x * 900, exit.y, exit.z - 200);
-    portalAt(c, pc, 180, dests[3]);
+    // the U-turn sends the run back along -x
+    const pc = v3(exit.x - 900, exit.y, exit.z - 200);
+    portal(c, pc, -1, dests[3]);
     stageRamps.push([
       { ramp: R1, face: 'left' },
       { ramp: R2, face: 'left' },
@@ -213,8 +220,7 @@ export function buildNeon(): BuiltCourse {
     b.addBox(endMin, endMax, { top: 'builtin/floor_dark', sides: SIDE, bottom: SIDE });
     b.addTopTrim(endMin, endMax, c.glow, 16);
     b.addBox(v3(endMax.x, endMin.y, top - 64), v3(endMax.x + 64, endMax.y, top + 512), { sides: 'builtin/grid_dark', top: SIDE });
-    b.addZone('end', v3(endMin.x, endMin.y, top), v3(endMax.x, endMax.y, top + 256));
-    boxes.push({ mins: endMin, maxs: endMax });
+    b.addZone('end', v3(endMin.x, endMin.y, top), v3(endMax.x, endMax.y, top + 1024));
     finish = v3((endMin.x + endMax.x) / 2, ex.y, top);
     stageRamps.push([
       { ramp: R1, face: 'left' },
@@ -246,7 +252,7 @@ export function buildNeon(): BuiltCourse {
       floorZ: floorZ - 512,
       owners: [{ dest: s.dest, pieces: s.ramps.map((r) => ({ ramp: r.ramp })) }],
       ramps: s.ramps.map((r) => r.ramp),
-      boxes: i === 3 ? [{ mins: endMin, maxs: endMax }] : [],
+      boxes: [rooms[i].box, ...(i === 3 ? [{ mins: endMin, maxs: endMax }] : [])],
     });
   });
   // the floor: black with a glowing grid
@@ -257,34 +263,7 @@ export function buildNeon(): BuiltCourse {
   }
 
   const course: Course = { id: 'surf_neon', type: 'staged', sections, finish };
-  void leftOf;
   return { map: b.build(), course, builder: b };
-}
-
-/** Portal facing along `yaw` (0 or 180). */
-function portalAt(c: StageCtx, center: Vec3, yaw: number, dest: string): void {
-  if (Math.abs(((yaw % 360) + 360) % 360 - 180) < 1) {
-    // mirror: the frame geometry is symmetric, only the trigger box needs to sit on the far side
-    const { b } = c;
-    const halfW = 640;
-    const x = center.x;
-    const y0 = center.y - halfW;
-    const y1 = center.y + halfW;
-    const z0 = center.z - 896;
-    const z1 = center.z + 448;
-    const g = c.glow;
-    addGlowBar(b, v3(x, y0, z0), v3(x, y0, z1), 32, g);
-    addGlowBar(b, v3(x, y1, z0), v3(x, y1, z1), 32, g);
-    addGlowBar(b, v3(x, y0, z1), v3(x, y1, z1), 32, g);
-    addGlowBar(b, v3(x, y0, z0), v3(x, y1, z0), 32, g);
-    for (const k of [0.33, 0.66]) {
-      const zz = z0 + (z1 - z0) * k;
-      addGlowBar(b, v3(x, y0, zz), v3(x, y1, zz), 6, g);
-    }
-    b.addTeleport(v3(x - 192, y0, z0), v3(x + 64, y1, z1), dest);
-    return;
-  }
-  portal(c, center, dest);
 }
 
 function rampHeight(w: number): number {

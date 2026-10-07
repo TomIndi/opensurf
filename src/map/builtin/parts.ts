@@ -2,24 +2,7 @@
 // stage rooms and fail-teleport volumes.
 import { Vec3, v3 } from '../../core/vec3';
 import { MapBuilder, RampRecord } from './builder';
-import { rampFrame, rampLength, rampPoint } from './course';
-
-/** AABB of a set of ramps (their brushes). */
-export function rampsBounds(ramps: RampRecord[]): { mins: Vec3; maxs: Vec3 } {
-  const mins = v3(Infinity, Infinity, Infinity);
-  const maxs = v3(-Infinity, -Infinity, -Infinity);
-  for (const r of ramps) {
-    for (const b of r.brushes) {
-      mins.x = Math.min(mins.x, b.mins.x);
-      mins.y = Math.min(mins.y, b.mins.y);
-      mins.z = Math.min(mins.z, b.mins.z);
-      maxs.x = Math.max(maxs.x, b.maxs.x);
-      maxs.y = Math.max(maxs.y, b.maxs.y);
-      maxs.z = Math.max(maxs.z, b.maxs.z);
-    }
-  }
-  return { mins, maxs };
-}
+import { rampLength, rampPoint } from './course';
 
 /** Yaw (degrees) of a ramp's first segment. */
 export function rampStartYaw(r: RampRecord): number {
@@ -63,22 +46,6 @@ export function rampZoneBox(r: RampRecord, face: 'left' | 'right', from = 0, len
   return { mins, maxs };
 }
 
-/** Lowest point of a ramp's surfed face over its whole length (the bottom edge's lowest point). */
-export function rampBottomZ(r: RampRecord): number {
-  let z = Infinity;
-  for (const rib of r.ribs) for (const p of rib) z = Math.min(z, p.z);
-  return z;
-}
-
-/** Highest ridge point of a ramp. */
-export function rampTopZ(r: RampRecord): number {
-  let z = -Infinity;
-  for (const p of r.points) z = Math.max(z, p.z);
-  return z;
-}
-
-export { rampFrame, rampLength };
-
 export interface RoomStyle {
   floor: string;
   wall: string;
@@ -102,84 +69,6 @@ export function addStageRoom(b: MapBuilder, mins: Vec3, maxs: Vec3, exit: '+x' |
   else if (exit === '+y') c.y = maxs.y;
   else c.y = mins.y;
   return c;
-}
-
-export interface VoidSpec {
-  /** Slabs are cut along this axis from a0 to a1; the other axis spans [b0, b1]. */
-  axis: 'x' | 'y';
-  a0: number;
-  a1: number;
-  b0: number;
-  b1: number;
-  /** Bottom of the trigger volumes. */
-  floorZ: number;
-  dest: string;
-  /** Ramps whose bottoms the slabs must stay under. */
-  ramps: RampRecord[];
-  /** Other surfaces: lowest legit z over a rectangle (+Infinity = nothing there). */
-  extra?: ((x0: number, x1: number, y0: number, y1: number) => number)[];
-  /** Clearance below the lowest surface. */
-  margin?: number;
-  step?: number;
-}
-
-/** Box surface for VoidSpec.extra: `z` over the rectangle [mins, maxs] (e.g. a platform's underside). */
-export function boxSurface(mins: Vec3, maxs: Vec3, z = mins.z): (x0: number, x1: number, y0: number, y1: number) => number {
-  return (x0, x1, y0, y1) => (x1 < mins.x || x0 > maxs.x || y1 < mins.y || y0 > maxs.y ? Infinity : z);
-}
-
-/**
- * Fail teleports filling the void below a stretch of course: trigger_teleport slabs `step` units long along
- * `axis`, each topped `margin` units below the lowest surface over it, so a missed ramp is caught soon after
- * falling past it while nothing a run touches overlaps them. Slabs with nothing above them (gaps) take the
- * lower of their neighbours' heights. Returns the trigger model numbers.
- */
-export function addVoidTeleports(b: MapBuilder, s: VoidSpec): number[] {
-  const step = s.step ?? 512;
-  const margin = s.margin ?? 96;
-  const rect = (a: number, c: number): [number, number, number, number] =>
-    s.axis === 'x' ? [a, c, s.b0, s.b1] : [s.b0, s.b1, a, c];
-  const pieces: { a0: number; a1: number; top: number }[] = [];
-  for (let a = s.a0; a < s.a1 - 1e-6; a += step) {
-    const ae = Math.min(s.a1, a + step);
-    const [x0, x1, y0, y1] = rect(a, ae);
-    let top = Infinity;
-    for (const r of s.ramps) top = Math.min(top, rampBottomInRect(r, x0, x1, y0, y1));
-    for (const f of s.extra ?? []) top = Math.min(top, f(x0, x1, y0, y1));
-    pieces.push({ a0: a, a1: ae, top });
-  }
-  for (let i = 0; i < pieces.length; i++) {
-    if (Number.isFinite(pieces[i].top)) continue;
-    let best = Infinity;
-    for (let j = i - 1; j >= 0; j--) {
-      if (Number.isFinite(pieces[j].top)) {
-        best = Math.min(best, pieces[j].top);
-        break;
-      }
-    }
-    for (let j = i + 1; j < pieces.length; j++) {
-      if (Number.isFinite(pieces[j].top)) {
-        best = Math.min(best, pieces[j].top);
-        break;
-      }
-    }
-    pieces[i].top = best;
-  }
-  const merged: { a0: number; a1: number; top: number }[] = [];
-  for (const p of pieces) {
-    const last = merged[merged.length - 1];
-    if (last && Math.abs(last.top - p.top) < 1e-6) last.a1 = p.a1;
-    else merged.push({ ...p });
-  }
-  const out: number[] = [];
-  for (const p of merged) {
-    if (!Number.isFinite(p.top)) continue;
-    const top = p.top - margin;
-    if (top <= s.floorZ + 1) continue;
-    const [x0, x1, y0, y1] = rect(p.a0, p.a1);
-    out.push(b.addTeleport(v3(x0, y0, s.floorZ), v3(x1, y1, top), s.dest));
-  }
-  return out;
 }
 
 /**
@@ -291,16 +180,16 @@ export interface VoidGridSpec {
   boxes?: { mins: Vec3; maxs: Vec3 }[];
   /** Clearance below the lowest surface around a cell (default 96). */
   margin?: number;
-  /** How many cells around an empty cell are searched for its height (default 3). */
+  /** How many cells around a cell are searched for its height (default 3). */
   reach?: number;
 }
 
 /**
  * Fills the void under a whole map region with fail teleports. The region is cut into cells; each cell belongs
  * to the owner (section/stage) whose course geometry is nearest, and its trigger's top sits `margin` units
- * below the lowest legit surface over the cell - or, for cells with nothing above them (gaps, open air), below
- * the lowest surface within `reach` cells - so runs that fly over the void never touch it. Cells with equal
- * owner and height are merged into larger boxes. Returns the trigger model numbers.
+ * below the lowest legit surface within `reach` cells (cells far from everything use the lowest height of the
+ * region), so runs that fly over the void never touch it. Cells with equal owner and height are merged into
+ * larger boxes. Returns the trigger model numbers.
  */
 export function addVoidGrid(b: MapBuilder, s: VoidGridSpec): number[] {
   const cell = s.cell ?? 512;
@@ -326,11 +215,12 @@ export function addVoidGrid(b: MapBuilder, s: VoidGridSpec): number[] {
       top[j * nx + i] = z;
     }
   }
-  // ---- empty cells: lowest surface within `reach` cells
-  const filled = Float64Array.from(top);
+  // ---- every cell: lowest surface within `reach` cells. A run leaving a ramp falls below that ramp's bottom
+  // well before it reaches the (lower) next ramp, so the void under a ramp's end, a gap and the start of the
+  // next ramp must all sit below the lowest of them.
+  const filled = new Float64Array(nx * ny).fill(Infinity);
   for (let j = 0; j < ny; j++) {
     for (let i = 0; i < nx; i++) {
-      if (Number.isFinite(top[j * nx + i])) continue;
       let z = Infinity;
       for (let dj = -reach; dj <= reach; dj++) {
         for (let di = -reach; di <= reach; di++) {

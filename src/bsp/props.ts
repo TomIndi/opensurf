@@ -489,6 +489,36 @@ function orientTriangles(P: Float32Array, N: Float32Array, I: Uint32Array): void
 const CUBE_BYTES = 24;
 const AMBIENT_SAMPLE_BYTES = 28;
 
+/** +x -x +y -y +z -z */
+const CUBE_AXES = [
+  [1, 0, 0],
+  [-1, 0, 0],
+  [0, 1, 0],
+  [0, -1, 0],
+  [0, 0, 1],
+  [0, 0, -1],
+];
+
+/**
+ * The first point among `points` - then 16, 48 and 128 units away from them along the six axes - whose BSP
+ * leaf is not solid, with that leaf. Props are often sunk into floors or embedded in walls and ceilings (light
+ * fixtures, signs, supports), so their origin alone can be inside a brush.
+ */
+export function openPointNear(bsp: BspFile, points: Vec3[]): { point: Vec3; leaf: number } | null {
+  for (const d of [0, 16, 48, 128]) {
+    for (const p of points) {
+      for (let k = 0; k < (d ? 6 : 1); k++) {
+        const a = CUBE_AXES[k];
+        const q = { x: p.x + a[0] * d, y: p.y + a[1] * d, z: p.z + a[2] * d };
+        const leaf = pointLeaf(bsp, q);
+        const l = leaf >= 0 ? bsp.leafs[leaf] : undefined;
+        if (l && !(l.contents & 1)) return { point: q, leaf };
+      }
+    }
+  }
+  return null;
+}
+
 /**
  * vrad's per-leaf ambient light cubes (6 ColorRGBExp32 faces: +x -x +y -y +z -z), sampled at a point. Unlike
  * lightmaps (c * 2^e / 255), the cubes are stored for the engine's ColorRGBExp32ToVector, which has no /255:
@@ -539,16 +569,21 @@ export class LeafAmbientLighting {
   }
 
   /**
-   * Ambient cube at `p` (linear RGB, 1 = fully lit), or null without data. Points in solid or in leaves without
-   * samples are retried a little higher (props often sink into the floor).
+   * Ambient cube at `p` (linear RGB, 1 = fully lit), or null without data. Points in solid are moved to the
+   * nearest open point (openPointNear); leaves without samples are retried a little higher.
    */
   sample(p: Vec3): [number, number, number][] | null {
     if (!this.available) return null;
-    for (const dz of [0, 16, 48, 128]) {
-      const q = { x: p.x, y: p.y, z: p.z + dz };
+    const open = openPointNear(this.bsp, [p]);
+    if (!open) return null;
+    const cube = this.leafCube(open.leaf, open.point);
+    if (cube) return cube;
+    // an open leaf without samples (vrad skips some): look a little higher
+    for (const dz of [16, 48, 128]) {
+      const q = { x: open.point.x, y: open.point.y, z: open.point.z + dz };
       const leaf = pointLeaf(this.bsp, q);
-      const cube = leaf >= 0 ? this.leafCube(leaf, q) : null;
-      if (cube) return cube;
+      const c = leaf >= 0 ? this.leafCube(leaf, q) : null;
+      if (c) return c;
     }
     return null;
   }
@@ -658,14 +693,6 @@ export interface RayCaster {
   traceRay(start: Vec3, end: Vec3, mask: number, out?: TraceResult): TraceResult;
 }
 
-const CUBE_AXES = [
-  [1, 0, 0],
-  [-1, 0, 0],
-  [0, 1, 0],
-  [0, -1, 0],
-  [0, 0, 1],
-  [0, 0, -1],
-];
 const SKY_GRID = 2048;
 
 /**
@@ -684,7 +711,7 @@ export class PropLighting {
   private readonly tr: TraceResult = newTrace();
 
   constructor(
-    bsp: BspFile,
+    private readonly bsp: BspFile,
     private readonly world: RayCaster | null = null,
     hdr = false,
   ) {
@@ -779,9 +806,11 @@ export class PropLighting {
   }
 
   /** Light cube at `p` (faces +x -x +y -y +z -z, linear RGB, 1 = fully lit), or null without any light data. */
-  cube(p: Vec3): [number, number, number][] | null {
-    const key = `${Math.round(p.x / 4)},${Math.round(p.y / 4)},${Math.round(p.z / 4)}`;
+  cube(at: Vec3): [number, number, number][] | null {
+    const key = `${Math.round(at.x / 4)},${Math.round(at.y / 4)},${Math.round(at.z / 4)}`;
     if (this.cache.has(key)) return this.cache.get(key)!;
+    // light the nearest open point: traces from inside a brush would see no light at all
+    const p = openPointNear(this.bsp, [at])?.point ?? at;
     const amb = this.ambient.sample(p);
     if (!amb && !this.lights.length) {
       this.cache.set(key, null);
@@ -915,6 +944,7 @@ class PropBuilder {
   private readonly scaled = new Map<StudioMesh, Map<number, Float32Array>>();
   private readonly lighting: PropLighting;
   missing = 0;
+  private readonly bsp: BspFile;
   broken = 0;
   readonly brokenNames: string[] = [];
   readonly out: RenderProp[] = [];
@@ -925,6 +955,7 @@ class PropBuilder {
     private readonly materials: Map<string, MaterialDef>,
     private readonly opts: PropOptions,
   ) {
+    this.bsp = bsp;
     if (pak) this.sources.push(pak);
     if (opts.materials?.extraSources) this.sources.push(...opts.materials.extraSources);
     this.loader = opts.loader ?? null;
@@ -994,6 +1025,12 @@ class PropBuilder {
     return list;
   }
 
+  /** Area of the nearest open leaf at the lighting origin or the origin (see openPointNear); -1 if none. */
+  private areaAt(origin: Vec3, lighting: Vec3): number {
+    const open = openPointNear(this.bsp, [lighting, origin]);
+    return open ? this.bsp.leafs[open.leaf].area : -1;
+  }
+
   private scaledPositions(mesh: StudioMesh, scale: number): Float32Array {
     let byScale = this.scaled.get(mesh);
     if (!byScale) this.scaled.set(mesh, (byScale = new Map()));
@@ -1028,6 +1065,7 @@ class PropBuilder {
     } catch {
       ambient = null;
     }
+    const area = this.areaAt(p.origin, p.lightingOrigin);
     for (const { material, mesh } of list) {
       const rp: RenderProp = {
         model: model.name,
@@ -1042,6 +1080,7 @@ class PropBuilder {
       if (p.color) rp.color = [p.color[0], p.color[1], p.color[2]];
       if (p.alpha < 1) rp.alpha = p.alpha;
       if (p.entity >= 0) rp.entity = p.entity;
+      if (area >= 0) rp.area = area;
       if (ambient) rp.ambientCube = ambient.map((c) => [c[0], c[1], c[2]] as [number, number, number]);
       this.out.push(rp);
     }

@@ -404,7 +404,7 @@ for (const info of BUILTIN_MAPS) {
       expect(drawn / rampArea).toBeLessThan(1.001);
     });
 
-    it('surf faces are 53-63 degree ramps (normal.z within [0.45, 0.6] - never ground), every segment exactly planar', () => {
+    it('surf faces are 48-63 degree ramps (normal.z within [RAMP_MIN_NZ, RAMP_MAX_NZ] - never ground), every segment exactly planar', () => {
       expect(bc.builder.ramps.length).toBeGreaterThanOrEqual(6);
       for (const r of bc.builder.ramps) {
         expect(r.surfNormals.length).toBeGreaterThan(0);
@@ -448,6 +448,26 @@ for (const info of BUILTIN_MAPS) {
                 best = Math.min(best, out);
               }
               expect(best, r.name).toBeLessThan(0.05);
+            }
+          }
+        }
+        // seams are buried: at every joint each collision brush reaches past the joint into its neighbour, so no
+        // brush edge lies along the visible seam (where box traces could snag on an edge bevel)
+        const inBrush = (b: (typeof r.brushes)[number], p: ReturnType<typeof v3>): boolean =>
+          b.sides.every((sd) => sd.bevel || p.x * sd.plane.normal.x + p.y * sd.plane.normal.y + p.z * sd.plane.normal.z <= sd.plane.dist + 1e-6);
+        if (r.points.length > 2) {
+          expect(r.brushes.length).toBe(r.points.length - 1);
+          let joint = 0;
+          for (let k = 0; k + 2 < r.points.length; k++) {
+            joint += Math.hypot(r.points[k + 1].x - r.points[k].x, r.points[k + 1].y - r.points[k].y);
+            for (const face of r.side === 'both' ? (['left', 'right'] as const) : ([r.side] as const)) {
+              for (const frac of [0.05, 0.5, 0.9]) {
+                for (const [seg, da] of [[k, 6], [k + 1, -6]] as const) {
+                  const q = rampPoint(r, face, joint + da, frac);
+                  const n = rampFrame(r, face, q).normal;
+                  expect(inBrush(r.brushes[seg], v3(q.x - n.x, q.y - n.y, q.z - n.z)), `${r.name} joint ${k + 1}`).toBe(true);
+                }
+              }
             }
           }
         }
@@ -741,7 +761,8 @@ describe('MapBuilder ramps', () => {
         const ft = 1 / tick;
         const start = rampPoint(r, 'left', 300 + k * 37, 0.2 + 0.08 * k);
         const ps = createPlayerState(v3(start.x, start.y, start.z + 40), qa(0, 0, 0));
-        ps.velocity = v3(900 + k * 90, 0, 0);
+        // within what the curve's banking can turn (v^2 / R < g * tan(slope): ~1560 u/s here)
+        ps.velocity = v3(800 + k * 80, 0, 0);
         const cmd = newUserCmd();
         const ev = newMoveEvents();
         const vars = defaultMoveVars();
@@ -753,11 +774,12 @@ describe('MapBuilder ramps', () => {
           const frac = f.lateral / r.width;
           const vOut = ps.velocity.x * f.out.x + ps.velocity.y * f.out.y;
           const hold = frac > 0.6 || (frac > 0.2 && vOut > -(frac - 0.4) * r.width * 1.5);
+          const pushOff = !hold && frac < 0.2;
           cmd.viewangles.yaw = (Math.atan2(f.tangent.y, f.tangent.x) * 180) / Math.PI;
-          cmd.sidemove = hold ? 450 : 0;
+          cmd.sidemove = hold ? 450 : pushOff ? -450 : 0;
           playerMove(ps, cmd, map.collision, vars, ft, ev);
           const sp = Math.hypot(ps.velocity.x, ps.velocity.y, ps.velocity.z);
-          if (i > 30 && prev > 0 && !hold) worst = Math.max(worst, prev - sp);
+          if (i > 30 && prev > 0 && !hold && !pushOff) worst = Math.max(worst, prev - sp);
           if (i > 30) touching++;
           prev = sp;
           expect(ps.onGround).toBe(false);
