@@ -1,7 +1,8 @@
 // Built-in procedural maps (src/map/builtin): structure of the generated LoadedMap, geometry rules (surf faces,
 // seams, spawns, zones, triggers, the void), and simulated runs with the real movement code, triggers and
 // surf timer: the spec's literal first-ramp bot, a full autopilot run at 64/100/128 tick in several surfing
-// styles, a run from every checkpoint/stage restart, and a ballistic feasibility table of every gap.
+// styles, a run from every checkpoint/stage restart, every bonus (from !b N, and the spawn room's bonus
+// teleporter), and a ballistic feasibility table of every gap.
 import { beforeAll, describe, expect, it } from 'vitest';
 import { QAngle, qa } from '../src/core/angles';
 import { Vec3, v3 } from '../src/core/vec3';
