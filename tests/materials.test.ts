@@ -11,12 +11,15 @@ import { describe, expect, it } from 'vitest';
 import {
   buildMaterials,
   classifyMaterial,
+  compiledMapName,
   computeSurfaceHints,
   fallbackMaterial,
   generateProceduralImage,
   imageAverage,
   isProceduralImage,
   lastMaterialStats,
+  loadCubemap,
+  loadCubemaps,
   loadSky,
   mapFileSource,
   MaterialLoader,
@@ -51,6 +54,7 @@ import {
   srgbToLinear,
   tonemapLinear,
   vtfFormatName,
+  vtfImageRef,
   vtfImageSize,
   vtfPickMip,
 } from '../src/bsp/vtf';
@@ -318,6 +322,7 @@ function px(img: DecodedImage, x: number, y: number): number[] {
 function makeBsp(
   mats: { name: string; refl?: [number, number, number]; flags?: number; w?: number; h?: number }[],
   waterBrushMats: number[] = [],
+  lumps: Record<number, Uint8Array> = {},
 ): BspFile {
   const texdata: BspTexData[] = mats.map((m, i) => ({
     reflectivity: { x: m.refl?.[0] ?? 0.2, y: m.refl?.[1] ?? 0.2, z: m.refl?.[2] ?? 0.2 },
@@ -339,7 +344,7 @@ function makeBsp(
     version: 20,
     mapRevision: 1,
     lumps: [],
-    getLump: () => new Uint8Array(0),
+    getLump: (i: number) => lumps[i] ?? new Uint8Array(0),
     entitiesText: '',
     planes: [],
     vertices: new Float32Array(0),
@@ -870,6 +875,65 @@ describe('vtf: DXT block decoding', () => {
     expect(px(g, 5, 4)).toEqual([0, 255, 0, 255]);
   });
 
+  const hasPillow = spawnSync('python3', ['-I', '-c', 'import PIL.Image']).status === 0;
+  it.skipIf(!hasPillow)('matches an independent decoder (Pillow) on random DXT1/3/5 blocks', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'surf-dxt-'));
+    try {
+      let seed = 12345;
+      const rand = () => ((seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) >>> 16) & 255;
+      for (const [format, fourcc] of [
+        [VtfFormat.DXT1, 'DXT1'],
+        [VtfFormat.DXT3, 'DXT3'],
+        [VtfFormat.DXT5, 'DXT5'],
+      ] as [number, string][]) {
+        const W = 64;
+        const H = 32;
+        const blocks = new Uint8Array(vtfImageSize(format, W, H));
+        for (let i = 0; i < blocks.length; i++) blocks[i] = rand();
+        // Force both colour modes (c0 > c1 and c0 <= c1) and both DXT5 alpha modes to appear.
+        const bb = format === VtfFormat.DXT1 ? 8 : 16;
+        for (let b = 0; b * bb < blocks.length; b++) {
+          const c = b * bb + (bb - 8);
+          if (b % 3 === 0) [blocks[c], blocks[c + 2]] = [blocks[c + 2], blocks[c]];
+          if (b % 4 === 0) blocks[c + 1] = blocks[c + 3];
+          if (format === VtfFormat.DXT5 && b % 2 === 0) [blocks[b * bb], blocks[b * bb + 1]] = [Math.min(blocks[b * bb], blocks[b * bb + 1]), Math.max(blocks[b * bb], blocks[b * bb + 1])];
+        }
+        const dds = new Uint8Array(128 + blocks.length);
+        const dv = new DataView(dds.buffer);
+        dds.set(te.encode('DDS '), 0);
+        dv.setUint32(4, 124, true);
+        dv.setUint32(8, 0x1 | 0x2 | 0x4 | 0x1000 | 0x80000, true);
+        dv.setUint32(12, H, true);
+        dv.setUint32(16, W, true);
+        dv.setUint32(20, blocks.length, true);
+        dv.setUint32(76, 32, true);
+        dv.setUint32(80, 0x4, true);
+        dds.set(te.encode(fourcc), 84);
+        dv.setUint32(108, 0x1000, true);
+        dds.set(blocks, 128);
+        const ddsPath = join(dir, `${fourcc}.dds`);
+        const rawPath = join(dir, `${fourcc}.raw`);
+        writeFileSync(ddsPath, dds);
+        const r = spawnSync('python3', ['-I', '-c', 'import sys; from PIL import Image; im = Image.open(sys.argv[1]); im.load(); open(sys.argv[2], "wb").write(im.convert("RGBA").tobytes())', ddsPath, rawPath]);
+        expect(r.status, String(r.stderr)).toBe(0);
+        const ref = new Uint8Array(readFileSync(rawPath));
+        const ours = decodeVtf(buildVtf({ width: W, height: H, format, image: () => blocks }))!;
+        expect(ref.length).toBe(ours.data.length);
+        let maxDiff = 0;
+        let off = 0;
+        for (let i = 0; i < ref.length; i++) {
+          const d = Math.abs(ref[i] - ours.data[i]);
+          maxDiff = Math.max(maxDiff, d);
+          if (d > 1) off++;
+        }
+        // Implementations may round the 1/3 and 2/3 interpolants differently; allow ±1.
+        expect(off, `${fourcc}: ${off} channel values differ by more than 1 (max ${maxDiff})`).toBe(0);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('decodes a full DXT1 mip chain down to 1x1', () => {
     const data = buildVtf({ width: 64, height: 16, format: VtfFormat.DXT1, mips: 7, image: (m, w, h) => dxt1Solid(w, h, m === 6 ? 0xf800 : 0x001f) });
     const h = parseVtfHeader(data)!;
@@ -1282,6 +1346,11 @@ describe('material names and families', () => {
     expect(grey.isWater).toBe(true);
     expect(grey.fallbackColor[2]).toBeGreaterThan(grey.fallbackColor[0] + 0.1);
     expect(fallbackMaterial('decals/trashdecal01a').isTool).toBe(true);
+    const spr = fallbackMaterial('sprites/light_glow03');
+    expect([spr.translucent, spr.additive, spr.unlit]).toEqual([true, true, true]);
+    expect(px(spr.image!, 32, 32)[3]).toBeGreaterThan(200);
+    expect(px(spr.image!, 0, 0)[3]).toBe(0);
+    expect(classifyMaterial('effects/lensflare01')).toBe('sprite');
     // Deterministic
     expect(Buffer.from(fallbackMaterial('a/b').image!.data).equals(Buffer.from(fallbackMaterial('A\\B').image!.data))).toBe(true);
   });
@@ -1313,6 +1382,11 @@ describe('material names and families', () => {
       const img = generateProceduralImage({ family, color: colors[family] ?? [0.55, 0.53, 0.5], seed: 77, name: family });
       dump(`family_${String(k).padStart(2, '0')}_${family}`, img);
     });
+  });
+
+  it.skipIf(!DUMP)('dumps built-in map materials (SURF_DUMP_DIR)', () => {
+    const names = ['ramp_cyan', 'ramp_orange', 'ramp_purple', 'floor_dark', 'floor_grey', 'wall_grid', 'wall_blue', 'glow_green', 'glow_red', 'grid_white', 'ramp_pink', 'wall_dark'];
+    names.forEach((n, k) => dump(`builtin_${String(k).padStart(2, '0')}_${n}`, fallbackMaterial(`builtin/${n}`).image));
   });
 
   it('procedural images match non-square texture aspect', () => {
@@ -1355,7 +1429,7 @@ describe('buildMaterials (synthetic map)', () => {
     'materials/custom/anim.vmt': `"UnlitGeneric" { "$basetexture" "custom/anim" "Proxies" { "AnimatedTexture" { "animatedtexturevar" "$basetexture" "animatedtextureframenumvar" "$frame" "animatedtextureframerate" 12 } } }`,
     'materials/custom/anim.vtf': vtfSolid(4, 4, [10, 20, 30, 255], VtfFormat.RGBA8888, 4),
     'materials/custom/blend.vmt': `"WorldVertexTransition" { "$basetexture" "custom/wall" "$basetexture2" "nature/grass_stock" }`,
-    'materials/custom/water.vmt': `"Water" { "%compilewater" 1 "$fogcolor" "{24 38 53}" "$normalmap" "dev/water_normal" }`,
+    'materials/custom/water.vmt': `"Water" { "%compilewater" 1 "$fogcolor" "{24 38 53}" "$fogstart" "1" "$fogend" "300" "$normalmap" "dev/water_normal" "$envmap" "env_cubemap" }`,
     'materials/custom/water2.vmt': `"LightmappedGeneric" { "%compilewater" 1 "$fogcolor" "[0.1 0.2 0.3]" }`,
     'materials/custom/clip.vmt': `"LightmappedGeneric" { "$basetexture" "custom/wall" "%compileclip" 1 }`,
     'materials/custom/sky.vmt': `"LightmappedGeneric" { "%compilesky" 1 }`,
@@ -1366,6 +1440,9 @@ describe('buildMaterials (synthetic map)', () => {
     'materials/maps/m/metal/citadel_metalwall072a_1_2_3.vmt': `"patch" { "include" "materials/metal/citadel_metalwall072a.vmt" "replace" { "$envmap" "maps/m/c1_2_3" } }`,
     'materials/tools/toolsnodraw.vmt': `"LightmappedGeneric" { "$basetexture" "tools/toolsnodraw" "%compilenodraw" 1 }`,
     'materials/tools/toolsnodraw.vtf': vtfSolid(4, 4, [255, 200, 0, 255]),
+    'materials/custom/shiny.vmt': `"LightmappedGeneric" { "$basetexture" "custom/masked" "$envmap" "env_cubemap" "$envmaptint" "[.5 .25 1]" "$basealphaenvmapmask" 1 "$envmapcontrast" 1 "$envmapsaturation" "[.5 .5 .5]" }`,
+    'materials/custom/shinymask.vmt': `"LightmappedGeneric" { "$basetexture" "custom/wall" "$envmap" "Maps\\M\\c1_2_3" "$envmapmask" "custom/neon" }`,
+    'materials/custom/shinynormal.vmt': `"LightmappedGeneric" { "$basetexture" "custom/wall" "$envmap" "env_cubemap" "$bumpmap" "custom/masked" "$normalmapalphaenvmapmask" 1 "$fresnelreflection" ".3" }`,
     'materials/custom/modulate.vmt': `"DecalModulate" { "$basetexture" "custom/modulate" "$decal" 1 }`,
     'materials/custom/modulate.vtf': buildVtf({ width: 2, height: 1, format: VtfFormat.RGBA8888, image: () => new Uint8Array([128, 128, 128, 255, 0, 0, 0, 255]) }),
     'materials/custom/decal.vmt': `"LightmappedGeneric" { "$basetexture" "custom/fence" "$decal" 1 }`,
@@ -1407,6 +1484,9 @@ describe('buildMaterials (synthetic map)', () => {
     { name: 'maps/m/fake_trigger_name', flags: SURF_TRIGGER },
     { name: 'custom/modulate' },
     { name: 'custom/decal' },
+    { name: 'custom/shiny' },
+    { name: 'custom/shinymask' },
+    { name: 'custom/shinynormal' },
   ];
   const bsp = makeBsp(mats, [26]);
   const pak = makePak(pakFiles);
@@ -1490,6 +1570,8 @@ describe('buildMaterials (synthetic map)', () => {
     const w = get('custom/water');
     expect(w.isWater).toBe(true);
     expect(w.waterFogColor!.map((c) => Math.round(c * 255))).toEqual([24, 38, 53]);
+    expect(w.waterFogRange).toEqual([1, 300]);
+    expect(get('custom/water2').waterFogRange).toBeUndefined();
     expect(w.image).not.toBeNull();
     expect(w.isTool).toBe(false);
     const w2 = get('custom/water2');
@@ -1541,6 +1623,9 @@ describe('buildMaterials (synthetic map)', () => {
     expect(isProceduralImage(g.image)).toBe(false);
     const m = get('maps/m/metal/citadel_metalwall072a_1_2_3');
     expect(isProceduralImage(m.image)).toBe(true);
+    // The cubemap patch proves the stock material reflects: kept with a metal-like tint.
+    expect(m.envmap!.cubemap).toBe('maps/m/c1_2_3');
+    expect(m.envmap!.tint[0]).toBeCloseTo(0.3);
     expect(m.isTool || m.translucent).toBe(false);
     const exp = reflectivityToSrgb({ x: 0.2, y: 0.21, z: 0.22 });
     expect(m.fallbackColor[2]).toBeCloseTo(exp[2], 6);
@@ -1567,6 +1652,29 @@ describe('buildMaterials (synthetic map)', () => {
     expect(r.alpha).toBeLessThan(1);
     expect(r.scroll![1]).toBeCloseTo(-1.3);
     expect(r.image).not.toBeNull();
+  });
+
+  it('$envmap reflection parameters and masks', () => {
+    expect(get('custom/wall').envmap).toBeUndefined();
+    const a = get('custom/shiny').envmap!;
+    expect(a.cubemap).toBe('env_cubemap');
+    expect(a.tint).toEqual([0.5, 0.25, 1]);
+    expect(a.mask).toBe('basealpha');
+    expect(a.contrast).toBe(1);
+    expect(a.saturation).toBe(0.5);
+    expect(a.fresnel).toBe(1);
+    // The base alpha (the mask) survives in the data even though the opaque material reports hasAlpha=false.
+    expect(get('custom/shiny').image!.hasAlpha).toBe(false);
+    expect(px(get('custom/shiny').image!, 0, 0)[3]).toBe(30);
+    const b = get('custom/shinymask').envmap!;
+    expect(b.cubemap).toBe('maps/m/c1_2_3');
+    expect(b.mask).toBe('texture');
+    expect(px(b.maskImage!, 0, 0)).toEqual([0, 255, 0, 255]);
+    const c = get('custom/shinynormal').envmap!;
+    expect(c.mask).toBe('normalalpha');
+    expect(px(c.maskImage!, 0, 0)).toEqual([30, 30, 30, 255]);
+    expect(c.fresnel).toBeCloseTo(0.3);
+    expect(get('custom/water').envmap).toBeUndefined(); // water reflections are the renderer's own
   });
 
   it('decals: $decal with alpha is translucent; DecalModulate becomes black with alpha = 1 - 2·src', () => {
@@ -1744,6 +1852,55 @@ describe('proceduralSky', () => {
   });
 });
 
+describe('cubemaps', () => {
+  const cube = (minor: number, color: (face: number) => number[]) =>
+    buildVtf({ minor, width: 4, height: 4, flags: VTF_FLAG_ENVMAP, format: VtfFormat.RGBA8888, mips: 3, image: (m, w, h, f, face) => solidRgba(w, h, color(face)) });
+  const lump = (samples: number[][]) => {
+    const b = new Uint8Array(samples.length * 16);
+    const dv = new DataView(b.buffer);
+    samples.forEach((s, i) => s.forEach((v, k) => dv.setInt32(i * 16 + k * 4, v, true)));
+    return b;
+  };
+
+  it('loadCubemap decodes 6 faces (7-face pre-7.5 layout), LDR first then HDR', () => {
+    const pak = makePak({
+      'materials/maps/m/c1_2_3.vtf': cube(4, (f) => [f * 40, 0, 0, 7]),
+      'materials/maps/m/c9_9_9.hdr.vtf': buildVtf({ width: 2, height: 2, flags: VTF_FLAG_ENVMAP, format: VtfFormat.RGBA16161616F, minor: 5, image: (m, w, h) => {
+        const b = new Uint8Array(w * h * 8);
+        for (let i = 0; i < w * h; i++) b.set([0x00, 0x38, 0, 0, 0, 0, 0x00, 0x3c], i * 8); // r = 0.5
+        return b;
+      } }),
+    });
+    const faces = loadCubemap('maps/m/c1_2_3', pak)!;
+    expect(faces.length).toBe(6);
+    expect(faces.map((f) => px(f, 1, 1)[0])).toEqual([0, 40, 80, 120, 160, 200]);
+    expect(px(faces[0], 0, 0)[3]).toBe(255);
+    const hdr = loadCubemap('maps/m/c9_9_9', pak)!;
+    expect(Math.abs(px(hdr[2], 0, 0)[0] - Math.round(linearToSrgb(0.5) * 255))).toBeLessThanOrEqual(1);
+    expect(loadCubemap('maps/m/nothere', pak)).toBeNull();
+  });
+
+  it('loadCubemaps pairs LUMP_CUBEMAPS samples with packed textures; compiledMapName', () => {
+    const pak = makePak({ 'materials/maps/surf_x_v2/c1_2_-3.vtf': cube(5, () => [9, 9, 9, 255]) });
+    const bsp = makeBsp([{ name: 'concrete/a' }], [], { 42: lump([[1, 2, -3, 0], [100, 200, 300, 64]]) });
+    expect(compiledMapName(bsp, pak)).toBe('surf_x_v2');
+    const cms = loadCubemaps(bsp, pak);
+    expect(cms.length).toBe(2);
+    expect(cms[0]).toMatchObject({ origin: { x: 1, y: 2, z: -3 }, size: 0, texture: 'maps/surf_x_v2/c1_2_-3' });
+    expect(cms[0].faces!.length).toBe(6);
+    expect(cms[1].texture).toBe('maps/surf_x_v2/c100_200_300');
+    expect(cms[1].size).toBe(64);
+    expect(cms[1].faces).toBeNull();
+    // Name from patched material names when nothing is packed; default cubemap when there are no samples.
+    expect(compiledMapName(makeBsp([{ name: 'maps/surf_y/glass/g_1_2_3' }]), null)).toBe('surf_y');
+    const def = makePak({ 'materials/maps/z/cubemapdefault.vtf': cube(5, () => [1, 2, 3, 255]) });
+    const d = loadCubemaps(makeBsp([{ name: 'a' }]), def);
+    expect(d.length).toBe(1);
+    expect(d[0].texture).toBe('maps/z/cubemapdefault');
+    expect(loadCubemaps(makeBsp([{ name: 'a' }]), null)).toEqual([]);
+  });
+});
+
 // ============================================================================ prefetch (game content)
 
 describe('prefetchMaterialFiles', () => {
@@ -1837,6 +1994,8 @@ describe.skipIf(MAPS.length === 0)('real maps', () => {
         const { pak } = getBsp();
         let ok = 0;
         let total = 0;
+        let exactEnd = 0;
+        const layoutOdd: string[] = [];
         const t0 = performance.now();
         for (const f of pak.list()) {
           if (!f.endsWith('.vtf')) continue;
@@ -1849,8 +2008,16 @@ describe.skipIf(MAPS.length === 0)('real maps', () => {
           expect(() => (img = decodeVtf(data, { maxSize: 512 }))).not.toThrow();
           if (img) ok++;
           else failures.push(`${name}: ${f} (${key}, complete=${h?.complete})`);
-          if (h) expect(h.complete, f).toBe(true);
+          if (h) {
+            expect(h.complete, f).toBe(true);
+            // Layout check: the last image of the largest mip must end exactly where the file ends.
+            const last = vtfImageRef(h, data.length, 0, h.frames - 1, h.faces - 1, h.depth - 1);
+            if (last && last.offset + last.size === data.length) exactEnd++;
+            else layoutOdd.push(`${f} (${key}, ends ${last ? data.length - last.offset - last.size : '?'} bytes early)`);
+          }
         }
+        if (layoutOdd.length) console.log(`[materials] ${name}: VTFs not ending at their last image:\n  ${layoutOdd.join('\n  ')}`);
+        expect(exactEnd).toBeGreaterThan(total * 0.95);
         console.log(`[materials] ${name}: decoded ${ok}/${total} VTFs in ${(performance.now() - t0).toFixed(0)} ms`);
         expect(ok).toBe(total);
       });
@@ -1893,6 +2060,15 @@ describe.skipIf(MAPS.length === 0)('real maps', () => {
             `tools ${stats.tools}, sky ${stats.sky}, water ${stats.water}, vmt ${stats.withVmt}, missing includes ${stats.missingIncludes}; ` +
             `${(stats.imageBytes / 1048576).toFixed(1)} MB RGBA) — sky "${skyName}": ${sky.faces ? `${sky.faces.rt.width}px` : 'not packed'} in ${skyMs.toFixed(0)} ms`,
         );
+        const t3 = performance.now();
+        const cms = loadCubemaps(bsp, pak);
+        console.log(
+          `[materials] ${name}: ${cms.length} cubemaps (${cms.filter((c) => c.faces).length} packed, map name "${compiledMapName(bsp, pak)}") ` +
+            `in ${(performance.now() - t3).toFixed(0)} ms; envmap materials ${[...M.values()].filter((m) => m.envmap).length}`,
+        );
+        if (DUMP) {
+          cms.filter((c) => c.faces).slice(0, 2).forEach((c, k) => c.faces!.forEach((f, i) => dump(`${name}__cubemap${k}_face${i}`, f)));
+        }
         const t2 = performance.now();
         buildMaterials(bsp, pak, { compressedTextures: true });
         const cs = lastMaterialStats()!;

@@ -24,10 +24,11 @@
 // name (concrete speckle, brushed metal, wood planks, brick bond, tiles, glass, grass/dirt/rock noise, dev
 // grids...). Everything is deterministic (seeded by the name).
 import type { Vec3 } from '../core/vec3';
-import type { DecodedImage, MaterialDef, SkyDef } from '../map/types';
+import type { CubemapDef, DecodedImage, MaterialDef, MaterialEnvmap, SkyDef } from '../map/types';
 import { PakFile, normalizePakPath } from './pakfile';
 import {
   BspFile,
+  LUMP_CUBEMAPS,
   SURF_HINT,
   SURF_NODRAW,
   SURF_NOLIGHT,
@@ -381,6 +382,7 @@ export type MaterialFamily =
   | 'water'
   | 'flat'
   | 'generic'
+  | 'sprite'
   // built-in map patterns
   | 'grid'
   | 'ramp'
@@ -428,6 +430,7 @@ const FAMILY_COLORS: Record<MaterialFamily, RGB> = {
   water: [0.16, 0.3, 0.36],
   flat: [0.6, 0.6, 0.6],
   generic: [0.55, 0.55, 0.55],
+  sprite: [1, 0.95, 0.85],
   grid: [0.5, 0.5, 0.52],
   ramp: [0.5, 0.5, 0.52],
   floor: [0.32, 0.33, 0.35],
@@ -439,6 +442,7 @@ const BUILTIN_PATTERNS: MaterialFamily[] = ['grid', 'ramp', 'floor', 'wall', 'gl
 
 /** Keyword rules, most specific first. Applied to the file name, then to the whole path. */
 const FAMILY_RULES: [RegExp, MaterialFamily][] = [
+  [/light_glow|lensflare|^glow\d|flare/, 'sprite'],
   [/glass|window(?!frame)|windshield/, 'glass'],
   [/ladder/, 'ladder'],
   [/chainlink|fence/, 'fence'],
@@ -464,6 +468,7 @@ const FAMILY_RULES: [RegExp, MaterialFamily][] = [
 
 /** Folders that decide the family on their own (stock content layout). */
 const FOLDER_FAMILIES: [RegExp, MaterialFamily][] = [
+  [/^sprites?\//, 'sprite'],
   [/^lights?\//, 'light'],
   [/^(liquids|water)\//, 'water'],
   [/^glass\//, 'glass'],
@@ -880,6 +885,16 @@ const SHADERS: Record<MaterialFamily, ShaderFactory> = {
       p.m = 1 + 0.04 * (n[i] - 0.5) + 0.015 * (w[i] - 0.5);
     };
   },
+  sprite(nf) {
+    return (i, u, v, x, y, p) => {
+      const dx = u - 0.5;
+      const dy = v - 0.5;
+      const r = Math.min(1, Math.sqrt(dx * dx + dy * dy) * 2);
+      const f = (1 - r) * (1 - r);
+      p.m = f;
+      p.a = 255 * f;
+    };
+  },
   generic(nf) {
     const n = nf.fbm(4, 5, 0);
     const n2 = nf.fbm(16, 2, 5);
@@ -974,7 +989,7 @@ export function generateProceduralImage(opts: ProceduralOptions): DecodedImage {
   const target = [clamp01(opts.color[0]) * 255, clamp01(opts.color[1]) * 255, clamp01(opts.color[2]) * 255];
   const tl = (0.2126 * target[0] + 0.7152 * target[1] + 0.0722 * target[2]) / 255;
   // Bright colours have no headroom: reduce the pattern contrast so it doesn't clip into a flat white.
-  const contrast = tl > 0.7 ? Math.max(0.35, 1 - (tl - 0.7) * 2.2) : 1;
+  const contrast = opts.family === 'sprite' ? 1 : tl > 0.7 ? Math.max(0.35, 1 - (tl - 0.7) * 2.2) : 1;
   const shade = factory(new NoiseFields(W, H, opts.seed | 0), name);
   const rgb = new Float32Array(n * 3);
   const alpha = new Uint8Array(n);
@@ -1005,6 +1020,18 @@ export function generateProceduralImage(opts: ProceduralOptions): DecodedImage {
       rgb[i * 3 + 2] = b < 0 ? 0 : b > 255 ? 255 : b;
       alpha[i] = p.a <= 0 ? 0 : p.a >= 255 ? 255 : Math.round(p.a);
     }
+  }
+  if (opts.family === 'sprite') {
+    // Glow sprites are drawn additively: colour premultiplied by a radial falloff, no mean normalization.
+    const data = new Uint8Array(n * 4);
+    for (let i = 0, o = 0, q = 0; i < n; i++, o += 4, q += 3) {
+      data[o] = (rgb[q] + 0.5) | 0;
+      data[o + 1] = (rgb[q + 1] + 0.5) | 0;
+      data[o + 2] = (rgb[q + 2] + 0.5) | 0;
+      data[o + 3] = alpha[i];
+    }
+    PROCEDURAL.add(data);
+    return { width: W, height: H, data, hasAlpha: true };
   }
   // Normalize the mean over visible pixels (alpha >= 128, or all if none) to the target colour:
   // multiplicative passes keep the pattern's relative contrast, additive passes remove the clipping residue.
@@ -1179,7 +1206,7 @@ function baseDef(name: string, width: number, height: number): MaterialDef {
 }
 
 function procSizeFor(family: MaterialFamily, texW: number, texH: number): [number, number] {
-  const base = family === 'flat' || family === 'light' || family === 'glow' ? 64 : 256;
+  const base = family === 'flat' || family === 'light' || family === 'glow' || family === 'sprite' ? 64 : 256;
   const w = texW > 0 ? texW : 512;
   const h = texH > 0 ? texH : 512;
   if (w === h) return [base, base];
@@ -1269,6 +1296,12 @@ function proceduralMaterial(def: MaterialDef, inp: FallbackInputs): MaterialDef 
       if (family === 'grate' || family === 'fence' || family === 'ladder') def.alphaTest = true;
       else if (hints && hints.orFlags & SURF_TRANS && !def.isWater) def.translucent = true;
       if (family === 'light' || family === 'glow') def.unlit = true;
+      if (family === 'sprite') {
+        def.translucent = true;
+        def.additive = true;
+        def.unlit = true;
+        def.noCull = true;
+      }
       if (hints && hints.texinfoCount > 0 && hints.andFlags & SURF_NOLIGHT && !def.isWater) def.unlit = true;
       if (def.isWater) {
         def.translucent = true;
@@ -1283,7 +1316,7 @@ function proceduralMaterial(def: MaterialDef, inp: FallbackInputs): MaterialDef 
   // ---- image
   let fam = family;
   if (def.isWater && fam !== 'water') fam = 'water';
-  if (def.translucent && !def.isWater && fam !== 'glass' && inp.noVmt) {
+  if (def.translucent && !def.isWater && fam !== 'glass' && fam !== 'sprite' && inp.noVmt) {
     // Unknown translucent material: show it as a tinted, partly transparent pane.
     fam = 'glass';
   }
@@ -1446,6 +1479,49 @@ export interface MaterialStats {
   compressedBytes: number;
 }
 
+/** Copies an image's alpha channel into RGB (opaque), e.g. a normal map's alpha envmap mask. */
+function alphaToMask(img: DecodedImage): DecodedImage {
+  const d = img.data;
+  const out = new Uint8Array(d.length);
+  for (let i = 0; i < d.length; i += 4) {
+    out[i] = out[i + 1] = out[i + 2] = d[i + 3];
+    out[i + 3] = 255;
+  }
+  return { width: img.width, height: img.height, data: out, hasAlpha: false };
+}
+
+/** $envmap parameters (null when the material has no reflection). Water reflections are the renderer's own. */
+function parseEnvmap(ctx: BuildContext, P: Record<string, string>, isWater: boolean): MaterialEnvmap | null {
+  const env = (P['$envmap'] ?? '').trim();
+  if (!env || env === '0' || isWater) return null;
+  const tint = vmtVector(P['$envmaptint']) ?? [1, 1, 1];
+  const maskSize = Math.min(ctx.maxSize, 256);
+  let mask: MaterialEnvmap['mask'] = 'none';
+  let maskImage: DecodedImage | null = null;
+  if (P['$envmapmask']) {
+    mask = 'texture';
+    const img = loadTexture(ctx, P['$envmapmask'], { maxSize: maskSize, full: true });
+    maskImage = img ? { ...img, hasAlpha: false } : null;
+  } else if (vmtBool(P['$basealphaenvmapmask'])) {
+    mask = 'basealpha';
+  } else if (vmtBool(P['$normalmapalphaenvmapmask'])) {
+    mask = 'normalalpha';
+    const nm = P['$bumpmap'] || P['$normalmap'];
+    const img = nm ? loadTexture(ctx, nm, { maxSize: maskSize, full: true }) : null;
+    maskImage = img ? alphaToMask(img) : null;
+  }
+  const sat = vmtVector(P['$envmapsaturation']);
+  return {
+    cubemap: env.toLowerCase() === 'env_cubemap' ? 'env_cubemap' : normalizeTextureName(env),
+    tint: [Math.max(0, tint[0]), Math.max(0, tint[1]), Math.max(0, tint[2])],
+    mask,
+    maskImage,
+    contrast: clamp01(vmtNumber(P['$envmapcontrast'], 0)),
+    saturation: clamp01(sat ? sat[0] : 1),
+    fresnel: clamp01(vmtNumber(P['$fresnelreflection'], 1)),
+  };
+}
+
 function buildMaterial(
   ctx: BuildContext,
   name: string,
@@ -1472,6 +1548,17 @@ function buildMaterial(
         def.image = img;
         def.fallbackColor = imageAverage(img);
       }
+    }
+    // vbsp only patches $envmap into materials that reflect: keep the reflection with a typical stock tint.
+    const env = info?.params['$envmap'];
+    if (env && !def.isTool && !def.isSky && !def.isWater) {
+      const e = parseEnvmap(ctx, info!.params, false);
+      if (e && !info!.params['$envmaptint']) {
+        const fam = classifyMaterial(hintName);
+        const k = fam === 'glass' ? 0.6 : fam === 'metal' || fam === 'grate' ? 0.3 : fam === 'tile' || fam === 'marble' ? 0.25 : 0.12;
+        e.tint = [k, k, k];
+      }
+      if (e) def.envmap = e;
     }
     return { def, info };
   }
@@ -1513,6 +1600,11 @@ function buildMaterial(
     if (P['$alpha'] == null) def.alpha = WATER_ALPHA;
     const fog = vmtVector(P['$fogcolor']);
     def.waterFogColor = fog ? [clamp01(fog[0]), clamp01(fog[1]), clamp01(fog[2])] : null;
+    if (P['$fogstart'] != null || P['$fogend'] != null) {
+      const start = Math.max(0, vmtNumber(P['$fogstart'], 0));
+      const end = Math.max(start, vmtNumber(P['$fogend'], start));
+      def.waterFogRange = [start, end];
+    }
   }
 
   if (def.isTool || def.isSky) {
@@ -1632,6 +1724,10 @@ function buildMaterial(
       if (tt2 && !isIdentityTransform(tt2)) def.textureTransform2 = tt2;
     }
   }
+
+  // ---- cubemap reflection
+  const envmap = parseEnvmap(ctx, P, def.isWater);
+  if (envmap) def.envmap = envmap;
 
   // ---- detail texture
   if (ctx.detail && P['$detail']) {
@@ -1765,6 +1861,7 @@ export class MaterialLoader {
     add(def.image);
     add(def.image2);
     add(def.detail?.image);
+    add(def.envmap?.maskImage);
     if (def.frames) for (const f of def.frames) add(f);
   }
 }
@@ -2086,6 +2183,99 @@ export function proceduralSky(skyName: string, size = 256): SkyDef {
     name: skyName,
     faces: { rt: side, lf: side, bk: side, ft: side, up: face('up'), dn: face('dn') },
   };
+}
+
+// ======================================================================== baked cubemaps
+
+export interface LoadCubemapOptions {
+  extraSources?: MaterialFileSource[];
+  /** Largest face size (default 256; baked cubemaps are usually 32). */
+  maxSize?: number;
+}
+
+/**
+ * Decodes the six faces (VTF order rt, lf, bk, ft, up, dn) of a baked cubemap texture such as
+ * "maps/<map>/c0_0_0" (LDR "<name>.vtf" preferred, else "<name>.hdr.vtf" tone-mapped). Null when missing.
+ */
+export function loadCubemap(texture: string, pak: PakFile | null, opts: LoadCubemapOptions = {}): DecodedImage[] | null {
+  return loadCubemapWith(new Files(sourcesFor(pak, opts.extraSources)), texture, Math.max(1, opts.maxSize ?? 256));
+}
+
+function loadCubemapWith(files: Files, texture: string, maxSize: number): DecodedImage[] | null {
+  try {
+    const base = normalizeTextureName(texture).replace(/\.hdr$/, '');
+    if (!base) return null;
+    for (const suffix of ['', '.hdr']) {
+      const data = files.read(`materials/${base}${suffix}.vtf`);
+      const h = data ? parseVtfHeader(data) : null;
+      if (!data || !h || h.faces < 6) continue;
+      const faces: DecodedImage[] = [];
+      for (let f = 0; f < 6; f++) {
+        const img = decodeVtf(data, { maxSize, face: f });
+        if (!img) break;
+        const d = img.data;
+        for (let i = 3; i < d.length; i += 4) d[i] = 255;
+        faces.push({ ...img, hasAlpha: false });
+      }
+      if (faces.length === 6) return faces;
+    }
+  } catch {
+    // fall through
+  }
+  return null;
+}
+
+const CUBEMAP_TEX_RE = /^materials\/maps\/([^/]+)\/(c-?\d+_-?\d+_-?\d+|cubemapdefault)(\.hdr)?\.vtf$/;
+
+/**
+ * The map name used in "maps/<name>/..." paths (the name the BSP was compiled as, which may differ from the
+ * file name: surf_utopia_njv.bsp uses "surf_utopia_v3_njv"), from packed cubemaps or patched material names.
+ */
+export function compiledMapName(bsp: BspFile, pak: PakFile | null): string | null {
+  if (pak) {
+    for (const k of pak.list()) {
+      const m = CUBEMAP_TEX_RE.exec(k);
+      if (m) return m[1];
+    }
+  }
+  for (const raw of bsp.texdataNames ?? []) {
+    const m = /^maps\/([^/]+)\//.exec(normalizeMaterialName(raw));
+    if (m) return m[1];
+  }
+  return null;
+}
+
+/**
+ * Baked env_cubemaps: LUMP_CUBEMAPS samples (origin, size) with their textures "maps/<map>/c<x>_<y>_<z>"
+ * decoded from the pakfile (faces null when not packed — maps released without buildcubemaps). When the map
+ * has no samples but packs "cubemapdefault", that one is returned at the origin.
+ */
+export function loadCubemaps(bsp: BspFile, pak: PakFile | null, opts: LoadCubemapOptions = {}): CubemapDef[] {
+  const out: CubemapDef[] = [];
+  try {
+    const files = new Files(sourcesFor(pak, opts.extraSources));
+    const maxSize = Math.max(1, opts.maxSize ?? 256);
+    const name = compiledMapName(bsp, pak);
+    const lump = bsp.getLump(LUMP_CUBEMAPS);
+    const dv = new DataView(lump.buffer, lump.byteOffset, lump.byteLength);
+    const n = Math.floor(lump.byteLength / 16);
+    for (let i = 0; i < n; i++) {
+      const x = dv.getInt32(i * 16, true);
+      const y = dv.getInt32(i * 16 + 4, true);
+      const z = dv.getInt32(i * 16 + 8, true);
+      const size = dv.getInt32(i * 16 + 12, true);
+      const texture = name ? `maps/${name}/c${x}_${y}_${z}` : '';
+      out.push({ origin: { x, y, z }, size, texture, faces: texture ? loadCubemapWith(files, texture, maxSize) : null });
+    }
+    if (!out.length && name) {
+      const texture = `maps/${name}/cubemapdefault`;
+      const faces = loadCubemapWith(files, texture, maxSize);
+      if (faces) out.push({ origin: { x: 0, y: 0, z: 0 }, size: 0, texture, faces });
+    }
+  } catch {
+    // a broken lump only loses reflections
+  }
+  return out;
 }
 
 // ======================================================================== optional game content prefetch

@@ -110,6 +110,43 @@ export interface MaterialDef {
   textureTransform2?: [number, number, number, number, number, number];
   /** Optional ($detail): detail texture tiled `scale` times per base texture repeat. */
   detail?: MaterialDetail;
+  /** Optional ($envmap): specular cubemap reflection parameters. */
+  envmap?: MaterialEnvmap;
+  /** Optional (water $fogstart / $fogend): distances in units over which the water fog builds up. */
+  waterFogRange?: [number, number];
+}
+
+/**
+ * Cubemap reflection ($envmap). Final reflection ≈ cubemap(reflect(view, normal)) · tint · mask, with
+ * $envmapcontrast (0 = linear, 1 = squared) and $envmapsaturation (1 = full colour) applied to the sample.
+ */
+export interface MaterialEnvmap {
+  /**
+   * "env_cubemap" (use the nearest MapRenderData.cubemaps entry) or a baked cubemap texture name such as
+   * "maps/<map>/c0_0_0" (vbsp patches every material instance with its nearest cubemap).
+   */
+  cubemap: string;
+  /** $envmaptint (default [1, 1, 1]). */
+  tint: [number, number, number];
+  /** Reflection mask: base texture alpha, normal map alpha, a separate $envmapmask texture, or none. */
+  mask: 'none' | 'basealpha' | 'normalalpha' | 'texture';
+  /** For mask 'texture' (and 'normalalpha' when the normal map is packed): the mask, in the red channel. */
+  maskImage?: DecodedImage | null;
+  contrast: number;
+  saturation: number;
+  /** $fresnelreflection: 1 = no fresnel falloff, 0 = full fresnel. */
+  fresnel: number;
+}
+
+/** A baked env_cubemap (LUMP_CUBEMAPS sample + its texture from the pakfile). */
+export interface CubemapDef {
+  origin: Vec3;
+  /** Requested size (0 = default). */
+  size: number;
+  /** Texture name "maps/<map>/c<x>_<y>_<z>". */
+  texture: string;
+  /** Faces in VTF order: rt, lf, bk, ft, up, dn (null when the cubemap isn't packed). */
+  faces: DecodedImage[] | null;
 }
 
 /**
@@ -190,6 +227,8 @@ export interface MapRenderData {
   fog: FogDef | null;
   /** Static props, when the map packs the models (optional, may be empty). */
   props?: RenderProp[];
+  /** Optional: baked env_cubemaps for $envmap reflections (see MaterialEnvmap). */
+  cubemaps?: CubemapDef[];
 }
 
 export interface RenderProp {
