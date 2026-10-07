@@ -58,7 +58,7 @@ export function rescaleProgress(raw: number, firstPhaseStart: number): number {
 }
 
 export function phaseText(p: LoadProgress): string {
-  if (p.phase === 'download' && p.total && p.loaded !== undefined && p.total > 0 && /download/i.test(p.message)) {
+  if (p.phase === 'download' && p.total && p.loaded !== undefined && p.total > 0 && /^downloading/i.test(p.message)) {
     return `Downloading ${(p.loaded / MB).toFixed(1)} / ${(p.total / MB).toFixed(1)} MB`;
   }
   if (p.phase === 'download' && p.message) return p.message.replace(/…$|\.\.\.$/, '…');

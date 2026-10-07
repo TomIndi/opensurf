@@ -71,6 +71,8 @@ export class MockGame implements GameApi {
   /** Split flash: set lastSplitTime to now to trigger. */
   private split = { delta: -0.42 as number | null, time: 1 };
   private hud: HudState;
+  /** Make the next load fail: `viaSetLoading` reports it on the loading screen first, else the promise just rejects. */
+  failNext: { message: string; viaSetLoading: boolean } | null = null;
 
   constructor(
     private readonly ui: UiApi,
@@ -138,10 +140,18 @@ export class MockGame implements GameApi {
     if (this.loadTimer) clearTimeout(this.loadTimer);
     this.mapName = name;
     this.setState('loading');
-    return new Promise((resolve) => {
+    const fail = this.failNext;
+    this.failNext = null;
+    return new Promise((resolve, reject) => {
       let i = 0;
       const step = () => {
         if (this.state !== 'loading') return resolve();
+        if (fail && i === 3) {
+          if (fail.viaSetLoading) this.ui.setLoading({ phase: 'error', message: fail.message });
+          this.mapName = null;
+          this.setState('menu');
+          return reject(new Error(fail.message));
+        }
         if (i >= phases.length) {
           this.ui.setLoading({ phase: 'done', message: 'Ready' });
           this.ui.setLoading(null);

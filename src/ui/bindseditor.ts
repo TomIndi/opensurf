@@ -186,13 +186,11 @@ export class BindsEditor {
     this.capture = { command, oldKey, slot };
     slot.classList.add('capturing');
     slot.textContent = 'Press a key…';
-    // defer so the click that opened the capture isn't captured as mouse1
-    setTimeout(() => {
-      if (!this.capture) return;
-      window.addEventListener('keydown', this.onKeyDown, true);
-      window.addEventListener('mousedown', this.onMouseDown, true);
-      window.addEventListener('wheel', this.onWheel, { capture: true, passive: false });
-    }, 0);
+    // The click that opened the capture has fully dispatched (click comes after mouseup), and a keyboard
+    // activation's keydown is already past the window capture phase, so listening right away is safe.
+    window.addEventListener('keydown', this.onKeyDown, true);
+    window.addEventListener('mousedown', this.onMouseDown, true);
+    window.addEventListener('wheel', this.onWheel, { capture: true, passive: false });
   }
 
   /** Cancels a pending capture. Returns true if one was active. */

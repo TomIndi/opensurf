@@ -16,7 +16,7 @@ const DAY_THEME: MenuBgTheme = {
   rampLit: [190, 196, 204],
   rampDark: [104, 114, 128],
   edge: 'rgba(255, 255, 255, 0.9)',
-  fog: [196, 222, 242],
+  fog: [207, 229, 246],
 };
 
 declare global {
@@ -54,8 +54,29 @@ async function seedCache(names: string[]): Promise<void> {
   });
 }
 
+function seedRecords(): void {
+  // a couple of local PBs so the map browser shows them (harness only; game-world owns this storage format)
+  const run = (map: string, time: number) => ({ map, group: 0, time, stageSplits: [], checkpointSplits: [], jumps: 31, strafes: 140, sync: 88, tickrate: 100, date: Date.now(), avgSpeed: 1200, maxSpeed: 2100 });
+  try {
+    localStorage.setItem(
+      'surf.records.v1',
+      JSON.stringify({
+        version: 1,
+        courses: {
+          'surf_utopia_njv|0': { runs: [run('surf_utopia_njv', 83.45)], completions: 5 },
+          'surf_kitsune|0': { runs: [run('surf_kitsune', 61.08)], completions: 2 },
+          'surf_beginner|0': { runs: [run('surf_beginner', 112.9)], completions: 9 },
+        },
+      }),
+    );
+  } catch {
+    /* no storage */
+  }
+}
+
 async function main(): Promise<void> {
   const params = new URLSearchParams(location.search);
+  seedRecords();
   const frozen = params.has('t') ? parseFloat(params.get('t')!) : null;
   const app = document.getElementById('app')!;
   // fake game view behind the HUD
@@ -151,7 +172,8 @@ async function main(): Promise<void> {
       case 'scoreboard':
       case 'showpos':
         startGame();
-        game.timerState = name === 'hud-start' ? 'startzone' : 'running';
+        game.timerState = name === 'hud-start' ? 'startzone' : ((params.get('timer') as typeof game.timerState | null) ?? 'running');
+        if (params.get('timer') === 'practice') game.practice = true;
         if (name === 'showpos') {
           console_.execute('cl_showpos 1; cl_showfps 1');
         }

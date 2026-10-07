@@ -4,9 +4,10 @@ import type { GameApi, SoundApi } from '../game/api';
 import { BUILTIN_MAPS, type BuiltinMapInfo } from '../map/builtin/index';
 import { type CatalogEntry, loadCatalog, tierColor } from '../maps/catalog';
 import { deleteCachedMap, driveViewUrl, listCachedMaps } from '../maps/downloader';
+import { getCompletions, getPersonalBest } from '../game/records';
 import { clear, h, storageGet, storageSet } from './dom';
 import { mapNameEl, tierPill } from './mapui';
-import { mapTypeName, prettyMapName, splitMapName, tierName } from './format';
+import { formatTime, formatTimeShort, mapTypeName, prettyMapName, tierName } from './format';
 import { icon } from './icons';
 import { filterMaps, type MapFilterOptions, type MapSort, type MapTypeFilter, tierCounts } from './mapfilter';
 import { mapThumbSvg } from './thumbs';
@@ -19,6 +20,8 @@ export interface MapBrowserDeps {
   sound: SoundApi;
   toast: (msg: string, kind?: 'info' | 'error' | 'success') => void;
   confirm: (title: string, text: string, ok: string) => Promise<boolean>;
+  /** A load failed (the promise rejected). */
+  onLoadError: (name: string, message: string) => void;
   /** Called right before a load starts (the loading screen shows this name/tier); `retry` re-runs the load. */
   onLoadStart: (name: string, tier: number | null, retry: () => void, entry?: CatalogEntry) => void;
 }
@@ -57,6 +60,8 @@ export class MapBrowser {
   private readonly allTabCount: HTMLElement;
   private readonly fileInput: HTMLInputElement;
   private busy = false;
+  /** Called whenever the catalog finished (re)loading successfully. */
+  onCatalogLoaded: (() => void) | null = null;
 
   constructor(private readonly deps: MapBrowserDeps) {
     this.el = h('div.page-frame.panel.browser.interactive');
@@ -182,6 +187,7 @@ export class MapBrowser {
       h('span.c-tier', { text: 'Tier' }),
       h('span.c-type', { text: 'Type' }),
       h('span.c-zones', { text: 'Zones' }),
+      h('span.c-pb', { text: 'Your PB' }),
       h('span.c-status', { text: 'Status' }),
       h('span.c-actions'),
     );
@@ -267,6 +273,7 @@ export class MapBrowser {
           this.renderChips();
           this.renderFeatured();
           this.applyFilter(false);
+          if (this.catalog.length) this.onCatalogLoaded?.();
         });
     }
     return this.catalogLoading;
@@ -280,7 +287,8 @@ export class MapBrowser {
     } catch {
       /* no IndexedDB */
     }
-    this.list.refresh();
+    if (this.filter.cachedOnly) this.applyFilter(false);
+    else this.list.refresh();
     this.renderFeatured();
     const sel = this.list.selectedIndex;
     this.renderDetails(sel >= 0 ? this.list.getItems()[sel] : null);
@@ -383,6 +391,7 @@ export class MapBrowser {
       h('span.c-tier'),
       h('span.c-type'),
       h('span.c-zones'),
+      h('span.c-pb.tnum'),
       h('span.c-status'),
       h('span.c-actions', null, play),
     );
@@ -397,13 +406,15 @@ export class MapBrowser {
 
   private renderRow(row: HTMLElement, e: CatalogEntry, selected: boolean): void {
     row.classList.toggle('selected', selected);
+    const [name, tier, type, zones, pbEl, status] = row.children as unknown as HTMLElement[];
+    const pb = personalBest(e.name);
+    pbEl.textContent = pb ? formatTimeShort(pb.time) : '';
     if (row.dataset.map === e.name) {
-      // only cache status may change
-      this.renderStatus(row.children[4] as HTMLElement, e);
+      // only cache status / PB may change
+      this.renderStatus(status, e);
       return;
     }
     row.dataset.map = e.name;
-    const [name, tier, type, zones, status] = row.children as unknown as HTMLElement[];
     clear(name);
     name.appendChild(mapNameEl(e.name));
     clear(tier);
@@ -427,14 +438,11 @@ export class MapBrowser {
     const d = this.details;
     clear(d);
     if (!e) {
-      d.appendChild(
-        h(
-          'div.details-empty',
-          null,
-          icon('map', 'icon big'),
-          h('div', { text: this.catalogError ? 'Map catalog unavailable' : this.catalogLoading ? 'Loading catalog…' : 'No map selected' }),
-        ),
-      );
+      if (this.catalogError) {
+        d.appendChild(this.errorBox());
+        return;
+      }
+      d.appendChild(h('div.details-empty', null, icon('map', 'icon big'), h('div', { text: this.catalogLoading ? 'Loading catalog…' : 'No map selected' })));
       return;
     }
     const isCached = this.cached.has(e.name.toLowerCase());
@@ -471,6 +479,7 @@ export class MapBrowser {
         h('tr', null, h('td', { text: 'Difficulty' }), h('td', { text: e.tier ? `${tierName(e.tier)} — ${tierBlurb(e.tier)}` : 'Unknown' })),
         h('tr', null, h('td', { text: 'Layout' }), h('td', { text: layoutBlurb(e.type) })),
         h('tr', null, h('td', { text: 'Timer zones' }), h('td', { text: e.hasZones ? 'SurfTimer zone preset' : 'None — create with !zones' })),
+        h('tr', null, h('td', { text: 'Your best' }), h('td', null, pbText(e.name))),
         h('tr', null, h('td', { text: 'Source' }), h('td', { text: isCached ? 'Downloaded (stored in your browser)' : `KSF map archive · ${(e.archive ?? 'rar').toUpperCase()}` })),
       ),
       actions,
@@ -503,7 +512,12 @@ export class MapBrowser {
       thumb,
       h('div.card-badges', null, isCached ? h('span.badge.badge-dl', { attrs: { title: 'Downloaded' } }, icon('download')) : null, e.hasZones ? h('span.badge.badge-zones', { attrs: { title: 'SurfTimer zones' } }, icon('flag')) : null),
       h('div.card-play', null, icon('play')),
-      h('div.card-info', null, mapNameEl(e.name, 'card-name'), h('div.card-meta', null, tierPill(e.tier), h('span.card-type', { text: mapTypeName(e.type) }))),
+      h(
+        'div.card-info',
+        null,
+        mapNameEl(e.name, 'card-name'),
+        h('div.card-meta', null, tierPill(e.tier), h('span.card-type', { text: mapTypeName(e.type) }), cardPb(e.name)),
+      ),
     );
     card.style.setProperty('--tier-color', tierColor(e.tier));
     card.addEventListener('mouseenter', () => this.deps.sound.play('ui_hover'));
@@ -567,7 +581,14 @@ export class MapBrowser {
       this.catalogError = null;
       void this.ensureData();
     });
-    return h('div.details-empty.error-box', null, icon('warning', 'icon big'), h('div', { text: `Couldn't load the map catalog (${this.catalogError}).` }), retry);
+    return h(
+      'div.details-empty.error-box',
+      null,
+      icon('warning', 'icon big'),
+      h('div', { text: `Couldn't load the map catalog (${this.catalogError}).` }),
+      h('div.muted', { text: 'Built-in maps and local map files still work offline.' }),
+      retry,
+    );
   }
 
   // ------------------------------------------------------------ actions
@@ -626,12 +647,33 @@ export class MapBrowser {
     p.then(
       () => void this.refreshCached(),
       (e: Error) => {
-        if (e?.name !== 'AbortError') this.deps.toast(`Couldn't load ${name}: ${e?.message ?? e}`, 'error');
+        if (e?.name !== 'AbortError') this.deps.onLoadError(name, String(e?.message ?? e));
       },
     ).finally(() => {
       this.busy = false;
     });
   }
+}
+
+/** The local personal best on the main course (records are best-effort: never let them break the browser). */
+function personalBest(name: string): { time: number; completions: number } | null {
+  try {
+    const pb = getPersonalBest(name, 0);
+    return pb ? { time: pb.time, completions: getCompletions(name, 0) } : null;
+  } catch {
+    return null;
+  }
+}
+
+function pbText(name: string): HTMLElement {
+  const pb = personalBest(name);
+  if (!pb) return h('span.muted', { text: 'Not completed yet' });
+  return h('span', null, h('b.pb-time.tnum', { text: formatTime(pb.time) }), ` · ${pb.completions} completion${pb.completions === 1 ? '' : 's'}`);
+}
+
+function cardPb(name: string): HTMLElement | null {
+  const pb = personalBest(name);
+  return pb ? h('span.card-pb.tnum', { text: `PB ${formatTimeShort(pb.time)}`, title: 'Your personal best' }) : null;
 }
 
 function remPx(): number {

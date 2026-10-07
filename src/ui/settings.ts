@@ -34,6 +34,10 @@ export class Settings {
   private built = false;
   private readonly binds: BindsEditor;
   private previewCanvas: HTMLCanvasElement | null = null;
+  /** Cvars controlled by each tab (for "Reset tab"). */
+  private readonly tabCvars = new Map<SettingsTab, Set<string>>();
+  private building: SettingsTab | null = null;
+  private resetBtn!: HTMLButtonElement;
   private previewBg = 0;
   private previewZoom = 1;
 
@@ -63,7 +67,9 @@ export class Settings {
       this.panes.set(id, pane);
       body.appendChild(pane);
     }
-    this.el.append(h('div.browser-head.settings-head', null, tabsEl, h('div.settings-note', null, icon('check'), 'Changes apply instantly and are saved')), body);
+    this.resetBtn = h('button.btn.btn-sm.btn-ghost.settings-reset', { attrs: { type: 'button', title: 'Restore the defaults of every setting on this tab' } }, icon('restart'), 'Reset tab') as HTMLButtonElement;
+    this.resetBtn.addEventListener('click', () => void this.resetTab());
+    this.el.append(h('div.browser-head.settings-head', null, tabsEl, h('div.settings-note', null, icon('check'), 'Changes apply instantly and are saved'), this.resetBtn), body);
     console_.onCvarChange((cv) => {
       const list = this.refreshers.get(cv.name);
       if (list) for (const fn of list) fn();
@@ -79,12 +85,18 @@ export class Settings {
   build(): void {
     if (this.built) return;
     this.built = true;
-    this.buildGame(this.panes.get('game')!);
-    this.buildMouse(this.panes.get('mouse')!);
-    this.buildVideo(this.panes.get('video')!);
-    this.buildAudio(this.panes.get('audio')!);
-    this.buildCrosshair(this.panes.get('crosshair')!);
-    this.buildHud(this.panes.get('hud')!);
+    const build = (tab: SettingsTab, fn: (p: HTMLElement) => void) => {
+      this.building = tab;
+      this.tabCvars.set(tab, new Set());
+      fn(this.panes.get(tab)!);
+      this.building = null;
+    };
+    build('game', (p) => this.buildGame(p));
+    build('mouse', (p) => this.buildMouse(p));
+    build('video', (p) => this.buildVideo(p));
+    build('audio', (p) => this.buildAudio(p));
+    build('crosshair', (p) => this.buildCrosshair(p));
+    build('hud', (p) => this.buildHud(p));
     this.panes.get('binds')!.appendChild(this.binds.el);
     this.show(this.tab, false);
   }
@@ -96,6 +108,7 @@ export class Settings {
     storageSet(TAB_KEY, tab);
     for (const [id, b] of this.tabs) b.classList.toggle('active', id === tab);
     for (const [id, p] of this.panes) p.classList.toggle('active', id === tab);
+    this.resetBtn.classList.toggle('hidden', tab === 'binds');
     if (tab === 'binds') this.binds.refresh();
     if (tab === 'crosshair') requestAnimationFrame(() => this.drawPreview());
   }
@@ -116,6 +129,7 @@ export class Settings {
   // ------------------------------------------------------------ control builders
 
   private watch(name: string, fn: Refresher): void {
+    if (this.building && console_.getCvar(name)) this.tabCvars.get(this.building)!.add(name);
     let list = this.refreshers.get(name);
     if (!list) this.refreshers.set(name, (list = []));
     list.push(fn);
@@ -167,6 +181,8 @@ export class Settings {
         return;
       }
       this.changed(name, fmtNum(toCvar(v), 6));
+      // re-format even when the value didn't change (or was clamped to the same value)
+      num.value = fmt(fromCvar(cvarNum(name)));
     };
     num.addEventListener('change', commit);
     num.addEventListener('keydown', (e) => {
@@ -251,6 +267,7 @@ export class Settings {
         return;
       }
       this.changed(name, fmtNum(v, 6));
+      num.value = fmtNum(cvarNum(name), decimals);
     };
     num.addEventListener('change', commit);
     num.addEventListener('keydown', (e) => {
@@ -292,7 +309,7 @@ export class Settings {
     for (const d of PHYSICS_CVARS) {
       const cv = console_.getCvar(d.name);
       if (!cv) continue;
-      const isBool = d.name === 'sv_autobunnyhopping' || d.name === 'sv_enablebunnyhopping';
+      const isBool = d.name === 'sv_autobunnyhopping' || d.name === 'sv_enablebunnyhopping' || d.name === 'sv_rampbugfix';
       const ctl = isBool ? this.toggle(d.name) : this.numberInput(d.name, 6);
       const defEl = h('span.phys-def');
       const cell = h('div.phys-cell', { attrs: { title: d.help ?? cv.help } }, h('code', { text: d.name }), defEl, ctl);
@@ -311,8 +328,17 @@ export class Settings {
 
     const play = this.group(inner, 'Gameplay');
     this.row(play, 'Field of view', 'Horizontal degrees at 4:3, like CS:GO (default 90). Wider screens see more.', this.slider('fov_desired', { min: 60, max: 130, step: 1, decimals: 0 }), 'fov_desired');
-    this.row(play, 'PB ghost', 'Race a ghost of your personal best replay.', this.toggle('surf_ghost'), 'surf_ghost');
-    this.row(play, 'Ghost trail', 'Draw a trail behind the ghost.', this.toggle('surf_ghost_trail'), 'surf_ghost_trail');
+  }
+
+  private async resetTab(): Promise<void> {
+    const names = [...(this.tabCvars.get(this.tab) ?? [])];
+    if (!names.length) return;
+    const label = this.tabs.get(this.tab)?.textContent ?? this.tab;
+    const ok = await this.deps.confirm(`Reset ${label}`, `Restore the default value of all ${names.length} ${label.toLowerCase()} settings?`, 'Reset');
+    if (!ok) return;
+    for (const n of names) console_.getCvar(n)?.reset();
+    persistConfigSoon();
+    this.deps.toast(`${label} settings reset to defaults`, 'success');
   }
 
   private resetPhysics(): void {
@@ -369,7 +395,7 @@ export class Settings {
       d,
       'Render scale',
       'Resolution of the 3D view. Lower for more FPS on slow GPUs.',
-      this.slider('r_renderscale', { min: 0.5, max: 1, step: 0.05, format: (v) => `${Math.round(v * 100)}%`, parse: (s) => parseFloat(s) / (s.includes('%') || parseFloat(s) > 2 ? 100 : 1) }),
+      this.slider('r_renderscale', { min: 0.25, max: 1, step: 0.05, format: (v) => `${Math.round(v * 100)}%`, parse: (s) => parseFloat(s) / (s.includes('%') || parseFloat(s) > 2 ? 100 : 1) }),
       'r_renderscale',
     );
     this.row(
@@ -466,7 +492,20 @@ export class Settings {
     this.row(s, 'Speedometer', 'Large speed readout under the crosshair.', this.toggle('surf_hud_speed'), 'surf_hud_speed');
     this.row(s, 'Speedometer colors', 'Green while gaining speed, red while losing it.', this.toggle('surf_speedometer_color'), 'surf_speedometer_color');
     this.row(s, 'Show keys', 'Display WASD / jump / duck and mouse turning.', this.toggle('surf_showkeys'), 'surf_showkeys');
+    this.row(s, 'PB ghost', 'Race a ghost of your personal best replay.', this.toggle('surf_ghost'), 'surf_ghost');
+    this.row(s, 'Ghost trail', 'Draw a trail behind the ghost.', this.toggle('surf_ghost_trail'), 'surf_ghost_trail');
+    this.row(s, 'Hide players', 'Hide other players and replay bots (!hide).', this.toggle('surf_hide'), 'surf_hide');
     const dbg = this.group(inner, 'Debug');
+    this.row(
+      dbg,
+      'Net graph',
+      'CS:GO net_graph: fps, frame time variance and tickrate.',
+      this.select('net_graph', [
+        ['0', 'Off'],
+        ['1', 'On'],
+      ]),
+      'net_graph',
+    );
     this.row(
       dbg,
       'Show position',
@@ -516,14 +555,18 @@ export class Settings {
     const apply = h('button.btn.btn-accent.btn-sm', { attrs: { type: 'button' } }, icon('check'), 'Apply');
     apply.addEventListener('click', () => {
       const parsed = parseCrosshairConfig(ta.value);
-      if (!parsed.commands.length) {
-        this.deps.toast('No cl_crosshair* commands found in the pasted text', 'error');
+      // CS:GO configs also carry cl_crosshair_dynamic_* & co. which have no effect on a static crosshair
+      const known = parsed.commands.filter((c) => console_.getCvar(c.split(' ')[0]));
+      const unused = parsed.commands.length - known.length;
+      if (!known.length) {
+        this.deps.toast('No cl_crosshair* settings found in the pasted text', 'error');
         return;
       }
-      for (const c of parsed.commands) execute(c);
+      for (const c of known) execute(c);
       persistConfigSoon();
       this.deps.sound.play('ui_click');
-      this.deps.toast(`Applied ${parsed.commands.length} crosshair setting${parsed.commands.length === 1 ? '' : 's'}${parsed.ignored.length ? ` (${parsed.ignored.length} other line${parsed.ignored.length === 1 ? '' : 's'} ignored)` : ''}`, 'success');
+      const notes = [unused ? `${unused} not used here` : '', parsed.ignored.length ? `${parsed.ignored.length} other line${parsed.ignored.length === 1 ? '' : 's'} ignored` : ''].filter(Boolean).join(', ');
+      this.deps.toast(`Applied ${known.length} crosshair setting${known.length === 1 ? '' : 's'}${notes ? ` (${notes})` : ''}`, 'success');
     });
     const copy = h('button.btn.btn-sm', { attrs: { type: 'button' } }, icon('copy'), 'Copy mine');
     copy.addEventListener('click', () => {

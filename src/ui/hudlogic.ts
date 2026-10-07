@@ -121,3 +121,43 @@ export class FpsMeter {
     return false;
   }
 }
+
+/** Frame time statistics for net_graph (mean and standard deviation over a sliding window). */
+export class FrameStats {
+  private readonly buf: Float64Array;
+  private n = 0;
+  private i = 0;
+  constructor(size = 120) {
+    this.buf = new Float64Array(size);
+  }
+  push(dtMs: number): void {
+    if (!(dtMs > 0) || dtMs > 1000) return;
+    this.buf[this.i] = dtMs;
+    this.i = (this.i + 1) % this.buf.length;
+    if (this.n < this.buf.length) this.n++;
+  }
+  get count(): number {
+    return this.n;
+  }
+  mean(): number {
+    if (!this.n) return 0;
+    let s = 0;
+    for (let k = 0; k < this.n; k++) s += this.buf[k];
+    return s / this.n;
+  }
+  /** Standard deviation in ms ("var" in CS:GO's net_graph). */
+  stddev(): number {
+    if (this.n < 2) return 0;
+    const m = this.mean();
+    let s = 0;
+    for (let k = 0; k < this.n; k++) s += (this.buf[k] - m) ** 2;
+    return Math.sqrt(s / (this.n - 1));
+  }
+}
+
+/** CS:GO-style net_graph text for a local game. */
+export function netGraphText(fps: number, frameVarMs: number, tickrate: number): string {
+  const f = String(Math.round(fps)).padStart(4);
+  const tick = tickrate.toFixed(1).padStart(5);
+  return `fps: ${f}  var: ${frameVarMs.toFixed(1)} ms  ping: 0 ms\nloss:   0%  choke:  0%\ntick:${tick}  up: ${Math.round(tickrate)}/s  cmd: ${Math.round(tickrate)}/s\nlocal server`;
+}

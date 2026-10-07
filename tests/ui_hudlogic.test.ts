@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { TimerHud } from '../src/game/api';
-import { courseText, FpsMeter, SpeedTrend, splitView, timerView } from '../src/ui/hudlogic';
+import { courseText, FpsMeter, FrameStats, netGraphText, SpeedTrend, splitView, timerView } from '../src/ui/hudlogic';
 import { PHASE_SPANS, phaseText, rawProgress, rescaleProgress } from '../src/ui/loadprogress';
 import { clipNear } from '../src/ui/menubg';
 import { hashString, mapThumbSvg, paletteFor, prng } from '../src/ui/thumbs';
@@ -109,6 +109,30 @@ describe('fps meter', () => {
   });
 });
 
+describe('net_graph', () => {
+  it('frame statistics', () => {
+    const f = new FrameStats(4);
+    expect(f.stddev()).toBe(0);
+    for (const v of [10, 10, 10, 10]) f.push(v);
+    expect(f.mean()).toBe(10);
+    expect(f.stddev()).toBe(0);
+    f.push(20); // window of 4: 10, 10, 10, 20 (ring buffer)
+    expect(f.count).toBe(4);
+    expect(f.mean()).toBe(12.5);
+    expect(f.stddev()).toBeCloseTo(5, 6);
+    f.push(-1);
+    f.push(5000);
+    expect(f.mean()).toBe(12.5);
+  });
+
+  it('CS:GO-like text', () => {
+    const t = netGraphText(143.6, 0.42, 100);
+    expect(t.split('\n')[0]).toBe('fps:  144  var: 0.4 ms  ping: 0 ms');
+    expect(t).toContain('tick:100.0');
+    expect(netGraphText(60, 1, 64)).toContain('tick: 64.0');
+  });
+});
+
 describe('loading progress', () => {
   it('phases cover 0..1 in order without gaps', () => {
     const spans = Object.values(PHASE_SPANS);
@@ -135,6 +159,8 @@ describe('loading progress', () => {
   it('phase text', () => {
     expect(phaseText({ phase: 'download', message: 'Downloading 12.4 / 56.3 MB', loaded: 12.4 * 1048576, total: 56.3 * 1048576 })).toBe('Downloading 12.4 / 56.3 MB');
     expect(phaseText({ phase: 'download', message: 'Contacting Google Drive...' })).toBe('Contacting Google Drive…');
+    expect(phaseText({ phase: 'download', message: 'Downloaded 56.3 MB', loaded: 5, total: 5 })).toBe('Downloaded 56.3 MB');
+    expect(phaseText({ phase: 'download', message: 'Loaded from cache', loaded: 5, total: 5 })).toBe('Loaded from cache');
     expect(phaseText({ phase: 'collision', message: 'whatever' })).toBe('Building collision');
     expect(phaseText({ phase: 'textures', message: '' })).toBe('Decoding textures');
     expect(phaseText({ phase: 'renderer', message: '' })).toBe('Uploading to GPU');

@@ -49,7 +49,8 @@ export const DEFAULT_THEME: MenuBgTheme = {
   rampLit: [70, 128, 222],
   rampDark: [20, 40, 86],
   edge: 'rgba(170, 225, 255, 0.85)',
-  fog: [14, 34, 62],
+  // = the horizon colour, so distant ramps dissolve into the haze instead of popping in as silhouettes
+  fog: [23, 58, 99],
 };
 
 export class MenuBackground {

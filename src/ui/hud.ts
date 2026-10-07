@@ -5,7 +5,7 @@ import type { HudState } from '../game/api';
 import { cvarBool, cvarGetter, cvarNum, cvarStr } from './cvardefs';
 import { ClassSwitch, ClassToggle, h, TextSlot } from './dom';
 import { fmtPos, formatSpeed, formatTime } from './format';
-import { FpsMeter, SpeedTrend, splitView, timerView } from './hudlogic';
+import { FpsMeter, FrameStats, netGraphText, SpeedTrend, splitView, timerView } from './hudlogic';
 import { crosshairGeometry, drawCrosshair, readCrosshairParams } from './crosshair';
 
 /** cl_hud_color palette (0 = default). */
@@ -21,6 +21,7 @@ const HUD_CVARS = new Set([
   'surf_speedometer_color',
   'cl_hud_color',
   'hud_scaling',
+  'net_graph',
 ]);
 
 /** Renders the crosshair into a small canvas centred on the screen, pixel-aligned to device pixels. */
@@ -114,6 +115,9 @@ export class Hud {
   private readonly fpsEl: HTMLElement;
   private readonly fpsText: TextSlot;
   private readonly fpsColor: ClassSwitch;
+  private readonly netEl: HTMLElement;
+  private readonly netText: TextSlot;
+  private readonly frames = new FrameStats(120);
   private readonly specEl: HTMLElement;
   private readonly specText: TextSlot;
   private readonly hintEl: HTMLElement;
@@ -123,7 +127,7 @@ export class Hud {
   private hintTimer: ReturnType<typeof setTimeout> | null = null;
   private centerTimer: ReturnType<typeof setTimeout> | null = null;
 
-  private cfg = { speed: true, timer: true, keys: true, showpos: 0, showfps: 0, speedColor: true };
+  private cfg = { speed: true, timer: true, keys: true, showpos: 0, showfps: 0, speedColor: true, netgraph: 0 };
   private visible: boolean | null = null;
   private readonly trend = new SpeedTrend();
   private readonly fps = new FpsMeter(0.5);
@@ -217,6 +221,10 @@ export class Hud {
     this.posEl = h('div.hud-pos.tnum');
     this.posText = new TextSlot(this.posEl);
 
+    // ---- net_graph (bottom right, CS:GO style)
+    this.netEl = h('div.hud-netgraph.tnum');
+    this.netText = new TextSlot(this.netEl);
+
     // ---- spectate banner / hint / center print
     this.specEl = h('div.hud-spec');
     const specTextEl = h('span');
@@ -235,6 +243,7 @@ export class Hud {
       this.timerEl,
       this.sideEl,
       h('div.hud-topleft', null, this.fpsEl, this.posEl),
+      this.netEl,
       this.specEl,
       this.hintEl,
       this.centerEl,
@@ -254,6 +263,8 @@ export class Hud {
     this.cfg.showpos = cvarNum('cl_showpos', 0);
     this.cfg.showfps = cvarNum('cl_showfps', 0);
     this.cfg.speedColor = cvarNum('surf_speedometer_color', 1) !== 0;
+    this.cfg.netgraph = cvarNum('net_graph', 0);
+    this.netEl.classList.toggle('hidden', !this.cfg.netgraph);
     const scale = Math.max(0.5, Math.min(0.95, cvarNum('hud_scaling', 0.85)));
     this.el.style.setProperty('--hud-k', (scale / 0.85).toFixed(4));
     const ci = Math.trunc(cvarNum('cl_hud_color', 0));
@@ -283,10 +294,14 @@ export class Hud {
     const now = performance.now();
     const dt = this.lastFrame ? (now - this.lastFrame) / 1000 : 0;
     this.lastFrame = now;
-    if (this.fps.tick(dt) && this.cfg.showfps) {
+    this.frames.push(dt * 1000);
+    if (this.fps.tick(dt)) {
       const f = Math.round(this.fps.fps);
-      this.fpsText.set(`${f} fps${hud.mapName ? ` on ${hud.mapName}` : ''}`);
-      this.fpsColor.set(f >= 60 ? 'fps-good' : f >= 30 ? 'fps-ok' : 'fps-bad');
+      if (this.cfg.showfps) {
+        this.fpsText.set(`${f} fps${hud.mapName ? ` on ${hud.mapName}` : ''}`);
+        this.fpsColor.set(f >= 60 ? 'fps-good' : f >= 30 ? 'fps-ok' : 'fps-bad');
+      }
+      if (this.cfg.netgraph) this.netText.set(netGraphText(this.fps.fps, this.frames.stddev(), cvarNum('tickrate', 100)));
     }
     this.setVisible(hud.visible);
     if (!hud.visible) return;

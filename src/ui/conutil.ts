@@ -35,27 +35,36 @@ export function runSilently(fn: () => void): ConsoleLine[] {
 
 /** Parses Source `bind <key>` output: `"w" = "+forward"` -> ['w', '+forward']; unbound -> null. */
 export function parseBindLine(text: string): [string, string] | null {
-  const m = /^\s*"?([^"=\s]+)"?\s*=\s*"(.*)"\s*$/.exec(text);
+  const m = /^\s*"?([^"=\s]+)"?\s*=\s*(?:"(.*)"|(\S.*?))\s*$/.exec(text);
   if (!m) return null;
-  return [m[1].toLowerCase(), m[2]];
+  const value = m[2] ?? m[3] ?? '';
+  return [m[1].toLowerCase(), value];
+}
+
+function parseBindOutput(lines: { text: string }[], into: Map<string, string>, only?: string): void {
+  for (const l of lines) {
+    for (const part of l.text.split('\n')) {
+      const p = parseBindLine(part);
+      if (p && p[1] !== '' && (only === undefined || p[0] === only)) into.set(p[0], p[1]);
+    }
+  }
 }
 
 /**
- * Reads the binding of each key by querying `bind <key>` silently. Works with any game-core that prints
- * Source-style bind output. Returns key -> command for bound keys.
+ * Reads the current key bindings through the console (works with any game-core that prints Source-style
+ * bind output): `key_listboundkeys` when available (one command), otherwise `bind <key>` for each key.
+ * Returns key -> command for bound keys.
  */
 export function queryBinds(keys: string[]): Map<string, string> {
   const out = new Map<string, string>();
+  if (console_.hasCommand('key_listboundkeys')) {
+    parseBindOutput(runSilently(() => console_.execute('key_listboundkeys')), out);
+    if (out.size) return out;
+  }
   if (!console_.hasCommand('bind')) return out;
   for (const key of keys) {
     const quoted = key === '"' ? key : `"${key}"`;
-    const lines = runSilently(() => console_.execute(`bind ${quoted}`));
-    for (const l of lines) {
-      for (const part of l.text.split('\n')) {
-        const p = parseBindLine(part);
-        if (p && p[0] === key.toLowerCase() && p[1] !== '') out.set(key, p[1]);
-      }
-    }
+    parseBindOutput(runSilently(() => console_.execute(`bind ${quoted}`)), out, key.toLowerCase());
   }
   return out;
 }

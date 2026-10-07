@@ -415,7 +415,7 @@
 .surf-ui .list-head,
 .surf-ui .map-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 4.2rem 7.5rem 4.2rem 7.5rem 5.2rem;
+  grid-template-columns: minmax(0, 1fr) 4.2rem 7.5rem 4.2rem 5.6rem 7rem 5.2rem;
   align-items: center;
   gap: 0.5rem;
   padding: 0 1rem;
@@ -492,6 +492,23 @@
 
 .surf-ui .map-row .c-status {
   font-size: 0.85rem;
+}
+
+.surf-ui .map-row .c-pb {
+  color: var(--gold);
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.surf-ui .card-pb {
+  margin-left: auto;
+  font: 700 0.78rem var(--font);
+  color: var(--gold);
+  letter-spacing: 0.02em;
+}
+
+.surf-ui .details-info .pb-time {
+  color: var(--gold);
 }
 
 .surf-ui .status-dl {
@@ -693,7 +710,7 @@
   }
   .surf-ui .list-head,
   .surf-ui .map-row {
-    grid-template-columns: minmax(0, 1fr) 3.6rem 6rem 3.6rem 0 5.2rem;
+    grid-template-columns: minmax(0, 1fr) 3.6rem 6rem 3.6rem 5rem 0 5.2rem;
   }
   .surf-ui .map-row .c-status,
   .surf-ui .list-head .c-status {

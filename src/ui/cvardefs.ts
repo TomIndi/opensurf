@@ -35,6 +35,8 @@ export const PHYSICS_CVARS: Def[] = [
   { name: 'sv_waterfriction', def: '1', flags: R, help: 'Water friction' },
   { name: 'sv_noclipspeed', def: '5', flags: R, help: 'Noclip speed' },
   { name: 'sv_noclipaccelerate', def: '5', flags: R, help: 'Noclip acceleration' },
+  { name: 'sv_rampbugfix', def: '1', flags: R, help: 'Rampbug fix, like modern surf servers' },
+  { name: 'surf_prespeed', def: '350', flags: R, help: 'Speed cap when leaving a start zone (0 = none)' },
 ];
 
 export const UI_CVARS: Def[] = [
@@ -77,6 +79,8 @@ export const UI_CVARS: Def[] = [
   { name: 'cl_crosshaircolor_b', def: '50', flags: A, min: 0, max: 255 },
   { name: 'cl_crosshairalpha', def: '200', flags: A, min: 0, max: 255 },
   { name: 'cl_crosshairusealpha', def: '1', flags: A },
+  // UI-owned extra (CS:GO's T-shaped crosshair)
+  { name: 'cl_crosshair_t', def: '0', flags: A, help: 'T-style crosshair (no top line)' },
   // video
   { name: 'mat_fullbright', def: '0', flags: A },
   { name: 'r_drawzones', def: '1', flags: A },
@@ -94,7 +98,7 @@ export const UI_CVARS: Def[] = [
   { name: 'surf_showkeys', def: '1', flags: A },
   { name: 'surf_ghost', def: '1', flags: A },
   { name: 'surf_ghost_trail', def: '1', flags: A },
-  { name: 'surf_prespeed', def: '350', flags: R },
+  { name: 'surf_hide', def: '0', flags: A, help: 'Hide other players and replay bots' },
   { name: 'surf_speedometer_color', def: '1', flags: A },
   { name: 'surf_chat_sounds', def: '1', flags: A },
 ];
@@ -138,11 +142,11 @@ export function setCvar(name: string, value: string | number | boolean): SetResu
   return 'ok';
 }
 
-/** True if any physics cvar differs from its default (runs become unranked). */
+/** True if any physics cvar (or host_timescale) differs from its default (runs become unranked). */
 export function customPhysicsActive(): boolean {
-  for (const d of PHYSICS_CVARS) {
-    const c = console_.getCvar(d.name);
-    if (c && parseFloat(c.value) !== parseFloat(c.defaultValue)) return true;
+  for (const name of [...PHYSICS_CVARS.map((d) => d.name), 'host_timescale']) {
+    const c = console_.getCvar(name);
+    if (c && Math.abs(parseFloat(c.value) - parseFloat(c.defaultValue)) > 1e-9) return true;
   }
   return false;
 }

@@ -635,7 +635,7 @@
 
 .surf-ui .menu-item .hint {
   margin-left: auto;
-  font: 600 0.72rem var(--font);
+  font: 600 0.74rem var(--font-mono);
   letter-spacing: 0.08em;
   color: var(--text-3);
 }

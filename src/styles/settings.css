@@ -4,6 +4,10 @@
   flex: 1;
 }
 
+.surf-ui .settings-head .settings-reset {
+  align-self: center;
+}
+
 .surf-ui .settings-head .settings-note {
   margin-left: auto;
   align-self: center;

@@ -99,8 +99,14 @@ export class DevConsole {
     }
     console_.onOutput((line) => {
       if (isSilent()) return;
-      this.pending.push(line);
-      if (this.pending.length > MAX_DOM_LINES) this.needsRebuild = true;
+      if (!this.needsRebuild) {
+        this.pending.push(line);
+        // too much output while closed: drop the queue and rebuild from console_.history on open
+        if (this.pending.length > MAX_DOM_LINES) {
+          this.needsRebuild = true;
+          this.pending = [];
+        }
+      }
       if (this.open) this.scheduleFlush();
     });
   }
@@ -160,8 +166,10 @@ export class DevConsole {
       const last = this.rendered[this.rendered.length - 1];
       if (hist.lastIndexOf(last) < 0) this.needsRebuild = true;
     }
+    // keep following new output only if the user hasn't scrolled up to read something
     const atBottom = this.output.scrollHeight - this.output.scrollTop - this.output.clientHeight < 40;
-    if (this.needsRebuild) {
+    const rebuilt = this.needsRebuild;
+    if (rebuilt) {
       this.needsRebuild = false;
       this.pending = [];
       clear(this.output);
@@ -172,7 +180,7 @@ export class DevConsole {
       this.pending = [];
       this.appendLines(lines);
     }
-    if (atBottom || this.needsRebuild) this.output.scrollTop = this.output.scrollHeight;
+    if (atBottom || rebuilt) this.output.scrollTop = this.output.scrollHeight;
   }
 
   private appendLines(lines: ConsoleLine[]): void {
@@ -191,7 +199,6 @@ export class DevConsole {
       this.rendered.splice(0, extra);
       while (extra-- > 0 && this.output.firstChild) this.output.removeChild(this.output.firstChild);
     }
-    this.output.scrollTop = this.output.scrollHeight;
   }
 
   // ------------------------------------------------------------ input
@@ -206,13 +213,22 @@ export class DevConsole {
     if (this.history.length > 100) this.history.splice(0, this.history.length - 100);
     storageSet(HISTORY_KEY, JSON.stringify(this.history));
     console_.print(`] ${line}`, 'echo');
+    const echo = console_.history[console_.history.length - 1];
     try {
       this.deps.execute(line);
     } catch (e) {
       console_.print(String((e as Error)?.message ?? e), 'error');
     }
+    // if the game echoes the command itself too, keep a single "] cmd" line
+    const hist = console_.history;
+    const at = hist.lastIndexOf(echo);
+    if (at >= 0 && hist[at + 1] && hist[at + 1].color === 'echo' && hist[at + 1].text === echo.text) {
+      hist.splice(at + 1, 1);
+      this.needsRebuild = true;
+    }
     if (console_.history.length === 0) this.rebuild();
     else this.flush();
+    this.output.scrollTop = this.output.scrollHeight;
   }
 
   private onKey(e: KeyboardEvent): void {

@@ -71,6 +71,8 @@ describe('binds parsing helpers', () => {
     expect(parseBindLine('w = "+forward"')).toEqual(['w', '+forward']);
     expect(parseBindLine('"`" = "toggleconsole"')).toEqual(['`', 'toggleconsole']);
     expect(parseBindLine('"x" is not bound')).toBeNull();
+    expect(parseBindLine('"f" = noclip')).toEqual(['f', 'noclip']);
+    expect(parseBindLine('"r" = "say !r"  ')).toEqual(['r', 'say !r']);
   });
 
   it('normalizes commands for comparison', () => {

@@ -89,6 +89,12 @@ export class Ui implements UiApi {
       sound,
       toast,
       confirm,
+      onLoadError: (name, message) => {
+        // show it where the user is looking: on the loading screen if it is up, else as a toast
+        if (this.loading.isVisible) {
+          if (!this.loading.hasFailed) this.loading.update({ phase: 'error', message });
+        } else this.toast(`Couldn't load ${name}: ${message}`, 'error', 7);
+      },
       onLoadStart: (name, tier, retry, entry) => {
         this.pendingMap = { name, tier, type: entry?.type ?? null, hasZones: entry?.hasZones ?? false };
         this.retry = retry;
@@ -142,6 +148,8 @@ export class Ui implements UiApi {
       void this.browser.refreshCached();
       this.pendingMap = null;
     });
+    // new PBs show up in the map browser
+    game.on('runfinished', () => void this.browser.refreshCached());
     game.on('cvarschanged', () => {
       this.hud.readConfig();
       this.settings.refreshAll();
@@ -261,6 +269,13 @@ export class Ui implements UiApi {
         handled = true;
       } else if ((!this.game || this.game.state !== 'playing') && !(active instanceof HTMLTextAreaElement) && !this.chatBox.isOpen) {
         this.console.show();
+        handled = true;
+      }
+    } else if ((e.key === '/' && !e.ctrlKey && !e.metaKey) || ((e.ctrlKey || e.metaKey) && e.code === 'KeyF')) {
+      // "/" or Ctrl+F: search maps whenever the map browser is on screen
+      const active = document.activeElement;
+      if (this.browser.el.isConnected && this.browser.el.offsetParent !== null && !(active instanceof HTMLElement && isTextInput(active)) && !this.console.isOpen) {
+        this.browser.focusSearch();
         handled = true;
       }
     }
@@ -468,15 +483,21 @@ export class Ui implements UiApi {
       this.setScoreboardVisible(false);
     } else if (which === 'pause') {
       this.mainMenu.hide();
-      const name = this.game?.mapName ?? this.lastHud?.mapName ?? null;
-      const entry = name ? getCatalogEntry(name) : undefined;
-      this.pauseMenu.show(name, entry?.tier ?? this.lastHud?.tier ?? null, entry?.type ?? this.lastHud?.timer.mapType ?? null, this.lastHud);
+      // repeated showMenu('pause') calls must not kick the user out of a sub page (settings / change map)
+      if (!this.pauseMenu.isVisible) {
+        const name = this.game?.mapName ?? this.lastHud?.mapName ?? null;
+        const entry = name ? getCatalogEntry(name) : undefined;
+        this.pauseMenu.show(name, entry?.tier ?? this.lastHud?.tier ?? null, entry?.type ?? this.lastHud?.timer.mapType ?? null, this.lastHud);
+      }
       this.chatBox.close();
       this.setScoreboardVisible(false);
     } else {
       this.settings.cancelCapture();
       this.mainMenu.hide();
       this.pauseMenu.hide();
+      // a menu button keeping focus would be re-activated by Space/Enter while playing (e.g. "Restart")
+      const a = document.activeElement;
+      if (a instanceof HTMLElement && this.root.contains(a) && !this.console.isOpen && !this.chatBox.isOpen) a.blur();
     }
   }
 

@@ -113,6 +113,23 @@ describe('console helpers', () => {
     expect(console_.history.length).toBe(n); // nothing leaked into the console
   });
 
+  it('queryBinds prefers key_listboundkeys', () => {
+    let calls = 0;
+    registerCommand({
+      name: 'key_listboundkeys',
+      handler: () => {
+        calls++;
+        console_.print('"space" = "+jump"\n"mwheeldown" = "+jump"');
+        console_.print('"r" = "say !r"');
+      },
+    });
+    const n = console_.history.length;
+    const got = queryBinds(['space', 'r', 'w']);
+    expect(calls).toBe(1);
+    expect(Object.fromEntries(got)).toEqual({ space: '+jump', mwheeldown: '+jump', r: 'say !r' });
+    expect(console_.history.length).toBe(n);
+  });
+
   it('persistConfigNow runs host_writeconfig silently when available', () => {
     let calls = 0;
     registerCommand({

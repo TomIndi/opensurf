@@ -132,6 +132,7 @@ export class MainMenu {
     );
     this.renderHeroActions();
     this.renderStats(null);
+    deps.browser.onCatalogLoaded = () => this.renderStrip();
 
     const play = h('section.page.page-play');
     const settings = h('section.page.page-settings');
