@@ -68,7 +68,7 @@ import type { TimerHost } from './contracts';
 import { getMoveVars, hostTimescale, isCustomPhysics, isPhysicsCvar, registerConvars, tickInterval } from './convars';
 import { installDebugApi, parseUrlOptions } from './debugapi';
 import { EntitySystem } from './entities';
-import { createHudState, emptyTimerHud, horizontalSpeed, turnFromYawDelta, updateHudState } from './hud';
+import { createHudState, horizontalSpeed, turnFromYawDelta, updateHudState } from './hud';
 import { InputDevice, InputState, KeyDispatcher, readMouseSettings, registerButtonCommands } from './input';
 import { ReplaySystem, sampleReplay } from './replay';
 import { SurfTimer } from './timer';
@@ -90,6 +90,8 @@ const FOOTSTEP_STRIDE = 80;
 const FOOTSTEP_MIN_SPEED = 150;
 /** Seconds the PB replay rests on its last frame before looping while spectating. */
 const SPECTATE_LOOP_PAUSE = 2;
+/** Lowest effective fps_max (10 ticks per frame must cover 128 tick). */
+const MIN_FPS_LIMIT = 30;
 
 // ------------------------------------------------------------------------------------------ map loading back-ends
 
@@ -457,6 +459,7 @@ export class Game implements GameApi, CommandContext {
   readonly dispatcher = new KeyDispatcher();
   private device: InputDevice | null = null;
   private readonly windowCleanups: Array<() => void> = [];
+  private offCvarChange: (() => void) | null = null;
   autotest: boolean;
 
   private _state: GameState = 'menu';
@@ -481,6 +484,7 @@ export class Game implements GameApi, CommandContext {
   private frameErrors = 0;
   private readonly systemErrors = new Map<string, number>();
   private cvarsChanged = false;
+  private readonly announcedCvars = new Map<string, string>();
 
   // per-frame scratch
   private readonly tickAngles: QAngle = qa();
@@ -509,7 +513,15 @@ export class Game implements GameApi, CommandContext {
     registerZoneCommands();
     this.input.buttons.showscores.onChange = (down) => this.ui.setScoreboardVisible(down);
     loadSavedConfig();
-    console_.onCvarChange((c, old) => this.onCvarChanged(c, old));
+    this.offCvarChange = console_.onCvarChange((c, old) => this.onCvarChanged(c, old));
+  }
+
+  /** Stops everything and detaches from the global console (tests; a page has one game for its lifetime). */
+  dispose(): void {
+    this.stop();
+    this.disconnect();
+    this.offCvarChange?.();
+    this.offCvarChange = null;
   }
 
   // ================================================================ GameApi
@@ -764,7 +776,8 @@ export class Game implements GameApi, CommandContext {
   }
 
   private progress(token: LoadToken, p: LoadProgress): void {
-    if (token.seq !== this.loadSeq) return;
+    // late callbacks (a renderer still reporting after the map is up) must not bring the loading screen back
+    if (token.seq !== this.loadSeq || this.currentLoad !== token) return;
     this.ui.setLoading(p);
     this.emitEvent('loadprogress', p);
   }
@@ -1014,11 +1027,20 @@ export class Game implements GameApi, CommandContext {
       // like Source: turning cheats off restores every cheat cvar
       for (const cv of console_.allCvars()) if (cv.flags & FCVAR_CHEAT && cv.value !== cv.defaultValue) cv.reset();
     }
-    // a server/physics change during a run: the run can't be ranked any more
-    if ((isPhysicsCvar(c.name) || c.name === 'tickrate' || c.name === 'host_timescale' || (c.flags & FCVAR_REPLICATED && c.name.startsWith('sv_') && c.name !== 'sv_cheats')) && this._session) {
-      const t = this._session.timer;
-      const st = t.timerState ?? t.getHud().state;
-      if (st === 'running') t.enterPractice(`${c.name} changed`);
+    const serverCvar = isPhysicsCvar(c.name) || c.name === 'tickrate' || c.name === 'host_timescale' || (c.flags & FCVAR_REPLICATED) !== 0;
+    if (serverCvar) {
+      // like a Source server announcing a notify cvar (once per value: canonicalizing setters re-emit)
+      const fresh = this.announcedCvars.get(c.name) !== c.value;
+      this.announcedCvars.set(c.name, c.value);
+      if (fresh && this._session) this._session.chat([{ text: `Server cvar '${c.name}' changed to ${c.value}`, color: 'default' }]);
+    }
+    if (serverCvar && this._session) {
+      // a server/physics change during a run: the run can't be ranked any more
+      if (c.name !== 'sv_cheats') {
+        const t = this._session.timer;
+        const st = t.timerState ?? t.getHud().state;
+        if (st === 'running') t.enterPractice(`${c.name} changed`);
+      }
     }
   }
 
@@ -1116,7 +1138,9 @@ export class Game implements GameApi, CommandContext {
   }
 
   private frameInner(nowMs: number): void {
-    const fpsMax = console_.getCvar('fps_max')?.num ?? 0;
+    let fpsMax = console_.getCvar('fps_max')?.num ?? 0;
+    // at least MIN_FPS_LIMIT: below it the per-frame tick cap would slow the simulation down
+    if (fpsMax > 0 && fpsMax < MIN_FPS_LIMIT) fpsMax = MIN_FPS_LIMIT;
     if (fpsMax > 0 && this.lastFrameMs > 0) {
       const period = 1000 / fpsMax;
       if (nowMs < this.nextFrameMs - 0.75) return;

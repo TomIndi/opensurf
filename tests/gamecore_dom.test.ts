@@ -62,9 +62,6 @@ function ev(type: string, props: Partial<FakeEvent> = {}): FakeEvent {
 class FakeCanvas extends FakeTarget {
   lockRequests: unknown[] = [];
   rejectRaw = false;
-  constructor(private readonly doc: FakeDocument) {
-    super();
-  }
   requestPointerLock(opts?: { unadjustedMovement?: boolean }): Promise<void> {
     this.lockRequests.push(opts ?? null);
     if (opts?.unadjustedMovement && this.rejectRaw) return Promise.reject(new Error('NotSupportedError'));
@@ -131,7 +128,7 @@ beforeEach(async () => {
   resetGlobals();
   win = new FakeTarget();
   doc = new FakeDocument();
-  canvas = new FakeCanvas(doc);
+  canvas = new FakeCanvas();
   g.window = win;
   g.document = doc;
   pauses = escapes = consoles = 0;

@@ -336,6 +336,30 @@ describe('main loop', () => {
     expect(t.game.input.isDown('forward')).toBe(false);
   });
 
+  it('late renderer progress after the load does not bring the loading screen back', async () => {
+    const t = makeGame();
+    let late: ((p: { phase: 'textures'; message: string }) => void) | undefined;
+    t.renderer.loadMap = async (map, onProgress) => {
+      late = onProgress as typeof late;
+      t.renderer.loaded = map;
+    };
+    await t.game.loadBuiltinMap('test');
+    const n = t.ui.loading.length;
+    late?.({ phase: 'textures', message: 'still streaming' });
+    expect(t.ui.loading.length).toBe(n);
+    expect(t.game.state).toBe('playing');
+  });
+
+  it('dispose detaches from the console', async () => {
+    const t = await loadedGame();
+    t.game.dispose();
+    expect(t.game.state).toBe('menu');
+    const before = Object.keys(t.renderer.settings).length;
+    cvar('mat_fullbright').set(1);
+    expect(Object.keys(t.renderer.settings).length).toBe(before);
+    expect(t.renderer.settings.fullbright).toBeUndefined();
+  });
+
   it('fps_max limits the rendered frames', async () => {
     const t = await loadedGame();
     cvar('fps_max').set(60);
@@ -432,6 +456,13 @@ describe('gameplay', () => {
     cvar('sv_airaccelerate').set(1000);
     expect(s.timer.inPractice).toBe(true);
     expect(s.customPhysics).toBe(true);
+    expect(t.ui.texts()).toContain("Server cvar 'sv_airaccelerate' changed to 1000");
+    const n = t.ui.chats.length;
+    cvar('sv_airaccelerate').set(1000); // no change, no message
+    cvar('sensitivity').set(1); // client cvars are not announced
+    expect(t.ui.chats.length).toBe(n);
+    cvar('tickrate').set('85.3333'); // canonicalized to 85.3: announced once
+    expect(t.ui.texts().filter((l) => l.startsWith("Server cvar 'tickrate'"))).toEqual(["Server cvar 'tickrate' changed to 85.3"]);
   });
 
   it('spectates the PB replay; jumping leaves it and respawns at the start', async () => {
@@ -577,6 +608,53 @@ describe('gameplay', () => {
     t.game.runTicks(1);
     expect(s.player.oldButtons & IN_JUMP).toBeTruthy();
     expect(s.player.velocity.z).toBeGreaterThan(250);
+  });
+});
+
+describe('air strafing through the whole input pipeline', () => {
+  /** Bhops forward then strafes for `frames` frames at 100 fps, turning `dx` counts per frame. Returns the final 2D speed. */
+  async function strafe(side: '+moveleft' | '+moveright', dx: number, frames = 150) {
+    const t = await loadedGame(makeTestMap({ zones: [
+      { type: 'start', group: 0, index: 0, mins: v3(-1900, -128, 0), maxs: v3(-1700, 128, 128) },
+      { type: 'end', group: 0, index: 0, mins: v3(1900, 1900, 0), maxs: v3(2000, 2000, 128) },
+    ] }));
+    const s = t.game.session!;
+    t.game.teleportPlayer(v3(-1800, 0, 0), { pitch: 0, yaw: 0, roll: 0 }, v3());
+    t.game.executeCommand('+forward');
+    let now = 1000;
+    for (let i = 0; i < 60; i++) t.game.frame((now += 10)); // run out of the start zone at 250 u/s
+    t.game.executeCommand(`+jump; -forward; ${side}`); // autobhop + strafe
+    const v0 = Math.hypot(s.player.velocity.x, s.player.velocity.y);
+    for (let i = 0; i < frames; i++) {
+      t.game.input.addMouse(dx, 0);
+      t.game.frame((now += 10));
+    }
+    t.game.executeCommand(`-jump; ${side.replace('+', '-')}`);
+    return { v0, v1: Math.hypot(s.player.velocity.x, s.player.velocity.y), t };
+  }
+
+  it('A + turning left (mouse left) gains speed, with ~100% sync', async () => {
+    const { v0, v1, t } = await strafe('+moveleft', -20); // 1.1 degrees per tick to the left
+    if (process.env.SURF_REPORT_TIMINGS) console.log(`[strafe] synced left: ${v0.toFixed(1)} -> ${v1.toFixed(1)} u/s`);
+    expect(v0).toBeGreaterThan(240);
+    expect(v1).toBeGreaterThan(v0 + 60);
+    const hud = t.game.getHud();
+    expect(hud.timer.state).toBe('running');
+    expect(hud.sync).toBeGreaterThan(95);
+    expect(hud.strafes).toBeGreaterThanOrEqual(1);
+    expect(hud.jumps).toBeGreaterThan(0);
+  });
+
+  it('D + turning right gains speed too', async () => {
+    const { v0, v1 } = await strafe('+moveright', 20);
+    expect(v1).toBeGreaterThan(v0 + 60);
+  });
+
+  it('strafing against the turn gains nothing and has no sync', async () => {
+    // a 66 degree counter-turn: only the first tick (wishdir perpendicular to the velocity) can add up to 30 u/s
+    const { v0, v1, t } = await strafe('+moveleft', 40, 30);
+    expect(v1).toBeLessThan(v0 + 31);
+    expect(t.game.getHud().sync).toBeLessThan(5);
   });
 });
 

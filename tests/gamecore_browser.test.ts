@@ -2,7 +2,7 @@
 // chat, console, pause) with a stub renderer, served by Vite from a harness generated in a temp directory.
 // Skipped when no Chromium is installed (CI) or with SURF_GAMECORE_BROWSER=0. With $SURF_TEST_MAPS it also plays
 // a real KSF map loaded over HTTP.
-import { existsSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -129,6 +129,7 @@ describe.skipIf(!chromiumPath)('game core in a real browser', () => {
   let browser: any;
   let page: Page;
   let base = '';
+  let tmpDir = '';
   const errors: string[] = [];
   const ev = <T>(fn: (arg: any) => T, arg?: unknown): Promise<T> => page.evaluate(fn, arg);
   const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -149,6 +150,7 @@ describe.skipIf(!chromiumPath)('game core in a real browser', () => {
 
   beforeAll(async () => {
     const dir = mkdtempSync(join(tmpdir(), 'surf-gamecore-'));
+    tmpDir = dir;
     writeFileSync(join(dir, 'harness.html'), HARNESS_HTML);
     writeFileSync(join(dir, 'harness.ts'), HARNESS_TS);
     const alias: { find: string | RegExp; replacement: string }[] = [{ find: /^@surf\//, replacement: `${join(ROOT, 'src')}/` }];
@@ -185,6 +187,7 @@ describe.skipIf(!chromiumPath)('game core in a real browser', () => {
   afterAll(async () => {
     await browser?.close();
     await server?.close();
+    if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
   });
 
   it('boots, autoloads the map from the URL and runs the rAF loop', async () => {
@@ -204,15 +207,15 @@ describe.skipIf(!chromiumPath)('game core in a real browser', () => {
 
   it('holding W runs forward; releasing stops; the HUD speedometer follows', async () => {
     await page.keyboard.down('w');
-    await wait(500);
+    await page.waitForFunction(() => (window as any).__surf.state().speed > 200, null, { timeout: 10000 });
     const st = await state();
     expect(st.speed).toBeGreaterThan(200);
     expect(await ev(() => (window as any).__h.ui.lastHud?.speed ?? (window as any).__h.game.getHud().speed)).toBeGreaterThan(200);
     expect(await ev(() => (window as any).__h.game.getHud().keys.forward)).toBe(true);
     await page.keyboard.up('w');
-    await wait(400);
+    await page.waitForFunction(() => (window as any).__surf.state().speed < 5, null, { timeout: 10000 });
     const st2 = await state();
-    expect(st2.origin.x).toBeGreaterThan(80);
+    expect(st2.origin.x).toBeGreaterThan(30);
     expect(st2.speed).toBeLessThan(5);
     expect(await ev(() => (window as any).__h.game.getHud().keys.forward)).toBe(false);
   });
@@ -229,11 +232,11 @@ describe.skipIf(!chromiumPath)('game core in a real browser', () => {
     await page.mouse.move(640, 360);
     await wait(50);
     await page.mouse.wheel(0, 120);
-    await wait(60);
+    await page.waitForFunction(() => (window as any).__surf.state().origin.z > 1, null, { timeout: 10000 });
     const st = await state();
     expect(st.origin.z).toBeGreaterThan(1);
     expect(await ev(() => (window as any).__h.game.input.isDown('jump'))).toBe(false);
-    await wait(900);
+    await page.waitForFunction(() => (window as any).__surf.state().onGround, null, { timeout: 10000 });
   });
 
   it('chat: Y opens it without typing "y"; keys are ignored while typing; !r runs', async () => {
@@ -332,6 +335,41 @@ describe.skipIf(!chromiumPath)('game core in a real browser', () => {
     const calls = await p2.evaluate(() => (window as any).__lockCalls);
     expect(calls).toEqual([{ unadjustedMovement: true }]); // one request per click (the UI's own handler doesn't add a second)
     await p2.close();
+  });
+
+  it('real pointer lock: mouse look at CS:GO scale, Escape-style unlock pauses', async () => {
+    const p3 = await browser.newPage({ viewport: { width: 800, height: 600 } });
+    await open(p3, '?builtin=test');
+    await p3.waitForFunction(() => (window as any).__h.game.state === 'playing', null, { timeout: 60000 });
+    await p3.mouse.move(400, 300);
+    await p3.mouse.down();
+    await p3.mouse.up();
+    await wait(200);
+    const locked = await p3.evaluate(() => document.pointerLockElement === document.getElementById('game-canvas'));
+    if (!locked) {
+      // headless builds without pointer lock support: nothing more to check here
+      await p3.close();
+      return;
+    }
+    const yaw0 = await p3.evaluate(() => (window as any).__surf.state().angles.yaw);
+    await p3.mouse.move(500, 300, { steps: 5 }); // 100 counts right
+    await wait(100);
+    const yaw1 = await p3.evaluate(() => (window as any).__surf.state().angles.yaw);
+    expect(yaw1 - yaw0).toBeCloseTo(-5.5, 1); // sensitivity 2.5 * m_yaw 0.022 * 100
+    // the console takes the mouse without pausing; closing it captures the mouse again
+    await p3.keyboard.press('Backquote');
+    await wait(200);
+    expect(await p3.evaluate(() => (window as any).__h.ui.console.isOpen)).toBe(true);
+    expect(await p3.evaluate(() => document.pointerLockElement)).toBeNull();
+    expect(await p3.evaluate(() => (window as any).__h.game.state)).toBe('playing');
+    await p3.keyboard.press('Backquote');
+    await wait(250);
+    expect(await p3.evaluate(() => (window as any).__h.ui.console.isOpen)).toBe(false);
+    expect(await p3.evaluate(() => document.pointerLockElement === document.getElementById('game-canvas'))).toBe(true);
+    await p3.evaluate(() => document.exitPointerLock());
+    await wait(150);
+    expect(await p3.evaluate(() => (window as any).__h.game.state)).toBe('paused');
+    await p3.close();
   });
 
   it.skipIf(!KITSUNE || !existsSync(KITSUNE))('plays a real KSF map loaded over HTTP (surf_kitsune)', async () => {

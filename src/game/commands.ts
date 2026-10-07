@@ -6,7 +6,7 @@
 //
 // Chat semantics follow SourceMod: "!cmd" is shown in chat and runs the command, "/cmd" runs it silently; a
 // '!' or '/' word that is not a command is ordinary chat. Replies carry a SurfTimer-style "[Surf]" prefix.
-import { QAngle, qa } from '../core/angles';
+import { QAngle } from '../core/angles';
 import {
   conPrint,
   console_,
@@ -146,10 +146,6 @@ export function chatLine(text: string, team: boolean): ChatSegment[] {
   if (team) out.push({ text: '(Counter-Terrorist) ', color: 'team' });
   out.push({ text: playerName(), color: 'team' }, { text: ' : ', color: 'default' }, { text, color: 'default' });
   return out;
-}
-
-function courseName(group: number): string {
-  return group > 0 ? `Bonus ${group}` : 'Main';
 }
 
 function currentGroup(timer: GameTimer): number {
@@ -985,6 +981,10 @@ export function registerGameCommands(ctx: CommandContext): void {
     const ctx = c();
     const s = ctx.session;
     const o = s?.player.origin;
+    const secs = Math.floor((s as { time?: number } | null)?.time ?? 0);
+    const connected = `${String(Math.floor(secs / 60)).padStart(2, '0')}:${String(secs % 60).padStart(2, '0')}`;
+    const bots = s && (s.replay as { getPb?: (g: number) => unknown }).getPb?.(currentGroup(s.timer)) ? 1 : 0;
+    const name = `"${playerName()}"`;
     conPrint(
       [
         'hostname: SURF Local Server',
@@ -993,9 +993,10 @@ export function registerGameCommands(ctx: CommandContext): void {
         'os      : Browser',
         'type    : listen',
         `map     : ${ctx.mapName ?? '<none>'}${o ? ` at: ${Math.round(o.x)} x, ${Math.round(o.y)} y, ${Math.round(o.z)} z` : ''}`,
-        `players : 1 humans, ${s && s.replay.spectating ? 1 : 0} bots (1 max)`,
+        `players : 1 humans, ${bots} bots (${1 + bots} max)`,
         '# userid name                uniqueid            connected ping loss state  rate',
-        `#      2 "${playerName()}"`.padEnd(30) + ' STEAM_1:0:0          00:00     0    0 active 786432',
+        `#      2 ${name.padEnd(19)} STEAM_1:0:0         ${connected.padEnd(9)} 0    0    active 786432`,
+        ...(bots ? [`#      3 "PB Replay"         BOT                                     active`] : []),
       ].join('\n'),
     );
   });
