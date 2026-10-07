@@ -523,6 +523,14 @@ describe('gameplay', () => {
     expect(t.renderer.settings.brightness).toBe(1.5);
   });
 
+  it('HUD: origin is the eye position (cl_showpos), like getpos', async () => {
+    const t = await loadedGame();
+    const s = t.game.session!;
+    const hud = t.game.getHud();
+    expect(hud.origin.x).toBeCloseTo(s.player.origin.x, 6);
+    expect(hud.origin.z).toBeCloseTo(s.player.origin.z + s.player.viewOffsetZ, 6);
+  });
+
   it('HUD: keys, visibility, practice and noclip flags', async () => {
     const t = await loadedGame();
     t.game.executeCommand('+moveleft; +jump');

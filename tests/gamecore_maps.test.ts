@@ -65,6 +65,7 @@ describe.skipIf(!available.length)('game core on real maps', () => {
       }
       t.game.executeCommand('-forward; -jump');
       const ms = (performance.now() - t0) / 400;
+      if (process.env.SURF_REPORT_TIMINGS) console.log(`[timing] ${name}: ${ms.toFixed(3)} ms per tick (entities ${map.entities.length}, zones ${s.timer.zoneSource})`);
       expect(Number.isFinite(s.player.origin.x), name).toBe(true);
       expect(ms, `${name}: ${ms.toFixed(3)} ms per tick`).toBeLessThan(5);
       // !r always works and brings us back
