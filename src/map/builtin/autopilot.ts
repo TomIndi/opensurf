@@ -22,6 +22,17 @@ export interface PilotEvent {
 
 const RAD = 180 / Math.PI;
 
+export interface AutopilotOptions {
+  /** Overrides every ramp's depth band (0 = ridge, 1 = bottom edge): a "high" or "low" surfer. */
+  band?: [number, number];
+  /**
+   * 'smooth' (default): small continuous corrections that keep the slide down the face slow (a decent player).
+   * 'coarse': hold the key only when below the band and release only when above it - big slide/brake cycles
+   * that waste speed (a beginner).
+   */
+  style?: 'smooth' | 'coarse';
+}
+
 export class Autopilot {
   /** All course ramps in run order. */
   readonly ramps: (CourseRamp & { section: number })[] = [];
@@ -43,6 +54,7 @@ export class Autopilot {
   constructor(
     readonly course: Course,
     readonly world: TraceWorld,
+    readonly opts: AutopilotOptions = {},
   ) {
     course.sections.forEach((s, si) => {
       for (const r of s.ramps) this.ramps.push({ ...r, section: si });
@@ -111,9 +123,14 @@ export class Autopilot {
 
     if (ps.onGround) {
       // rooms, platforms, the end: walk toward where we want to go
-      const target = this.leaving && this.cur === this.ramps.length - 1 ? this.course.finish : this.leaving ? this.landTarget(this.cur + 1) : this.landTarget(this.cur);
-      this.mode = this.leaving && this.cur === this.ramps.length - 1 ? 'finish' : 'ground';
-      cmd.viewangles.yaw = Math.atan2(target.y - o.y, target.x - o.x) * RAD;
+      const finishing = this.leaving && this.cur === this.ramps.length - 1;
+      this.mode = finishing ? 'finish' : 'ground';
+      if (finishing) {
+        const target = this.course.finish;
+        cmd.viewangles.yaw = Math.atan2(target.y - o.y, target.x - o.x) * RAD;
+      } else {
+        cmd.viewangles.yaw = this.pursuitYaw(this.leaving ? this.cur + 1 : this.cur, o, Math.max(speed, 250));
+      }
       cmd.forwardmove = 450;
       return;
     }
@@ -126,34 +143,41 @@ export class Autopilot {
     }
 
     if (this.contact && !this.leaving) {
-      // ---- surf: look along the ramp (following the velocity a little), hold a depth band
+      // ---- surf: look along the ramp and hold the strafe key toward it whenever the slide down the face
+      // is faster than the depth error asks for (small continuous corrections waste little speed)
       this.mode = 'surf';
       const frac = f.lateral / r.ramp.width;
-      const band = r.band ?? [0.3, 0.55];
-      if (frac > band[1]) this.holding = true;
-      else if (frac < band[0]) this.holding = false;
+      const band = this.opts.band ?? r.band ?? [0.3, 0.55];
+      const mid = (band[0] + band[1]) / 2;
+      const vOut = v.x * f.out.x + v.y * f.out.y;
+      const err = (frac - mid) * r.ramp.width; // > 0: too low on the face
+      const vDes = Math.max(-120, Math.min(120, -err * 1.5));
+      if (this.opts.style === 'coarse') {
+        if (frac > band[1]) this.holding = true;
+        else if (frac < band[0]) this.holding = false;
+      } else {
+        this.holding = frac > band[1] || (frac >= band[0] && vOut > vDes);
+      }
       const tyaw = Math.atan2(f.tangent.y, f.tangent.x) * RAD;
       const outSign = r.face === 'left' ? 1 : -1;
-      let rel = speed > 50 ? angleDiff(vyaw, tyaw) * outSign : 0;
-      rel = Math.max(-5, Math.min(30, rel));
+      let rel = 0;
+      if (speed > 50 && !this.holding) rel = Math.max(-3, Math.min(12, angleDiff(vyaw, tyaw) * outSign));
       cmd.viewangles.yaw = normalizeAngle(tyaw + rel * outSign);
       cmd.sidemove = this.holding ? (r.face === 'left' ? 450 : -450) : 0;
       return;
     }
 
-    // ---- airborne: steer toward the next landing (or the finish)
-    let target: Vec3;
-    if (!this.leaving) {
-      this.mode = 'approach';
-      target = this.landTarget(this.cur);
-    } else if (this.cur + 1 < this.ramps.length) {
-      this.mode = 'fly';
-      target = this.landTarget(this.cur + 1);
+    // ---- airborne: line up with the next ramp (or head for the finish)
+    let want: number;
+    if (!this.leaving || this.cur + 1 < this.ramps.length) {
+      const ti = this.leaving ? this.cur + 1 : this.cur;
+      this.mode = this.leaving ? 'fly' : 'approach';
+      want = this.pursuitYaw(ti, o, speed);
     } else {
       this.mode = 'finish';
-      target = this.course.finish;
+      const target = this.course.finish;
+      want = Math.atan2(target.y - o.y, target.x - o.x) * RAD;
     }
-    const want = Math.atan2(target.y - o.y, target.x - o.x) * RAD;
     if (speed < 60) {
       cmd.viewangles.yaw = want;
       cmd.forwardmove = 450;
@@ -162,6 +186,25 @@ export class Autopilot {
     const err = angleDiff(want, vyaw);
     cmd.viewangles.yaw = vyaw;
     if (Math.abs(err) > 1) cmd.sidemove = err > 0 ? -450 : 450;
+  }
+
+  /**
+   * Heading toward the surf line of ramp i (the middle of its depth band), pure-pursuit style: a point
+   * `look` units ahead on that line, so the run arrives lined up with the ramp instead of crossing it.
+   */
+  pursuitYaw(i: number, o: Vec3, speed: number): number {
+    const r = this.ramps[i];
+    const f = rampFrame(r.ramp, r.face, o);
+    const band = this.opts.band ?? r.band ?? [0.3, 0.55];
+    const wantLat = ((band[0] + band[1]) / 2) * r.ramp.width;
+    const latErr = f.lateral - wantLat;
+    const look = Math.max(320, speed * 0.6);
+    let corr = Math.atan2(-latErr, look);
+    corr = Math.max(-1.1, Math.min(1.1, corr));
+    const tyaw = Math.atan2(f.tangent.y, f.tangent.x);
+    // `out` is left of the tangent for a left face: moving toward -out is a clockwise turn there
+    const sign = r.face === 'left' ? 1 : -1;
+    return (tyaw + corr * sign) * RAD;
   }
 
   private log(kind: 'land' | 'leave', ps: PlayerState): void {

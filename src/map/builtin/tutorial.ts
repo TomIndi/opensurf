@@ -1,60 +1,73 @@
-// surf_tutorial - Tier 1, linear. A start room drops onto a long, wide, gently descending first ramp; then
-// eight more ramps with growing gaps (straight follow-ups, a left/right zigzag, a transfer to a parallel
-// ramp) lead to a big end platform. Four sections with checkpoints; falling sends you back to the start
-// of the section you are in.
-import { Vec3, v3 } from '../../core/vec3';
+// surf_tutorial - Tier 1, linear.
+//
+// A start room opens onto a long, wide, gently descending first ramp. Seven more ramps follow with
+// growing gaps: a straight follow-up, a left/right zigzag across a corridor, a transfer to a parallel ramp
+// and two long jumps, ending on a big platform. Four sections, each colour-coded and marked by a glowing gate
+// with a checkpoint zone; falling sends you back to the start of the section you are in, where a drop-in
+// (a steeper start that eases out) gives the speed back.
+import { v3 } from '../../core/vec3';
 import { MapBuilder, RampRecord } from './builder';
 import { BuiltCourse, Course, CourseRamp, CourseSection, RampChain, rampPoint } from './course';
-import { addSectionVoid, rampZoneBox, stageDestination } from './parts';
+import { addRampGate, addVoidTeleports, boxSurface, rampBottomInRect, rampZoneBox, stageDestination } from './parts';
 
 export function buildTutorial(): BuiltCourse {
   const b = new MapBuilder('surf_tutorial', {
     sky: 'sky_day01_01',
-    fog: { enabled: true, color: [0.66, 0.77, 0.9], start: 7000, end: 30000, maxDensity: 0.55 },
+    fog: { enabled: true, color: [0.68, 0.78, 0.9], start: 6000, end: 28000, maxDensity: 0.5 },
   });
   const FLOOR = 'builtin/floor_grey';
   const WALL = 'builtin/wall_grid';
   const SIDE = 'builtin/wall_dark';
-  const Z0 = 7000;
+  /** Start room floor height and front wall x. */
+  const Z0 = 6400;
+  const X0 = -14600;
 
   // ---------------------------------------------------------------- start room (spawn, start zone)
-  const roomMin = v3(-640, -256, Z0);
-  const roomMax = v3(0, 256, Z0 + 288);
+  const roomMin = v3(X0 - 640, -256, Z0);
+  const roomMax = v3(X0, 256, Z0 + 288);
   b.addRoom(roomMin, roomMax, { floor: FLOOR, wall: WALL, ceiling: 'builtin/wall_grey' }, [
-    { side: '+x', a0: -224, a1: 224, z0: Z0, z1: Z0 + 240 },
+    { side: '+x', a0: -208, a1: 208, z0: Z0, z1: Z0 + 240 },
   ]);
-  b.addTopTrim(v3(-640, -256, Z0 - 16), v3(0, 256, Z0), 'builtin/glow_cyan', 6);
-  const spawn = v3(-512, 0, Z0);
+  b.addTopTrim(v3(roomMin.x, roomMin.y, Z0 - 16), v3(roomMax.x, roomMax.y, Z0), 'builtin/glow_cyan', 6);
+  const spawn = v3(X0 - 512, 0, Z0);
   b.addSpawn(spawn, 0);
   b.addDestination('tut_start', spawn, 0);
-  b.addZone('start', v3(-624, -240, Z0), v3(-16, 240, Z0 + 160), { spawn: { origin: spawn, yaw: 0 } });
+  b.addZone('start', v3(roomMin.x + 16, roomMin.y + 16, Z0), v3(X0 - 16, roomMax.y - 16, Z0 + 160), { spawn: { origin: spawn, yaw: 0 } });
 
   // ---------------------------------------------------------------- ramps
+  // Gap drops are ballistic (RampChain.autoDrop): `speed` is the exit speed a gap is designed for - inside a
+  // section the speed a checkpoint restart reaches (so restarts always make it), between sections the
+  // through-run speed. Faster runs simply land deeper into the next ramp.
   const w1 = 384;
-  const chain = new RampChain(b, v3(-112, -w1 * 0.45, Z0 - 96), 0);
+  const chain = new RampChain(b, v3(X0 - 112, -w1 * 0.45, Z0 - 96), 0);
   const R: RampRecord[] = [];
   const mats = ['builtin/ramp_cyan', 'builtin/ramp_orange', 'builtin/ramp_green', 'builtin/ramp_purple'];
+  const glows = ['builtin/glow_cyan', 'builtin/glow_orange', 'builtin/glow_green', 'builtin/glow_purple'];
+  const dropIn = { angle: 20, length: 960, steps: 8 };
+  const W = 352;
   // section 1: the long first ramp and a straight follow-up
-  R.push(chain.straight({ gap: 0, drop: 0, length: 5200, descent: 7, side: 'left', width: w1, mat: mats[0], sideMat: SIDE, name: 'ramp 1' }));
-  R.push(chain.straight({ gap: 320, drop: 380, length: 3200, descent: 7, side: 'left', width: 352, mat: mats[0], sideMat: SIDE, name: 'ramp 2' }));
-  // section 2: left/right zigzag
-  R.push(chain.straight({ gap: 448, shift: 800, drop: 440, length: 3200, descent: 7, side: 'right', width: 352, mat: mats[1], sideMat: SIDE, name: 'ramp 3' }));
-  R.push(chain.straight({ gap: 576, shift: -800, drop: 500, length: 3200, descent: 7, side: 'left', width: 352, mat: mats[1], sideMat: SIDE, name: 'ramp 4' }));
-  // section 3: transfer from ramp 5 to the parallel ramp 6
-  R.push(chain.straight({ gap: 640, shift: 0, drop: 520, length: 3600, descent: 7, side: 'left', width: 352, mat: mats[2], sideMat: SIDE, name: 'ramp 5' }));
-  const r5 = R[4];
-  R.push(chain.straight({ gap: -1600, shift: 960, drop: 520, length: 3600, descent: 7, side: 'right', width: 352, mat: mats[2], sideMat: SIDE, name: 'ramp 6' }));
-  // section 4: the long gaps
-  R.push(chain.straight({ gap: 704, shift: 0, drop: 560, length: 3200, descent: 7, side: 'right', width: 352, mat: mats[3], sideMat: SIDE, name: 'ramp 7' }));
-  R.push(chain.straight({ gap: 832, shift: 0, drop: 600, length: 3000, descent: 7, side: 'right', width: 352, mat: mats[3], sideMat: SIDE, name: 'ramp 8' }));
+  R.push(chain.straight({ gap: 0, drop: 0, length: 4200, descent: 7, side: 'left', width: w1, mat: mats[0], sideMat: SIDE, name: 'ramp 1' }));
+  R.push(chain.straight({ gap: 320, speed: 900, land: 400, length: 3000, descent: 5, side: 'left', width: W, mat: mats[0], sideMat: SIDE, name: 'ramp 2' }));
+  // section 2: left/right zigzag across a corridor
+  R.push(chain.straight({ gap: 448, shift: 800, travel: 500, speed: 1100, land: 560, length: 3200, descent: 5, dropIn, side: 'right', width: W, mat: mats[1], sideMat: SIDE, name: 'ramp 3' }));
+  R.push(chain.straight({ gap: 576, shift: -800, travel: 500, speed: 900, land: 520, length: 3200, descent: 5, side: 'left', width: W, mat: mats[1], sideMat: SIDE, name: 'ramp 4' }));
+  // section 3: transfer from ramp 5 to the parallel ramp 6 (a bit lower, across a gap)
+  R.push(chain.straight({ gap: 640, speed: 1300, land: 560, length: 3000, descent: 5, dropIn, side: 'left', width: W, mat: mats[2], sideMat: SIDE, name: 'ramp 5' }));
+  const r5 = R[R.length - 1];
+  // ramp 6 starts 1400 units into ramp 5 (past its drop-in), 240 units below ramp 5's ridge there
+  const r6drop = chain.pos.z - (rampPoint(r5, 'left', 1400, 0).z - 240);
+  R.push(chain.straight({ gap: -1600, shift: 832, drop: r6drop, length: 3800, descent: 5, side: 'right', width: W, mat: mats[2], sideMat: SIDE, name: 'ramp 6' }));
+  // section 4: the long jumps
+  R.push(chain.straight({ gap: 704, speed: 1500, land: 600, length: 3200, descent: 5, dropIn, side: 'right', width: W, mat: mats[3], sideMat: SIDE, name: 'ramp 7' }));
+  R.push(chain.straight({ gap: 832, speed: 1000, land: 560, length: 3200, descent: 5, side: 'right', width: W, mat: mats[3], sideMat: SIDE, name: 'ramp 8' }));
 
   // ---------------------------------------------------------------- end platform
   const last = R[R.length - 1];
   const endRidge = last.points[last.points.length - 1];
-  const exitPoint = rampPoint(last, 'right', 3000, 0.45);
+  const exitPoint = rampPoint(last, 'right', 3200, 0.45);
   const endTop = endRidge.z - 900;
-  const endMin = v3(endRidge.x + 600, exitPoint.y - 640, endTop - 64);
-  const endMax = v3(endRidge.x + 600 + 2048, exitPoint.y + 640, endTop);
+  const endMin = v3(endRidge.x + 576, exitPoint.y - 640, endTop - 64);
+  const endMax = v3(endRidge.x + 576 + 1536, exitPoint.y + 640, endTop);
   b.addBox(endMin, endMax, { top: 'builtin/floor_green', sides: SIDE, bottom: SIDE });
   b.addTopTrim(endMin, endMax, 'builtin/glow_green', 12);
   // backstop wall
@@ -62,12 +75,24 @@ export function buildTutorial(): BuiltCourse {
   b.addZone('end', v3(endMin.x, endMin.y, endTop), v3(endMax.x, endMax.y, endTop + 256));
   const finish = v3((endMin.x + endMax.x) / 2, exitPoint.y, endTop);
 
-  // ---------------------------------------------------------------- sections, checkpoints, fail teleports
-  const sectionRamps = [
-    [{ ramp: R[0], face: 'left' as const }, { ramp: R[1], face: 'left' as const }],
-    [{ ramp: R[2], face: 'right' as const }, { ramp: R[3], face: 'left' as const }],
-    [{ ramp: R[4], face: 'left' as const, exitAt: 2400 }, { ramp: R[5], face: 'right' as const }],
-    [{ ramp: R[6], face: 'right' as const }, { ramp: R[7], face: 'right' as const }],
+  // ---------------------------------------------------------------- sections, checkpoints, gates
+  const sectionRamps: CourseRamp[][] = [
+    [
+      { ramp: R[0], face: 'left' },
+      { ramp: R[1], face: 'left' },
+    ],
+    [
+      { ramp: R[2], face: 'right' },
+      { ramp: R[3], face: 'left' },
+    ],
+    [
+      { ramp: R[4], face: 'left', exitAt: 1650 },
+      { ramp: R[5], face: 'right' },
+    ],
+    [
+      { ramp: R[6], face: 'right' },
+      { ramp: R[7], face: 'right' },
+    ],
   ];
   const sections: CourseSection[] = [];
   for (let s = 0; s < sectionRamps.length; s++) {
@@ -79,14 +104,35 @@ export function buildTutorial(): BuiltCourse {
       b.addDestination(dest, d.origin, d.yaw);
       const zb = rampZoneBox(first.ramp, first.face);
       b.addZone('checkpoint', zb.mins, zb.maxs, { index: s });
+      addRampGate(b, first.ramp, first.face, 64, glows[s]);
     }
-    sections.push({ name: s === 0 ? 'Start' : `Checkpoint ${s}`, dest, ramps: sectionRamps[s] as CourseRamp[], marker: s });
+    sections.push({ name: s === 0 ? 'Start' : `Checkpoint ${s}`, dest, ramps: sectionRamps[s], marker: s });
   }
-  void r5;
-  addSectionVoid(b, sections, endMin, endMax);
+
+  // ---------------------------------------------------------------- the void: fail teleports + ground far below
+  const groundZ = Math.min(...R.map((r) => rampBottomInRect(r, -1e9, 1e9, -1e9, 1e9)), endTop - 64) - 1400;
+  const Y0 = -4000;
+  const Y1 = 4000;
+  let a0 = X0 - 1200;
+  for (let s = 0; s < sections.length; s++) {
+    const next = sections[s + 1]?.ramps[0].ramp;
+    // a section's void reaches 448 units into the next section's first ramp: missing it sends you back here
+    const a1 = next ? next.points[0].x + 448 : endMax.x + 256;
+    addVoidTeleports(b, {
+      axis: 'x',
+      a0,
+      a1,
+      b0: Y0,
+      b1: Y1,
+      floorZ: groundZ - 512,
+      dest: sections[s].dest,
+      ramps: [...sections[s].ramps.map((c) => c.ramp), ...(next ? [next] : [])],
+      extra: [boxSurface(endMin, endMax)],
+    });
+    a0 = a1;
+  }
+  b.addBox(v3(X0 - 1200, Y0, groundZ - 64), v3(a0, Y1, groundZ), { top: 'builtin/grid_blue', sides: null, bottom: null });
 
   const course: Course = { id: 'surf_tutorial', type: 'linear', sections, finish };
   return { map: b.build(), course, builder: b };
 }
-
-export type { Vec3 };

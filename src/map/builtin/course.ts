@@ -69,13 +69,28 @@ export interface StraightSpec {
   gap: number;
   /** Lateral shift of the new ridge start (+ = left of the new direction). */
   shift?: number;
-  /** Ridge drop from the previous ridge end to this ridge start. */
-  drop: number;
+  /**
+   * Ridge drop from the previous ridge end to this ridge start. When omitted it is computed ballistically from
+   * `speed` and `land`: a run leaving the previous ramp at `speed` (following its ridge descent, at the same
+   * depth on the face) lands `land` units into this ramp.
+   */
+  drop?: number;
+  /** Design exit speed of the previous ramp (for the automatic drop). */
+  speed?: number;
+  /** Design landing distance into this ramp (for the automatic drop; default max(400, gap)). */
+  land?: number;
+  /** Lateral distance the run travels across the gap (for the automatic drop; default |shift|). */
+  travel?: number;
   /** Change of direction (degrees, + = left turn). */
   turn?: number;
   length: number;
-  /** Ridge descent along the length, degrees. */
+  /** Ridge descent along the length, degrees (at the end of the ramp when `dropIn` is set). */
   descent: number;
+  /**
+   * Drop-in start: the ridge begins `dropIn.angle` degrees steep and eases to `descent` over the first
+   * `dropIn.length` units (in `dropIn.steps` straight pieces), so a standing start picks up speed quickly.
+   */
+  dropIn?: { angle: number; length: number; steps?: number };
   side: RampSide;
   width: number;
   /** Surf face normal.z (sets the height for a level ridge). */
@@ -94,6 +109,8 @@ export class RampChain {
   /** End of the last ridge. */
   pos: Vec3;
   yaw: number;
+  /** Ridge descent (degrees) of the last ramp. */
+  lastDescent = 0;
   constructor(
     private readonly b: MapBuilder,
     start: Vec3,
@@ -110,17 +127,48 @@ export class RampChain {
     return v3(this.pos.x + d.x * along + l.x * left, this.pos.y + d.y * along + l.y * left, this.pos.z + up);
   }
 
+  /** The ballistic drop for a gap (see StraightSpec.drop). */
+  autoDrop(s: { gap: number; shift?: number; speed?: number; land?: number; travel?: number; descent: number }): number {
+    if (!(s.speed && s.speed > 0)) throw new Error('RampChain: a ramp without `drop` needs a design `speed`');
+    const land = s.land ?? Math.max(400, s.gap);
+    const x = Math.hypot(s.gap + land, s.travel ?? Math.abs(s.shift ?? 0));
+    const t = x / s.speed;
+    const prevTan = Math.tan((this.lastDescent * Math.PI) / 180);
+    const nextTan = Math.tan((s.descent * Math.PI) / 180);
+    // fall of the run (ridge-following exit velocity + gravity) minus the next face's own descent until the landing
+    return x * prevTan + 400 * t * t - land * nextTan;
+  }
+
   straight(s: StraightSpec): RampRecord {
     this.yaw += s.turn ?? 0;
     const d = dirOf(this.yaw);
     const l = leftOf(this.yaw);
     const shift = s.shift ?? 0;
-    const start = v3(this.pos.x + d.x * s.gap + l.x * shift, this.pos.y + d.y * s.gap + l.y * shift, this.pos.z - s.drop);
-    const fall = s.length * Math.tan((s.descent * Math.PI) / 180);
-    const end = v3(start.x + d.x * s.length, start.y + d.y * s.length, start.z - fall);
-    const rec = this.b.addRamp({
-      start,
-      end,
+    const drop = s.drop ?? this.autoDrop(s);
+    const start = v3(this.pos.x + d.x * s.gap + l.x * shift, this.pos.y + d.y * s.gap + l.y * shift, this.pos.z - drop);
+    // ridge profile: optional drop-in pieces, then the constant descent
+    const pts: Vec3[] = [start];
+    let along = 0;
+    let z = start.z;
+    const pushTo = (len: number, deg: number): void => {
+      along += len;
+      z -= len * Math.tan((deg * Math.PI) / 180);
+      pts.push(v3(start.x + d.x * along, start.y + d.y * along, z));
+    };
+    if (s.dropIn && s.dropIn.length > 0) {
+      const steps = Math.max(1, s.dropIn.steps ?? 6);
+      const piece = Math.min(s.dropIn.length, s.length) / steps;
+      for (let i = 0; i < steps; i++) {
+        // ease from dropIn.angle to descent (cosine ease-out)
+        const t = (i + 0.5) / steps;
+        const k = 0.5 + 0.5 * Math.cos(Math.PI * t);
+        pushTo(piece, s.descent + (s.dropIn.angle - s.descent) * k);
+      }
+    }
+    if (s.length - along > 1e-6) pushTo(s.length - along, s.descent);
+    const end = pts[pts.length - 1];
+    const rec = this.b.addRampPath({
+      points: pts,
       width: s.width,
       height: rampHeightFor(s.width, s.nz ?? 0.5),
       side: s.side,
@@ -130,6 +178,7 @@ export class RampChain {
       name: s.name,
     });
     this.pos = v3clone(end);
+    this.lastDescent = s.descent;
     return rec;
   }
 
@@ -142,7 +191,8 @@ export class RampChain {
     const d = dirOf(this.yaw);
     const l = leftOf(this.yaw);
     const shift = s.shift ?? 0;
-    const start = v3(this.pos.x + d.x * s.gap + l.x * shift, this.pos.y + d.y * s.gap + l.y * shift, this.pos.z - s.drop);
+    const drop = s.drop ?? this.autoDrop(s);
+    const start = v3(this.pos.x + d.x * s.gap + l.x * shift, this.pos.y + d.y * s.gap + l.y * shift, this.pos.z - drop);
     const sign = s.angle >= 0 ? 1 : -1;
     // arc center lies to the turning side
     const c = v3(start.x + l.x * s.radius * sign, start.y + l.y * s.radius * sign, 0);
@@ -169,6 +219,7 @@ export class RampChain {
     const rec = this.b.addRampPath(opts);
     this.pos = v3clone(pts[pts.length - 1]);
     this.yaw += s.angle;
+    this.lastDescent = s.descent;
     return rec;
   }
 }
@@ -208,28 +259,29 @@ export function rampLength(r: RampRecord): number {
 /** Local frame of a ramp at the horizontal position of `p` (clamped to the ramp's extent). */
 export function rampFrame(r: RampRecord, face: 'left' | 'right', p: Vec3): RampFrame {
   const pts = r.points;
+  const last = pts.length - 2;
   let best = 0;
   let bestT = 0;
   let bestD = Infinity;
-  for (let i = 0; i + 1 < pts.length; i++) {
+  let rawT = 0;
+  for (let i = 0; i <= last; i++) {
     const a = pts[i];
     const b = pts[i + 1];
     const dx = b.x - a.x;
     const dy = b.y - a.y;
-    const l2 = dx * dx + dy * dy;
-    let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2;
+    const t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / (dx * dx + dy * dy);
     const tc = Math.max(0, Math.min(1, t));
-    const qx = a.x + dx * tc;
-    const qy = a.y + dy * tc;
-    const d = Math.hypot(p.x - qx, p.y - qy);
-    // prefer the segment whose slab contains the point
-    const pen = t < 0 || t > 1 ? 1e6 * Math.min(Math.abs(t), Math.abs(t - 1)) : 0;
-    if (d + pen < bestD) {
-      bestD = d + pen;
+    const d = Math.hypot(p.x - (a.x + dx * tc), p.y - (a.y + dy * tc));
+    if (d < bestD - 1e-9) {
+      bestD = d;
       best = i;
-      bestT = i === 0 ? Math.min(t, 1) : i === pts.length - 2 ? Math.max(t, 0) : tc;
+      bestT = tc;
+      rawT = t;
     }
   }
+  // beyond the ends: extrapolate along the end segments
+  if (best === 0 && rawT < 0) bestT = rawT;
+  if (best === last && rawT > 1) bestT = rawT;
   const a = pts[best];
   const b = pts[best + 1];
   const segLen = horizLen(a, b);

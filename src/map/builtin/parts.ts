@@ -103,3 +103,159 @@ export function addStageRoom(b: MapBuilder, mins: Vec3, maxs: Vec3, exit: '+x' |
   else c.y = mins.y;
   return c;
 }
+
+export interface VoidSpec {
+  /** Slabs are cut along this axis from a0 to a1; the other axis spans [b0, b1]. */
+  axis: 'x' | 'y';
+  a0: number;
+  a1: number;
+  b0: number;
+  b1: number;
+  /** Bottom of the trigger volumes. */
+  floorZ: number;
+  dest: string;
+  /** Ramps whose bottoms the slabs must stay under. */
+  ramps: RampRecord[];
+  /** Other surfaces: lowest legit z over a rectangle (+Infinity = nothing there). */
+  extra?: ((x0: number, x1: number, y0: number, y1: number) => number)[];
+  /** Clearance below the lowest surface. */
+  margin?: number;
+  step?: number;
+}
+
+/** Box surface for VoidSpec.extra: `z` over the rectangle [mins, maxs] (e.g. a platform's underside). */
+export function boxSurface(mins: Vec3, maxs: Vec3, z = mins.z): (x0: number, x1: number, y0: number, y1: number) => number {
+  return (x0, x1, y0, y1) => (x1 < mins.x || x0 > maxs.x || y1 < mins.y || y0 > maxs.y ? Infinity : z);
+}
+
+/**
+ * Fail teleports filling the void below a stretch of course: trigger_teleport slabs `step` units long along
+ * `axis`, each topped `margin` units below the lowest surface over it, so a missed ramp is caught soon after
+ * falling past it while nothing a run touches overlaps them. Slabs with nothing above them (gaps) take the
+ * lower of their neighbours' heights. Returns the trigger model numbers.
+ */
+export function addVoidTeleports(b: MapBuilder, s: VoidSpec): number[] {
+  const step = s.step ?? 512;
+  const margin = s.margin ?? 96;
+  const rect = (a: number, c: number): [number, number, number, number] =>
+    s.axis === 'x' ? [a, c, s.b0, s.b1] : [s.b0, s.b1, a, c];
+  const pieces: { a0: number; a1: number; top: number }[] = [];
+  for (let a = s.a0; a < s.a1 - 1e-6; a += step) {
+    const ae = Math.min(s.a1, a + step);
+    const [x0, x1, y0, y1] = rect(a, ae);
+    let top = Infinity;
+    for (const r of s.ramps) top = Math.min(top, rampBottomInRect(r, x0, x1, y0, y1));
+    for (const f of s.extra ?? []) top = Math.min(top, f(x0, x1, y0, y1));
+    pieces.push({ a0: a, a1: ae, top });
+  }
+  for (let i = 0; i < pieces.length; i++) {
+    if (Number.isFinite(pieces[i].top)) continue;
+    let best = Infinity;
+    for (let j = i - 1; j >= 0; j--) {
+      if (Number.isFinite(pieces[j].top)) {
+        best = Math.min(best, pieces[j].top);
+        break;
+      }
+    }
+    for (let j = i + 1; j < pieces.length; j++) {
+      if (Number.isFinite(pieces[j].top)) {
+        best = Math.min(best, pieces[j].top);
+        break;
+      }
+    }
+    pieces[i].top = best;
+  }
+  const merged: { a0: number; a1: number; top: number }[] = [];
+  for (const p of pieces) {
+    const last = merged[merged.length - 1];
+    if (last && Math.abs(last.top - p.top) < 1e-6) last.a1 = p.a1;
+    else merged.push({ ...p });
+  }
+  const out: number[] = [];
+  for (const p of merged) {
+    if (!Number.isFinite(p.top)) continue;
+    const top = p.top - margin;
+    if (top <= s.floorZ + 1) continue;
+    const [x0, x1, y0, y1] = rect(p.a0, p.a1);
+    out.push(b.addTeleport(v3(x0, y0, s.floorZ), v3(x1, y1, top), s.dest));
+  }
+  return out;
+}
+
+/**
+ * Lowest z of a ramp's bottom edge(s) over the part of the ramp whose XY lies inside the rectangle
+ * [x0, x1] x [y0, y1] (+Infinity when no part of the ramp is over it). Sampled every 32 units.
+ */
+export function rampBottomInRect(r: RampRecord, x0: number, x1: number, y0: number, y1: number): number {
+  let z = Infinity;
+  for (let k = 0; k + 1 < r.ribs.length; k++) {
+    for (const bi of [0, 1, 2]) {
+      // ridge points too (index 0): a ridge passing over the rectangle bounds the volume as well
+      const a = r.ribs[k][bi];
+      const b = r.ribs[k + 1][bi];
+      const len = Math.hypot(b.x - a.x, b.y - a.y);
+      const n = Math.max(1, Math.ceil(len / 32));
+      for (let i = 0; i <= n; i++) {
+        const t = i / n;
+        const x = a.x + (b.x - a.x) * t;
+        const y = a.y + (b.y - a.y) * t;
+        if (x < x0 || x > x1 || y < y0 || y > y1) continue;
+        const zz = bi === 0 ? a.z + (b.z - a.z) * t - r.height : a.z + (b.z - a.z) * t;
+        if (zz < z) z = zz;
+      }
+    }
+  }
+  return z;
+}
+
+/**
+ * Render-only glowing bar (an oriented box, no collision) from `a` to `b` with a square cross-section of
+ * `size`: decoration for gates and signs.
+ */
+export function addGlowBar(b: MapBuilder, a: Vec3, c: Vec3, size: number, mat: string): void {
+  const d = v3(c.x - a.x, c.y - a.y, c.z - a.z);
+  const len = Math.hypot(d.x, d.y, d.z);
+  if (!(len > 1e-6)) return;
+  const f = v3(d.x / len, d.y / len, d.z / len);
+  // two unit vectors perpendicular to the bar
+  const ref = Math.abs(f.z) < 0.9 ? v3(0, 0, 1) : v3(1, 0, 0);
+  let u = v3(f.y * ref.z - f.z * ref.y, f.z * ref.x - f.x * ref.z, f.x * ref.y - f.y * ref.x);
+  const ul = Math.hypot(u.x, u.y, u.z);
+  u = v3(u.x / ul, u.y / ul, u.z / ul);
+  const w = v3(f.y * u.z - f.z * u.y, f.z * u.x - f.x * u.z, f.x * u.y - f.y * u.x);
+  const h = size / 2;
+  const corner = (p: Vec3, su: number, sw: number): Vec3 => v3(p.x + (u.x * su + w.x * sw) * h, p.y + (u.y * su + w.y * sw) * h, p.z + (u.z * su + w.z * sw) * h);
+  const sides: [number, number, number, number, Vec3][] = [
+    [1, -1, 1, 1, u],
+    [-1, 1, -1, -1, v3(-u.x, -u.y, -u.z)],
+    [-1, 1, 1, 1, w],
+    [1, -1, -1, -1, v3(-w.x, -w.y, -w.z)],
+  ];
+  for (const [su0, su1, sw0, sw1, n] of sides) {
+    b.addDecal([corner(a, su0, sw0), corner(c, su0, sw0), corner(c, su1, sw1), corner(a, su1, sw1)], n, mat, 0);
+  }
+  b.addDecal([corner(a, 1, 1), corner(a, -1, 1), corner(a, -1, -1), corner(a, 1, -1)], v3(-f.x, -f.y, -f.z), mat, 0);
+  b.addDecal([corner(c, 1, 1), corner(c, -1, 1), corner(c, -1, -1), corner(c, 1, -1)], f, mat, 0);
+}
+
+/**
+ * A glowing gate frame (render only) around the start of a ramp's surfed face at `along`: two posts and a
+ * lintel, a little outside the face so runs pass through it untouched.
+ */
+export function addRampGate(b: MapBuilder, r: RampRecord, face: 'left' | 'right', along: number, mat: string, size = 16): void {
+  const top = rampPoint(r, face, along, 0);
+  const bottom = rampPoint(r, face, along, 1);
+  const dx = bottom.x - top.x;
+  const dy = bottom.y - top.y;
+  const l = Math.hypot(dx, dy);
+  const ox = dx / l;
+  const oy = dy / l;
+  const margin = 96;
+  const hi = top.z + 320;
+  const lo = bottom.z - 64;
+  const pIn = v3(top.x - ox * margin, top.y - oy * margin, 0);
+  const pOut = v3(bottom.x + ox * margin, bottom.y + oy * margin, 0);
+  addGlowBar(b, v3(pIn.x, pIn.y, lo), v3(pIn.x, pIn.y, hi), size, mat);
+  addGlowBar(b, v3(pOut.x, pOut.y, lo), v3(pOut.x, pOut.y, hi), size, mat);
+  addGlowBar(b, v3(pIn.x, pIn.y, hi), v3(pOut.x, pOut.y, hi), size, mat);
+}
