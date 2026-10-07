@@ -17,6 +17,7 @@ import { angleVectors } from '../core/angles';
 import type { Vec3 } from '../core/vec3';
 import type { GhostState, LoadProgress, ViewState } from '../game/api';
 import type { LoadedMap, ZoneDef } from '../map/types';
+import { Mesh, Raycaster, Vector2 } from 'three';
 import { Renderer } from './renderer';
 
 interface HarnessState {
@@ -205,6 +206,7 @@ declare global {
       reload: (times: number) => Promise<{ textures: number; geometries: number; programs: number }>;
       info: () => ReturnType<Renderer['debugInfo']>;
       demo: () => void;
+      pick: (x: number, y: number) => { name: string; model: unknown; point: number[]; distance: number; transparent: boolean }[];
     };
   }
 }
@@ -234,6 +236,23 @@ window.__harness = {
   },
   info: () => renderer.debugInfo(),
   demo: () => demoContent(),
+  pick: (x: number, y: number) => {
+    const rc = new Raycaster();
+    renderer.render(view);
+    rc.setFromCamera(new Vector2((x / window.innerWidth) * 2 - 1, -(y / window.innerHeight) * 2 + 1), renderer.camera);
+    const meshes = renderer.scene?.meshes() ?? [];
+    const hits = rc.intersectObjects(meshes, false).filter((x) => x.object.visible);
+    return hits.slice(0, 6).map((h) => {
+      const m = h.object as Mesh;
+      return {
+        name: m.name,
+        model: m.userData.model,
+        point: [Math.round(h.point.x), Math.round(h.point.y), Math.round(h.point.z)],
+        distance: Math.round(h.distance),
+        transparent: (m.material as { transparent?: boolean }).transparent === true,
+      };
+    });
+  },
 };
 
 loadMap()
