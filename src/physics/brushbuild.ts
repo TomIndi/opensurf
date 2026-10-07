@@ -490,9 +490,105 @@ export function brushFromBox(mins: Vec3, maxs: Vec3, contents: number, model = 0
 }
 
 /**
- * Convex hull of a point cloud as a brush (bevels + AABB added). Intended for small clouds (prisms,
- * wedges, displacement slabs; up to ~64 points - cost is O(n^4)). Returns null for degenerate input
- * (fewer than 4 non-coplanar points).
+ * Supporting planes of the convex hull of the points selected by `idx` (brute force over triples:
+ * a triple spans a face when every selected point lies behind its plane within HULL_EPSILON).
+ * Distances are exact maxima over the selected points; near-identical planes are merged, keeping the
+ * best-conditioned (largest) triangle's normal.
+ */
+function hullPlanes(px: number[], py: number[], pz: number[], idx: number[]): Plane[] {
+  const n = idx.length;
+  interface Cand {
+    nx: number;
+    ny: number;
+    nz: number;
+    area: number;
+  }
+  const cands: Cand[] = [];
+  for (let a = 0; a < n - 2; a++) {
+    const i = idx[a];
+    for (let b = a + 1; b < n - 1; b++) {
+      const j = idx[b];
+      const e1x = px[j] - px[i];
+      const e1y = py[j] - py[i];
+      const e1z = pz[j] - pz[i];
+      const l1 = e1x * e1x + e1y * e1y + e1z * e1z;
+      for (let c = b + 1; c < n; c++) {
+        const k = idx[c];
+        const e2x = px[k] - px[i];
+        const e2y = py[k] - py[i];
+        const e2z = pz[k] - pz[i];
+        let cx = e1y * e2z - e1z * e2y;
+        let cy = e1z * e2x - e1x * e2z;
+        let cz = e1x * e2y - e1y * e2x;
+        const c2 = cx * cx + cy * cy + cz * cz;
+        const l2 = e2x * e2x + e2y * e2y + e2z * e2z;
+        // reject (nearly) collinear triples: sin(angle) < 1e-6
+        if (!(c2 > 1e-12 * l1 * l2) || c2 < 1e-20) continue;
+        const cl = Math.sqrt(c2);
+        cx /= cl;
+        cy /= cl;
+        cz /= cl;
+        const dref = cx * px[i] + cy * py[i] + cz * pz[i];
+        let dmax = -Infinity;
+        let dmin = Infinity;
+        for (let m = 0; m < n; m++) {
+          const q = idx[m];
+          const d = cx * px[q] + cy * py[q] + cz * pz[q];
+          if (d > dmax) dmax = d;
+          if (d < dmin) dmin = d;
+        }
+        if (dmax - dref <= HULL_EPSILON) cands.push({ nx: cx, ny: cy, nz: cz, area: cl });
+        else if (dref - dmin <= HULL_EPSILON) cands.push({ nx: -cx, ny: -cy, nz: -cz, area: cl });
+      }
+    }
+  }
+  cands.sort((a, b) => b.area - a.area);
+  const planes: Plane[] = [];
+  for (const c of cands) {
+    let dup = false;
+    for (const p of planes) {
+      if (
+        Math.abs(p.normal.x - c.nx) < NORMAL_EPSILON &&
+        Math.abs(p.normal.y - c.ny) < NORMAL_EPSILON &&
+        Math.abs(p.normal.z - c.nz) < NORMAL_EPSILON
+      ) {
+        dup = true;
+        break;
+      }
+    }
+    if (dup) continue;
+    let nx = snap(c.nx);
+    let ny = snap(c.ny);
+    let nz = snap(c.nz);
+    const nl = Math.sqrt(nx * nx + ny * ny + nz * nz);
+    nx /= nl;
+    ny /= nl;
+    nz /= nl;
+    planes.push({ normal: v3(nx, ny, nz), dist: 0 });
+  }
+  return planes;
+}
+
+function setSupportDists(planes: Plane[], px: number[], py: number[], pz: number[]): void {
+  for (const p of planes) {
+    const n = p.normal;
+    let dist = -Infinity;
+    for (let m = 0; m < px.length; m++) {
+      const d = n.x * px[m] + n.y * py[m] + n.z * pz[m];
+      if (d > dist) dist = d;
+    }
+    p.dist = dist;
+  }
+}
+
+/** Above this many (merged) points the hull is refined iteratively from extreme points. */
+const HULL_BRUTE_MAX = 40;
+
+/**
+ * Convex hull of a point cloud as a brush (bevels + AABB added). Exact brute force for small clouds
+ * (prisms, wedges, displacement slabs); larger clouds are refined iteratively from their extreme
+ * points, so mostly-interior clouds stay cheap. Returns null for degenerate input (fewer than 4
+ * non-coplanar points).
  */
 export function brushFromPoints(points: Vec3[], contents: number, model = 0): Brush | null {
   // merge near-duplicate points
@@ -520,83 +616,64 @@ export function brushFromPoints(points: Vec3[], contents: number, model = 0): Br
   }
   const n = px.length;
   if (n < 4) return null;
+  const all: number[] = [];
+  for (let i = 0; i < n; i++) all.push(i);
 
-  interface Cand {
-    nx: number;
-    ny: number;
-    nz: number;
-    dist: number;
-    area: number;
-  }
-  const cands: Cand[] = [];
-  for (let i = 0; i < n - 2; i++) {
-    for (let j = i + 1; j < n - 1; j++) {
-      const e1x = px[j] - px[i];
-      const e1y = py[j] - py[i];
-      const e1z = pz[j] - pz[i];
-      const l1 = e1x * e1x + e1y * e1y + e1z * e1z;
-      for (let k = j + 1; k < n; k++) {
-        const e2x = px[k] - px[i];
-        const e2y = py[k] - py[i];
-        const e2z = pz[k] - pz[i];
-        let cx = e1y * e2z - e1z * e2y;
-        let cy = e1z * e2x - e1x * e2z;
-        let cz = e1x * e2y - e1y * e2x;
-        const c2 = cx * cx + cy * cy + cz * cz;
-        const l2 = e2x * e2x + e2y * e2y + e2z * e2z;
-        // reject (nearly) collinear triples: sin(angle) < 1e-6
-        if (!(c2 > 1e-12 * l1 * l2) || c2 < 1e-20) continue;
-        const cl = Math.sqrt(c2);
-        cx /= cl;
-        cy /= cl;
-        cz /= cl;
-        const dref = cx * px[i] + cy * py[i] + cz * pz[i];
-        let dmax = -Infinity;
-        let dmin = Infinity;
+  let planes: Plane[];
+  if (n <= HULL_BRUTE_MAX) {
+    planes = hullPlanes(px, py, pz, all);
+  } else {
+    // seed: extreme points along the 26 axis/diagonal directions
+    const inSet = new Uint8Array(n);
+    const idx: number[] = [];
+    for (let dx = -1; dx <= 1; dx++)
+      for (let dy = -1; dy <= 1; dy++)
+        for (let dz = -1; dz <= 1; dz++) {
+          if (!dx && !dy && !dz) continue;
+          let best = -1;
+          let bestD = -Infinity;
+          for (let m = 0; m < n; m++) {
+            const d = dx * px[m] + dy * py[m] + dz * pz[m];
+            if (d > bestD) {
+              bestD = d;
+              best = m;
+            }
+          }
+          if (!inSet[best]) {
+            inSet[best] = 1;
+            idx.push(best);
+          }
+        }
+    planes = [];
+    for (let iter = 0; iter < 256; iter++) {
+      planes = hullPlanes(px, py, pz, idx);
+      if (planes.length < 4) break;
+      const sub = { x: idx.map((i) => px[i]), y: idx.map((i) => py[i]), z: idx.map((i) => pz[i]) };
+      setSupportDists(planes, sub.x, sub.y, sub.z);
+      // add, for every plane, the point farthest in front of it
+      let added = 0;
+      for (const p of planes) {
+        let best = -1;
+        let bestD = HULL_EPSILON;
         for (let m = 0; m < n; m++) {
-          const d = cx * px[m] + cy * py[m] + cz * pz[m];
-          if (d > dmax) dmax = d;
-          if (d < dmin) dmin = d;
+          if (inSet[m]) continue;
+          const d = p.normal.x * px[m] + p.normal.y * py[m] + p.normal.z * pz[m] - p.dist;
+          if (d > bestD) {
+            bestD = d;
+            best = m;
+          }
         }
-        if (dmax - dref <= HULL_EPSILON) {
-          cands.push({ nx: cx, ny: cy, nz: cz, dist: dmax, area: cl });
-        } else if (dref - dmin <= HULL_EPSILON) {
-          cands.push({ nx: -cx, ny: -cy, nz: -cz, dist: -dmin, area: cl });
+        if (best >= 0 && !inSet[best]) {
+          inSet[best] = 1;
+          idx.push(best);
+          added++;
         }
       }
+      if (!added) break;
     }
+    if (planes.length < 4) planes = hullPlanes(px, py, pz, all);
   }
-  // Best-conditioned (largest) triangles first; drop near-identical planes.
-  cands.sort((a, b) => b.area - a.area);
-  const planes: Plane[] = [];
-  for (const c of cands) {
-    let dup = false;
-    for (const p of planes) {
-      if (
-        Math.abs(p.normal.x - c.nx) < NORMAL_EPSILON &&
-        Math.abs(p.normal.y - c.ny) < NORMAL_EPSILON &&
-        Math.abs(p.normal.z - c.nz) < NORMAL_EPSILON
-      ) {
-        dup = true;
-        break;
-      }
-    }
-    if (dup) continue;
-    let nx = snap(c.nx);
-    let ny = snap(c.ny);
-    let nz = snap(c.nz);
-    const nl = Math.sqrt(nx * nx + ny * ny + nz * nz);
-    nx /= nl;
-    ny /= nl;
-    nz /= nl;
-    // exact supporting distance for the (snapped) normal
-    let dist = -Infinity;
-    for (let m = 0; m < n; m++) {
-      const d = nx * px[m] + ny * py[m] + nz * pz[m];
-      if (d > dist) dist = d;
-    }
-    planes.push({ normal: v3(nx, ny, nz), dist });
-  }
+  setSupportDists(planes, px, py, pz);
   return brushFromPlanes(planes, contents, model);
 }
 
