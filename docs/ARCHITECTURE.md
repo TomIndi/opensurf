@@ -38,8 +38,8 @@ Run: `npm run dev`.
 | materials | `src/bsp/{pakfile,vtf,vmt,materials}.ts`, `tests/materials.test.ts` | materials |
 | BSP render geometry + loader | `src/bsp/{geometry,lightmap,displacement,loadmap,props}.ts`, `tests/geometry.test.ts` | bsp-render |
 | renderer | `src/render/**` | renderer |
-| game core | `src/game/{game,convars,binds,input,commands,records,debugapi,hud}.ts`, `tests/gamecore*.test.ts` | game-core |
-| game world | `src/game/{entities,timer,zoneresolve,replay,zoneeditor}.ts`, `tests/gameworld*.test.ts` | game-world |
+| game core | `src/game/{game,convars,binds,input,commands,debugapi,hud}.ts`, `tests/gamecore*.test.ts` | game-core |
+| game world | `src/game/{entities,timer,zoneresolve,replay,zoneeditor,records}.ts`, `tests/gameworld*.test.ts` | game-world |
 | UI + audio | `src/ui/**`, `src/audio/**`, `src/styles/**`, `index.html` | ui |
 | built-in maps | `src/map/builtin/**`, `tests/builtin.test.ts` | builtin-maps |
 | map catalog/downloads | `src/maps/**`, `scripts/build-catalog.mjs`, `public/maps/**` | coordinator |
