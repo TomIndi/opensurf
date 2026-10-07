@@ -18,9 +18,10 @@ export function buildTutorial(): BuiltCourse {
   const FLOOR = 'builtin/floor_grey';
   const WALL = 'builtin/wall_grid';
   const SIDE = 'builtin/wall_dark';
+  const TRIM = 'builtin/glow_white';
   /** Start room floor height and front wall x. */
   const Z0 = 6400;
-  const X0 = -14600;
+  const X0 = -14900;
 
   // ---------------------------------------------------------------- start room (spawn, start zone)
   const roomMin = v3(X0 - 640, -256, Z0);
@@ -29,42 +30,43 @@ export function buildTutorial(): BuiltCourse {
     { side: '+x', a0: -208, a1: 208, z0: Z0, z1: Z0 + 240 },
   ]);
   b.addTopTrim(v3(roomMin.x, roomMin.y, Z0 - 16), v3(roomMax.x, roomMax.y, Z0), 'builtin/glow_cyan', 6);
-  const spawn = v3(X0 - 512, 0, Z0);
+  const spawn = v3(X0 - 512, 0, Z0 + 1);
   b.addSpawn(spawn, 0);
   b.addDestination('tut_start', spawn, 0);
   b.addZone('start', v3(roomMin.x + 16, roomMin.y + 16, Z0), v3(X0 - 16, roomMax.y - 16, Z0 + 160), { spawn: { origin: spawn, yaw: 0 } });
 
   // ---------------------------------------------------------------- ramps
-  // Gap drops are ballistic (RampChain.autoDrop): `speed` is the exit speed a gap is designed for - inside a
-  // section the speed a checkpoint restart reaches (so restarts always make it), between sections the
-  // through-run speed. Faster runs simply land deeper into the next ramp.
+  // Gap drops are ballistic (RampChain.autoDrop): `speed` is the exit speed a gap is designed for - the speed a
+  // restart from the section's checkpoint (or the start) reaches there, minus a margin - and `land` is how far
+  // into the next ramp such a run lands. Every gap is therefore makeable straight from a checkpoint restart;
+  // faster (through) runs simply land deeper into the next ramp, which is long enough for them.
   const w1 = 384;
-  const chain = new RampChain(b, v3(X0 - 112, -w1 * 0.45, Z0 - 96), 0);
+  const chain = new RampChain(b, v3(X0 - 112, -w1 * 0.55, Z0 - 96), 0);
   const R: RampRecord[] = [];
   const mats = ['builtin/ramp_cyan', 'builtin/ramp_orange', 'builtin/ramp_green', 'builtin/ramp_purple'];
   const glows = ['builtin/glow_cyan', 'builtin/glow_orange', 'builtin/glow_green', 'builtin/glow_purple'];
-  const dropIn = { angle: 20, length: 960, steps: 8 };
+  const dropIn = { angle: 26, length: 1400, steps: 10 };
   const W = 352;
   // section 1: the long first ramp and a straight follow-up
-  R.push(chain.straight({ gap: 0, drop: 0, length: 4200, descent: 7, side: 'left', width: w1, mat: mats[0], sideMat: SIDE, name: 'ramp 1' }));
-  R.push(chain.straight({ gap: 320, speed: 900, land: 400, length: 3000, descent: 5, side: 'left', width: W, mat: mats[0], sideMat: SIDE, name: 'ramp 2' }));
+  R.push(chain.straight({ gap: 0, drop: 0, length: 4200, descent: 7, side: 'left', width: w1, mat: mats[0], sideMat: SIDE, trimMat: TRIM, trimWidth: 6, name: 'ramp 1' }));
+  R.push(chain.straight({ gap: 320, speed: 900, land: 400, length: 3000, descent: 5, side: 'left', width: W, mat: mats[0], sideMat: SIDE, trimMat: TRIM, trimWidth: 6, name: 'ramp 2' }));
   // section 2: left/right zigzag across a corridor
-  R.push(chain.straight({ gap: 448, shift: 800, travel: 500, speed: 1100, land: 560, length: 3200, descent: 5, dropIn, side: 'right', width: W, mat: mats[1], sideMat: SIDE, name: 'ramp 3' }));
-  R.push(chain.straight({ gap: 576, shift: -800, travel: 500, speed: 900, land: 520, length: 3200, descent: 5, side: 'left', width: W, mat: mats[1], sideMat: SIDE, name: 'ramp 4' }));
+  R.push(chain.straight({ gap: 448, shift: 800, travel: 500, speed: 1100, land: 450, length: 3200, descent: 5, dropIn, side: 'right', width: W, mat: mats[1], sideMat: SIDE, trimMat: TRIM, trimWidth: 6, name: 'ramp 3' }));
+  R.push(chain.straight({ gap: 576, shift: -800, travel: 500, speed: 790, land: 380, length: 3200, descent: 5, side: 'left', width: W, mat: mats[1], sideMat: SIDE, trimMat: TRIM, trimWidth: 6, name: 'ramp 4' }));
   // section 3: transfer from ramp 5 to the parallel ramp 6 (a bit lower, across a gap)
-  R.push(chain.straight({ gap: 640, speed: 1300, land: 560, length: 3000, descent: 5, dropIn, side: 'left', width: W, mat: mats[2], sideMat: SIDE, name: 'ramp 5' }));
+  R.push(chain.straight({ gap: 640, speed: 1060, land: 400, length: 3000, descent: 5, dropIn, side: 'left', width: W, mat: mats[2], sideMat: SIDE, trimMat: TRIM, trimWidth: 6, name: 'ramp 5' }));
   const r5 = R[R.length - 1];
   // ramp 6 starts 1400 units into ramp 5 (past its drop-in), 240 units below ramp 5's ridge there
   const r6drop = chain.pos.z - (rampPoint(r5, 'left', 1400, 0).z - 240);
-  R.push(chain.straight({ gap: -1600, shift: 832, drop: r6drop, length: 3800, descent: 5, side: 'right', width: W, mat: mats[2], sideMat: SIDE, name: 'ramp 6' }));
+  R.push(chain.straight({ gap: -1600, shift: 832, drop: r6drop, length: 3700, descent: 5, side: 'right', width: W, mat: mats[2], sideMat: SIDE, trimMat: TRIM, trimWidth: 6, name: 'ramp 6' }));
   // section 4: the long jumps
-  R.push(chain.straight({ gap: 704, speed: 1500, land: 600, length: 3200, descent: 5, dropIn, side: 'right', width: W, mat: mats[3], sideMat: SIDE, name: 'ramp 7' }));
-  R.push(chain.straight({ gap: 832, speed: 1000, land: 560, length: 3200, descent: 5, side: 'right', width: W, mat: mats[3], sideMat: SIDE, name: 'ramp 8' }));
+  R.push(chain.straight({ gap: 704, speed: 930, land: 400, length: 3200, descent: 5, dropIn, side: 'right', width: W, mat: mats[3], sideMat: SIDE, trimMat: TRIM, trimWidth: 6, name: 'ramp 7' }));
+  R.push(chain.straight({ gap: 832, speed: 790, land: 400, length: 3600, descent: 5, side: 'right', width: W, mat: mats[3], sideMat: SIDE, trimMat: TRIM, trimWidth: 6, name: 'ramp 8' }));
 
   // ---------------------------------------------------------------- end platform
   const last = R[R.length - 1];
   const endRidge = last.points[last.points.length - 1];
-  const exitPoint = rampPoint(last, 'right', 3200, 0.45);
+  const exitPoint = rampPoint(last, 'right', 3600, 0.45);
   const endTop = endRidge.z - 900;
   const endMin = v3(endRidge.x + 576, exitPoint.y - 640, endTop - 64);
   const endMax = v3(endRidge.x + 576 + 1536, exitPoint.y + 640, endTop);
@@ -72,7 +74,7 @@ export function buildTutorial(): BuiltCourse {
   b.addTopTrim(endMin, endMax, 'builtin/glow_green', 12);
   // backstop wall
   b.addBox(v3(endMax.x, endMin.y, endTop - 64), v3(endMax.x + 64, endMax.y, endTop + 512), { sides: WALL, top: WALL });
-  b.addZone('end', v3(endMin.x, endMin.y, endTop), v3(endMax.x, endMax.y, endTop + 256));
+  b.addZone('end', v3(endMin.x, endMin.y, endTop), v3(endMax.x, endMax.y, endTop + 1024));
   const finish = v3((endMin.x + endMax.x) / 2, exitPoint.y, endTop);
 
   // ---------------------------------------------------------------- sections, checkpoints, gates
@@ -131,7 +133,9 @@ export function buildTutorial(): BuiltCourse {
     });
     a0 = a1;
   }
-  b.addBox(v3(X0 - 1200, Y0, groundZ - 64), v3(a0, Y1, groundZ), { top: 'builtin/grid_blue', sides: null, bottom: null });
+  // a wide, muted ground far below for a sense of height (fades into the haze)
+  b.setMaterialColor('builtin/grid_ground', [0.36, 0.45, 0.52]);
+  b.addBox(v3(-16384, -16384, groundZ - 64), v3(16384, 16384, groundZ), { top: 'builtin/grid_ground', sides: null, bottom: null });
 
   const course: Course = { id: 'surf_tutorial', type: 'linear', sections, finish };
   return { map: b.build(), course, builder: b };

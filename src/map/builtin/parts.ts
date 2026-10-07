@@ -225,11 +225,12 @@ export function addGlowBar(b: MapBuilder, a: Vec3, c: Vec3, size: number, mat: s
   const w = v3(f.y * u.z - f.z * u.y, f.z * u.x - f.x * u.z, f.x * u.y - f.y * u.x);
   const h = size / 2;
   const corner = (p: Vec3, su: number, sw: number): Vec3 => v3(p.x + (u.x * su + w.x * sw) * h, p.y + (u.y * su + w.y * sw) * h, p.z + (u.z * su + w.z * sw) * h);
+  // each side quad: corners (a, su0, sw0) (c, su0, sw0) (c, su1, sw1) (a, su1, sw1)
   const sides: [number, number, number, number, Vec3][] = [
-    [1, -1, 1, 1, u],
-    [-1, 1, -1, -1, v3(-u.x, -u.y, -u.z)],
-    [-1, 1, 1, 1, w],
-    [1, -1, -1, -1, v3(-w.x, -w.y, -w.z)],
+    [1, 1, -1, 1, u],
+    [-1, -1, 1, -1, v3(-u.x, -u.y, -u.z)],
+    [1, -1, 1, 1, w],
+    [-1, 1, -1, -1, v3(-w.x, -w.y, -w.z)],
   ];
   for (const [su0, su1, sw0, sw1, n] of sides) {
     b.addDecal([corner(a, su0, sw0), corner(c, su0, sw0), corner(c, su1, sw1), corner(a, su1, sw1)], n, mat, 0);
@@ -342,6 +343,10 @@ export function addVoidGrid(b: MapBuilder, s: VoidGridSpec): number[] {
       filled[j * nx + i] = z;
     }
   }
+  // ---- cells far from everything: catch falls at the lowest height anywhere in the region
+  let lowestTop = Infinity;
+  for (let k = 0; k < filled.length; k++) if (filled[k] < lowestTop) lowestTop = filled[k];
+  for (let k = 0; k < filled.length; k++) if (!Number.isFinite(filled[k])) filled[k] = lowestTop;
   // ---- owners: nearest course geometry (sampled every 64 units along ridges and bottom edges)
   const samples: { x: number; y: number; o: number }[] = [];
   s.owners.forEach((ow, oi) => {

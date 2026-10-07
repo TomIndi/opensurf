@@ -35,7 +35,7 @@ function stageRoom(c: StageCtx): { spawn: Vec3; mins: Vec3; maxs: Vec3 } {
   addGlowBar(b, v3(door.x + 8, door.y - 192, door.z), v3(door.x + 8, door.y - 192, door.z + 240), 12, c.glow);
   addGlowBar(b, v3(door.x + 8, door.y + 192, door.z), v3(door.x + 8, door.y + 192, door.z + 240), 12, c.glow);
   addGlowBar(b, v3(door.x + 8, door.y - 192, door.z + 240), v3(door.x + 8, door.y + 192, door.z + 240), 12, c.glow);
-  return { spawn: v3(door.x - 448, door.y, door.z), mins: v3(mins.x + 16, mins.y + 16, mins.z), maxs: v3(maxs.x - 16, maxs.y - 16, mins.z + 160) };
+  return { spawn: v3(door.x - 448, door.y, door.z + 1), mins: v3(mins.x + 16, mins.y + 16, mins.z), maxs: v3(maxs.x - 16, maxs.y - 16, mins.z + 160) };
 }
 
 /**
@@ -98,7 +98,7 @@ export function buildNeon(): BuiltCourse {
   {
     const c = rooms[0].ctx;
     const d = c.door;
-    const ch = new RampChain(b, v3(d.x - 112, d.y - 384 * 0.45, d.z - 96), 0);
+    const ch = new RampChain(b, v3(d.x - 112, d.y - 384 * 0.55, d.z - 96), 0);
     const R1 = ch.straight({ gap: 0, drop: 0, length: 5000, descent: 7, side: 'left', width: 384, ...ramp(0), name: 's1 long ramp' });
     const R2 = ch.straight({ gap: 384, speed: 950, land: 480, length: 3000, descent: 6, side: 'left', width: W, ...ramp(0), name: 's1 ramp 2' });
     const R3 = ch.straight({ gap: 512, speed: 1150, land: 560, length: 3000, descent: 6, side: 'both', width: W, ...ramp(0), name: 's1 double ramp' });
@@ -238,6 +238,7 @@ export function buildNeon(): BuiltCourse {
   ];
   sections.forEach((s, i) => {
     addVoidGrid(b, {
+      cell: 768,
       x0: -16000,
       x1: 16000,
       y0: bands[i][0],
@@ -287,7 +288,7 @@ function portalAt(c: StageCtx, center: Vec3, yaw: number, dest: string): void {
 }
 
 function rampHeight(w: number): number {
-  return rampHeightFor(w, 0.5);
+  return rampHeightFor(w);
 }
 
 /** Glowing outline of a booster volume (render only): the four vertical edges and the top and bottom rims. */

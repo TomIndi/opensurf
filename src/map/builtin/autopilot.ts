@@ -158,12 +158,16 @@ export class Autopilot {
       } else {
         this.holding = frac > band[1] || (frac >= band[0] && vOut > vDes);
       }
+      // drifting up toward the ridge (fast through a curve whose banking can't turn you): tap the other key
+      // to push off the ramp, down the face, like a player does
+      const pushOff = !this.holding && frac < band[0] * 0.7 && vOut < 40;
       const tyaw = Math.atan2(f.tangent.y, f.tangent.x) * RAD;
       const outSign = r.face === 'left' ? 1 : -1;
       let rel = 0;
-      if (speed > 50 && !this.holding) rel = Math.max(-3, Math.min(12, angleDiff(vyaw, tyaw) * outSign));
+      if (speed > 50 && !this.holding && !pushOff) rel = Math.max(-3, Math.min(12, angleDiff(vyaw, tyaw) * outSign));
       cmd.viewangles.yaw = normalizeAngle(tyaw + rel * outSign);
-      cmd.sidemove = this.holding ? (r.face === 'left' ? 450 : -450) : 0;
+      const toRamp = r.face === 'left' ? 450 : -450;
+      cmd.sidemove = this.holding ? toRamp : pushOff ? -toRamp : 0;
       return;
     }
 

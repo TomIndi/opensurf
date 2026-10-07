@@ -182,6 +182,11 @@ export interface RenderBatch {
   isDisplacement: boolean;
   mins: Vec3;
   maxs: Vec3;
+  /**
+   * Optional: decal geometry (info_overlay) lying on other surfaces, already lifted a fraction of a unit off
+   * them. Draw after the opaque world with a polygon offset / depth bias, without depth writes.
+   */
+  decal?: boolean;
 }
 
 export interface LightmapAtlas {
@@ -241,6 +246,19 @@ export interface RenderProp {
   uvs: Float32Array;
   indices: Uint32Array;
   material: string;
+  /** Optional: sRGB 0..1 tint multiplied with the albedo (entity rendercolor, static prop diffuse modulation). Omitted = white. */
+  color?: [number, number, number];
+  /** Optional: 0..1 opacity (renderamt with a translucent rendermode). Omitted = 1. */
+  alpha?: number;
+  /** Optional: index into LoadedMap.entities for entity-placed props (prop_dynamic...); omitted for static props. */
+  entity?: number;
+  /**
+   * Optional: light cube at the prop's lighting origin - vrad's leaf ambient cube plus the direct light of the
+   * map's compiled lights, as the engine lights models (linear RGB, 1 = fully lit, like the lightmap), faces
+   * ordered +x, -x, +y, -y, +z, -z (world space): shade with the blend of the faces weighted by the squared
+   * components of the world-space normal.
+   */
+  ambientCube?: [number, number, number][];
 }
 
 // ---------------------------------------------------------------- zones / timer

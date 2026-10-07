@@ -3,7 +3,7 @@
 // debugging; the game itself only needs the LoadedMap.
 import { Vec3, v3, v3clone } from '../../core/vec3';
 import { LoadedMap } from '../types';
-import { MapBuilder, RampPathOptions, RampRecord, RampSide, rampHeightFor } from './builder';
+import { DEFAULT_RAMP_NZ, MapBuilder, RampPathOptions, RampRecord, RampSide, rampHeightFor } from './builder';
 
 export interface CourseRamp {
   ramp: RampRecord;
@@ -96,11 +96,13 @@ export interface StraightSpec {
   dropIn?: { angle: number; length: number; steps?: number };
   side: RampSide;
   width: number;
-  /** Surf face normal.z (sets the height for a level ridge). */
+  /** Surf face normal.z (sets the height for a level ridge; default DEFAULT_RAMP_NZ). */
   nz?: number;
   mat?: string;
   sideMat?: string | null;
   trimMat?: string | null;
+  /** Trim strip width (default 10). */
+  trimWidth?: number;
   name?: string;
 }
 
@@ -180,11 +182,12 @@ export class RampChain {
     const rec = this.b.addRampPath({
       points: pts,
       width: s.width,
-      height: rampHeightFor(s.width, s.nz ?? 0.5),
+      height: rampHeightFor(s.width, s.nz ?? DEFAULT_RAMP_NZ),
       side: s.side,
       mat: s.mat,
       sideMat: s.sideMat,
       trimMat: s.trimMat,
+      trimWidth: s.trimWidth,
       name: s.name,
     });
     this.pos = v3clone(end);
@@ -219,11 +222,12 @@ export class RampChain {
     const opts: RampPathOptions = {
       points: pts,
       width: s.width,
-      height: rampHeightFor(s.width, s.nz ?? 0.5),
+      height: rampHeightFor(s.width, s.nz ?? DEFAULT_RAMP_NZ),
       side: s.side,
       mat: s.mat,
       sideMat: s.sideMat,
       trimMat: s.trimMat,
+      trimWidth: s.trimWidth,
       name: s.name,
     };
     const rec = this.b.addRampPath(opts);

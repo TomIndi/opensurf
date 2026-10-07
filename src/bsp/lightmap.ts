@@ -22,7 +22,7 @@ import { BspFace, BspFile, LUMP_FACES, LUMP_FACES_HDR, SURF_BUMPLIGHT } from './
 
 /** Linear light per ColorRGBExp32 exponent byte (index = unsigned byte): 2^(signed exponent) / 255. */
 const EXP_SCALE = (() => {
-  const t = new Float32Array(256);
+  const t = new Float64Array(256);
   for (let i = 0; i < 256; i++) t[i] = Math.pow(2, i < 128 ? i : i - 256) / 255;
   return t;
 })();

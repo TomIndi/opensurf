@@ -22,6 +22,7 @@
 // faces (water, %compilenolight materials) and sky faces have lightmapUVs = null.
 // Maps compiled without lighting return lightmap = null and no lightmap uvs at all.
 import { angleVectors } from '../core/angles';
+import type { Vec3 } from '../core/vec3';
 import type { LightmapAtlas, MapEntity, MaterialDef, RenderBatch } from '../map/types';
 import { brushEntityPlacement } from './bspcollision';
 import { faceAreas, pointLeaf } from './bsptree';
@@ -35,8 +36,8 @@ import {
   lightmapUV,
   selectLightingSource,
 } from './lightmap';
-import { fallbackMaterial, normalizeMaterialName } from './materials';
-import { BspFile, SURF_HINT, SURF_NODRAW, SURF_NOLIGHT, SURF_SKIP, SURF_SKY, SURF_SKY2D, SURF_TRIGGER } from './types';
+import { fallbackMaterial, isProceduralImage, normalizeMaterialName } from './materials';
+import { BspFile, LUMP_OVERLAYS, SURF_HINT, SURF_NODRAW, SURF_NOLIGHT, SURF_SKIP, SURF_SKY, SURF_SKY2D, SURF_TRIGGER } from './types';
 
 export interface BuildRenderOptions {
   /** Entities used to find and place brush models (default: parsed from bsp.entitiesText). */
@@ -58,6 +59,8 @@ export interface BuildRenderOptions {
   includeUnreferencedModels?: boolean;
   /** Weld displacement normals across seams (default true). */
   smoothDisplacementSeams?: boolean;
+  /** Build info_overlay decals (LUMP_OVERLAYS) as `decal` batches (default true). */
+  overlays?: boolean;
   /** Receives non-fatal problems (malformed faces, missing materials). */
   warnings?: string[];
   /** Filled with counts for diagnostics. */
@@ -95,6 +98,11 @@ export interface RenderBuildStats {
   atlasHeight: number;
   /** Lightmap density reduction (1 = full; see lightmap.ts overflow handling). */
   lightmapReduction: number;
+  /** info_overlays turned into geometry / overlay fragments (one per overlay and face it covers). */
+  overlays: number;
+  overlayFragments: number;
+  /** Overlays skipped because their material isn't available (not packed) or is a tool texture. */
+  overlaysSkipped: number;
 }
 
 const MODE_NONE = 0;
@@ -288,6 +296,9 @@ export function buildRenderBatches(
     atlasWidth: 0,
     atlasHeight: 0,
     lightmapReduction: 1,
+    overlays: 0,
+    overlayFragments: 0,
+    overlaysSkipped: 0,
   };
 
   for (const model of modelList) {
@@ -703,6 +714,33 @@ export function buildRenderBatches(
     iCursor[bi] = ic;
   }
 
+  // ---- overlays (info_overlay decals projected onto world faces)
+  if (opts.overlays !== false) {
+    const faceReq = new Int32Array(nFaces).fill(-1);
+    const faceMode = new Int8Array(nFaces).fill(-1);
+    for (let r = 0; r < recFace.length; r++) {
+      if (recModel[r] !== 0) continue;
+      faceReq[recFace[r]] = recReq[r];
+      faceMode[recFace[r]] = recMode[r];
+    }
+    let overlayBatches: RenderBatch[] = [];
+    try {
+      overlayBatches = buildOverlayBatches(bsp, {
+        texMat,
+        texMatName,
+        dispMeshes,
+        lm,
+        faceReq,
+        faceMode,
+        faceArea,
+        stats,
+      });
+    } catch (e) {
+      warn(`overlays: ${(e as Error).message}`);
+    }
+    for (const b of overlayBatches) batches.push(b);
+  }
+
   for (const b of batches) {
     stats.vertices += b.positions.length / 3;
     stats.triangles += b.indices.length / 3;
@@ -711,4 +749,461 @@ export function buildRenderBatches(
   if (stats.malformed) warn(`${stats.malformed} malformed faces skipped`);
   if (opts.stats) Object.assign(opts.stats, stats);
   return { batches, lightmap: lm ? lm.atlas : null };
+}
+
+// ============================================================================================ overlays
+
+/** One info_overlay as compiled into LUMP_OVERLAYS (doverlay_t, 352 bytes). */
+export interface BspOverlay {
+  id: number;
+  texInfo: number;
+  /** Faces the overlay was projected onto (world faces). */
+  faces: number[];
+  /** 0..3: overlays draw in this order on a surface. */
+  renderOrder: number;
+  /** Texture coordinate ranges: corners 0..3 get (u0,v0) (u0,v1) (u1,v1) (u1,v0). */
+  u: [number, number];
+  v: [number, number];
+  /** Corner positions in the overlay basis (x along basisU, y along basisV). */
+  points: [number, number][];
+  origin: Vec3;
+  basisU: Vec3;
+  basisV: Vec3;
+  normal: Vec3;
+}
+
+const OVERLAY_SIZE = 352;
+const OVERLAY_MAX_FACES = 64;
+/** How far overlay geometry is lifted off its surface (the renderer should add a depth bias as well). */
+export const OVERLAY_LIFT = 0.25;
+
+/**
+ * Parses LUMP_OVERLAYS. The basis U vector is packed into the z components of the first three UV points, the
+ * fourth point's z flags a flipped V axis; V = normal x U (negated when flipped).
+ */
+export function parseOverlays(bsp: BspFile): BspOverlay[] {
+  let d: Uint8Array;
+  try {
+    d = bsp.getLump(LUMP_OVERLAYS);
+  } catch {
+    return [];
+  }
+  const out: BspOverlay[] = [];
+  if (!d.length || d.length % OVERLAY_SIZE !== 0) return out;
+  const dv = new DataView(d.buffer, d.byteOffset, d.byteLength);
+  for (let o = 0; o + OVERLAY_SIZE <= d.length; o += OVERLAY_SIZE) {
+    const f = (k: number) => dv.getFloat32(o + k, true);
+    const fc = dv.getUint16(o + 6, true);
+    const count = Math.min(fc & 0x3fff, OVERLAY_MAX_FACES);
+    const faces: number[] = [];
+    for (let k = 0; k < count; k++) faces.push(dv.getInt32(o + 8 + k * 4, true));
+    const points: [number, number][] = [];
+    const z: number[] = [];
+    for (let k = 0; k < 4; k++) {
+      points.push([f(280 + k * 12), f(284 + k * 12)]);
+      z.push(f(288 + k * 12));
+    }
+    const normal = { x: f(340), y: f(344), z: f(348) };
+    const basisU = { x: z[0], y: z[1], z: z[2] };
+    const flip = z[3] === 1 ? -1 : 1;
+    const basisV = {
+      x: (normal.y * basisU.z - normal.z * basisU.y) * flip,
+      y: (normal.z * basisU.x - normal.x * basisU.z) * flip,
+      z: (normal.x * basisU.y - normal.y * basisU.x) * flip,
+    };
+    out.push({
+      id: dv.getInt32(o, true),
+      texInfo: dv.getInt16(o + 4, true),
+      faces,
+      renderOrder: fc >> 14,
+      u: [f(264), f(268)],
+      v: [f(272), f(276)],
+      points,
+      origin: { x: f(328), y: f(332), z: f(336) },
+      basisU,
+      basisV,
+      normal,
+    });
+  }
+  return out;
+}
+
+/**
+ * Inverse bilinear mapping: (a, b) such that X = bilerp(P0..P3) with P0 at (0,0), P1 at (0,1), P2 at (1,1) and
+ * P3 at (1,0). Exact for parallelograms; solves the quadratic for general quads.
+ */
+export function inverseBilinear(px: number[], py: number[], x: number, y: number): [number, number] {
+  // X = A + a*e + b*f + a*b*g with A = P0, e = P3 - P0, f = P1 - P0, g = P0 - P3 + P2 - P1
+  const ex = px[3] - px[0];
+  const ey = py[3] - py[0];
+  const fx = px[1] - px[0];
+  const fy = py[1] - py[0];
+  const gx = px[0] - px[3] + px[2] - px[1];
+  const gy = py[0] - py[3] + py[2] - py[1];
+  const hx = x - px[0];
+  const hy = y - py[0];
+  const cross = (ax: number, ay: number, bx: number, by: number) => ax * by - ay * bx;
+  const k2 = cross(gx, gy, fx, fy);
+  const k1 = cross(ex, ey, fx, fy) + cross(hx, hy, gx, gy);
+  const k0 = cross(hx, hy, ex, ey);
+  const scale = Math.abs(cross(ex, ey, fx, fy)) + 1e-12;
+  let b: number;
+  if (Math.abs(k2) < 1e-9 * scale) {
+    b = Math.abs(k1) > 1e-12 ? -k0 / k1 : 0;
+  } else {
+    const disc = Math.max(0, k1 * k1 - 4 * k0 * k2);
+    const sq = Math.sqrt(disc);
+    const b1 = (-k1 - sq) / (2 * k2);
+    const b2 = (-k1 + sq) / (2 * k2);
+    b = Math.abs(b1 - 0.5) <= Math.abs(b2 - 0.5) ? b1 : b2;
+  }
+  const denx = ex + gx * b;
+  const deny = ey + gy * b;
+  const a = Math.abs(denx) >= Math.abs(deny) ? (Math.abs(denx) > 1e-12 ? (hx - fx * b) / denx : 0) : (hy - fy * b) / deny;
+  return [a, b];
+}
+
+/** Sutherland-Hodgman clip of polygon (xs, ys) against the convex polygon (cx, cy). */
+function clipConvex(xs: number[], ys: number[], cx: number[], cy: number[]): { x: number[]; y: number[] } {
+  let area = 0;
+  for (let i = 0; i < cx.length; i++) {
+    const j = (i + 1) % cx.length;
+    area += cx[i] * cy[j] - cx[j] * cy[i];
+  }
+  const sign = area >= 0 ? 1 : -1;
+  let inX = xs;
+  let inY = ys;
+  for (let i = 0; i < cx.length && inX.length; i++) {
+    const j = (i + 1) % cx.length;
+    const ax = cx[i];
+    const ay = cy[i];
+    const dx = cx[j] - ax;
+    const dy = cy[j] - ay;
+    if (dx === 0 && dy === 0) continue;
+    const side = (x: number, y: number) => sign * (dx * (y - ay) - dy * (x - ax));
+    const outX: number[] = [];
+    const outY: number[] = [];
+    for (let k = 0; k < inX.length; k++) {
+      const l = (k + 1) % inX.length;
+      const s0 = side(inX[k], inY[k]);
+      const s1 = side(inX[l], inY[l]);
+      if (s0 >= 0) {
+        outX.push(inX[k]);
+        outY.push(inY[k]);
+      }
+      if ((s0 >= 0) !== (s1 >= 0)) {
+        const t = s0 / (s0 - s1);
+        outX.push(inX[k] + (inX[l] - inX[k]) * t);
+        outY.push(inY[k] + (inY[l] - inY[k]) * t);
+      }
+    }
+    inX = outX;
+    inY = outY;
+  }
+  return { x: inX, y: inY };
+}
+
+interface OverlayContext {
+  texMat: MaterialDef[];
+  texMatName: string[];
+  dispMeshes: (DisplacementMesh | null)[];
+  lm: LightmapBuild | null;
+  faceReq: Int32Array;
+  faceMode: Int8Array;
+  faceArea: Int32Array;
+  stats: RenderBuildStats;
+}
+
+interface OverlayAcc {
+  material: string;
+  area: number;
+  lit: boolean;
+  order: number;
+  surfFlags: number;
+  pos: number[];
+  nrm: number[];
+  uv: number[];
+  lmuv: number[];
+  idx: number[];
+}
+
+/**
+ * Overlay fragments: the overlay quad (in its own basis) is clipped against each face it lists - projected
+ * into the overlay plane - and the pieces are put back onto the face plane along the overlay normal (onto
+ * every triangle for displacement faces). Texture coordinates come from the inverse bilinear position inside
+ * the quad; lightmap coordinates from the face underneath, so overlays are lit like the surface they lie on.
+ */
+function buildOverlayBatches(bsp: BspFile, ctx: OverlayContext): RenderBatch[] {
+  const overlays = parseOverlays(bsp);
+  if (!overlays.length) return [];
+  const world = bsp.models[0];
+  if (!world) return [];
+  const wFirst = world.firstFace;
+  const wEnd = world.firstFace + world.numFaces;
+  const accs = new Map<string, OverlayAcc>();
+  const lm = ctx.lm;
+  const lmOut = new Float32Array(2);
+
+  for (const ov of overlays) {
+    const ti = bsp.texinfo[ov.texInfo];
+    const mat = ti ? ctx.texMat[ti.texData] : undefined;
+    // decals without their real texture (stock content that isn't packed) would draw an opaque stand-in quad
+    if (!ti || !mat || mat.isTool || mat.isSky || !mat.image || isProceduralImage(mat.image)) {
+      ctx.stats.overlaysSkipped++;
+      continue;
+    }
+    const matName = ctx.texMatName[ti.texData];
+    const U = ov.basisU;
+    const V = ov.basisV;
+    const N = ov.normal;
+    const O = ov.origin;
+    const qx = ov.points.map((p) => p[0]);
+    const qy = ov.points.map((p) => p[1]);
+    let fragments = 0;
+
+    for (const f of ov.faces) {
+      if (!(f >= wFirst && f < wEnd)) continue;
+      const face = bsp.faces[f];
+      const plane = face ? bsp.planes[face.planeNum] : undefined;
+      if (!face || !plane) continue;
+      const sign = face.side ? -1 : 1;
+      const fnx = plane.normal.x * sign;
+      const fny = plane.normal.y * sign;
+      const fnz = plane.normal.z * sign;
+      const mode = ctx.faceMode[f];
+      const lit = !!lm && !mat.unlit;
+      const key = `${matName}|${ctx.faceArea[f] ?? -1}|${lit ? 1 : 0}|${ov.renderOrder}`;
+      let acc = accs.get(key);
+      if (!acc) {
+        acc = { material: matName, area: ctx.faceArea[f] ?? -1, lit, order: ov.renderOrder, surfFlags: 0, pos: [], nrm: [], uv: [], lmuv: [], idx: [] };
+        accs.set(key, acc);
+      }
+      const A = acc;
+      const fti = bsp.texinfo[face.texInfo];
+      const lv = fti ? fti.lightmapVecs : null;
+      const lmW = face.lightmapTextureSizeInLuxels[0] + 1;
+      const lmH = face.lightmapTextureSizeInLuxels[1] + 1;
+
+      /** Emits one clipped polygon lying on the plane (pnx, pny, pnz) . x = pd; luxel(x) gives its lightmap coords. */
+      const emit = (
+        px: number[],
+        py: number[],
+        pnx: number,
+        pny: number,
+        pnz: number,
+        pd: number,
+        normalAt: (x: number, y: number, z: number) => [number, number, number],
+        luxel: (x: number, y: number, z: number) => [number, number] | null,
+      ): void => {
+        const denom = pnx * N.x + pny * N.y + pnz * N.z;
+        if (Math.abs(denom) < 0.01) return;
+        const base = A.pos.length / 3;
+        for (let k = 0; k < px.length; k++) {
+          const u = px[k];
+          const v = py[k];
+          // point on the overlay plane, then along the overlay normal onto the surface
+          const ox = O.x + U.x * u + V.x * v;
+          const oy = O.y + U.y * u + V.y * v;
+          const oz = O.z + U.z * u + V.z * v;
+          const t = (pd - (pnx * ox + pny * oy + pnz * oz)) / denom;
+          const x = ox + N.x * t;
+          const y = oy + N.y * t;
+          const z = oz + N.z * t;
+          const n = normalAt(x, y, z);
+          A.pos.push(x + n[0] * OVERLAY_LIFT, y + n[1] * OVERLAY_LIFT, z + n[2] * OVERLAY_LIFT);
+          A.nrm.push(n[0], n[1], n[2]);
+          const [a, b] = inverseBilinear(qx, qy, u, v);
+          A.uv.push(ov.u[0] + (ov.u[1] - ov.u[0]) * a, ov.v[0] + (ov.v[1] - ov.v[0]) * b);
+          if (A.lit) {
+            const req = ctx.faceReq[f];
+            const lux = mode === MODE_LIT && req >= 0 ? luxel(x, y, z) : null;
+            if (lux) {
+              lightmapUV(lm!, req, lmW, lmH, lux[0], lux[1], lmOut, 0);
+              A.lmuv.push(lmOut[0], lmOut[1]);
+            } else A.lmuv.push(lm!.whiteU, lm!.whiteV);
+          }
+        }
+        // fan, oriented counter-clockwise around the surface normal
+        let qxN = 0;
+        let qyN = 0;
+        let qzN = 0;
+        const P = A.pos;
+        for (let k = 0; k < px.length; k++) {
+          const i0 = (base + k) * 3;
+          const i1 = (base + ((k + 1) % px.length)) * 3;
+          qxN += (P[i0 + 1] - P[i1 + 1]) * (P[i0 + 2] + P[i1 + 2]);
+          qyN += (P[i0 + 2] - P[i1 + 2]) * (P[i0] + P[i1]);
+          qzN += (P[i0] - P[i1]) * (P[i0 + 1] + P[i1 + 1]);
+        }
+        const reverse = qxN * pnx + qyN * pny + qzN * pnz < 0;
+        for (let k = 1; k + 1 < px.length; k++) {
+          A.idx.push(base);
+          if (reverse) A.idx.push(base + k + 1, base + k);
+          else A.idx.push(base + k, base + k + 1);
+        }
+        A.surfFlags |= ti.flags;
+        fragments++;
+      };
+
+      const toOverlay = (x: number, y: number, z: number): [number, number] => {
+        const dx = x - O.x;
+        const dy = y - O.y;
+        const dz = z - O.z;
+        return [dx * U.x + dy * U.y + dz * U.z, dx * V.x + dy * V.y + dz * V.z];
+      };
+
+      if (face.dispInfo >= 0) {
+        const mesh = ctx.dispMeshes[face.dispInfo];
+        if (!mesh) continue;
+        const MP = mesh.positions;
+        const MN = mesh.normals;
+        const n = mesh.size;
+        const I = mesh.indices;
+        const qminX = Math.min(...qx);
+        const qmaxX = Math.max(...qx);
+        const qminY = Math.min(...qy);
+        const qmaxY = Math.max(...qy);
+        for (let k = 0; k < I.length; k += 3) {
+          const vi = [I[k], I[k + 1], I[k + 2]];
+          const cx: number[] = [];
+          const cy: number[] = [];
+          for (const v of vi) {
+            const [u, w] = toOverlay(MP[v * 3], MP[v * 3 + 1], MP[v * 3 + 2]);
+            cx.push(u);
+            cy.push(w);
+          }
+          if (Math.max(...cx) < qminX || Math.min(...cx) > qmaxX || Math.max(...cy) < qminY || Math.min(...cy) > qmaxY) continue;
+          const clipped = clipConvex(qx, qy, cx, cy);
+          if (clipped.x.length < 3) continue;
+          // triangle plane + barycentric helpers
+          const ax = MP[vi[0] * 3];
+          const ay = MP[vi[0] * 3 + 1];
+          const az = MP[vi[0] * 3 + 2];
+          const e1 = [MP[vi[1] * 3] - ax, MP[vi[1] * 3 + 1] - ay, MP[vi[1] * 3 + 2] - az];
+          const e2 = [MP[vi[2] * 3] - ax, MP[vi[2] * 3 + 1] - ay, MP[vi[2] * 3 + 2] - az];
+          let tnx = e1[1] * e2[2] - e1[2] * e2[1];
+          let tny = e1[2] * e2[0] - e1[0] * e2[2];
+          let tnz = e1[0] * e2[1] - e1[1] * e2[0];
+          const tl = Math.hypot(tnx, tny, tnz);
+          if (!(tl > 1e-9)) continue;
+          tnx /= tl;
+          tny /= tl;
+          tnz /= tl;
+          const td = tnx * ax + tny * ay + tnz * az;
+          const d00 = e1[0] * e1[0] + e1[1] * e1[1] + e1[2] * e1[2];
+          const d01 = e1[0] * e2[0] + e1[1] * e2[1] + e1[2] * e2[2];
+          const d11 = e2[0] * e2[0] + e2[1] * e2[1] + e2[2] * e2[2];
+          const den = d00 * d11 - d01 * d01;
+          const bary = (x: number, y: number, z: number): [number, number, number] => {
+            const p = [x - ax, y - ay, z - az];
+            const d20 = p[0] * e1[0] + p[1] * e1[1] + p[2] * e1[2];
+            const d21 = p[0] * e2[0] + p[1] * e2[1] + p[2] * e2[2];
+            const b1 = den ? (d11 * d20 - d01 * d21) / den : 0;
+            const b2 = den ? (d00 * d21 - d01 * d20) / den : 0;
+            return [1 - b1 - b2, b1, b2];
+          };
+          const normalAt = (x: number, y: number, z: number): [number, number, number] => {
+            const w = bary(x, y, z);
+            let nx = 0;
+            let ny = 0;
+            let nz = 0;
+            for (let q = 0; q < 3; q++) {
+              nx += MN[vi[q] * 3] * w[q];
+              ny += MN[vi[q] * 3 + 1] * w[q];
+              nz += MN[vi[q] * 3 + 2] * w[q];
+            }
+            const l = Math.hypot(nx, ny, nz) || 1;
+            return [nx / l, ny / l, nz / l];
+          };
+          const luxel = (x: number, y: number, z: number): [number, number] => {
+            const w = bary(x, y, z);
+            let s = 0;
+            let t = 0;
+            for (let q = 0; q < 3; q++) {
+              const row = Math.floor(vi[q] / n);
+              const col = vi[q] % n;
+              s += ((col / (n - 1)) * (lmW - 1)) * w[q];
+              t += ((row / (n - 1)) * (lmH - 1)) * w[q];
+            }
+            return [s, t];
+          };
+          emit(clipped.x, clipped.y, tnx, tny, tnz, td, normalAt, luxel);
+        }
+        continue;
+      }
+
+      // polygon face
+      if (face.numEdges < 3) continue;
+      const cx: number[] = [];
+      const cy: number[] = [];
+      for (let k = 0; k < face.numEdges; k++) {
+        const se = bsp.surfedges[face.firstEdge + k];
+        const vi = se >= 0 ? bsp.edges[se * 2] : bsp.edges[-se * 2 + 1];
+        if (vi === undefined || vi * 3 + 2 >= bsp.vertices.length) {
+          cx.length = 0;
+          break;
+        }
+        const [u, w] = toOverlay(bsp.vertices[vi * 3], bsp.vertices[vi * 3 + 1], bsp.vertices[vi * 3 + 2]);
+        cx.push(u);
+        cy.push(w);
+      }
+      if (cx.length < 3) continue;
+      const clipped = clipConvex(qx, qy, cx, cy);
+      if (clipped.x.length < 3) continue;
+      const fn: [number, number, number] = [fnx, fny, fnz];
+      emit(
+        clipped.x,
+        clipped.y,
+        fnx,
+        fny,
+        fnz,
+        plane.dist * sign,
+        () => fn,
+        (x, y, z) =>
+          lv
+            ? [
+                x * lv[0] + y * lv[1] + z * lv[2] + lv[3] - face.lightmapTextureMinsInLuxels[0],
+                x * lv[4] + y * lv[5] + z * lv[6] + lv[7] - face.lightmapTextureMinsInLuxels[1],
+              ]
+            : null,
+      );
+    }
+    if (fragments) {
+      ctx.stats.overlays++;
+      ctx.stats.overlayFragments += fragments;
+    }
+  }
+
+  const out: RenderBatch[] = [];
+  const list = [...accs.values()].filter((a) => a.idx.length).sort((a, b) => a.order - b.order);
+  for (const a of list) {
+    const positions = new Float32Array(a.pos);
+    const mins = { x: Infinity, y: Infinity, z: Infinity };
+    const maxs = { x: -Infinity, y: -Infinity, z: -Infinity };
+    for (let i = 0; i < positions.length; i += 3) {
+      mins.x = Math.min(mins.x, positions[i]);
+      mins.y = Math.min(mins.y, positions[i + 1]);
+      mins.z = Math.min(mins.z, positions[i + 2]);
+      maxs.x = Math.max(maxs.x, positions[i]);
+      maxs.y = Math.max(maxs.y, positions[i + 1]);
+      maxs.z = Math.max(maxs.z, positions[i + 2]);
+    }
+    out.push({
+      model: 0,
+      material: a.material,
+      positions,
+      normals: new Float32Array(a.nrm),
+      uvs: new Float32Array(a.uv),
+      lightmapUVs: a.lit ? new Float32Array(a.lmuv) : null,
+      alphas: null,
+      indices: new Uint32Array(a.idx),
+      surfFlags: a.surfFlags,
+      area: a.area,
+      isDisplacement: false,
+      mins,
+      maxs,
+      decal: true,
+    });
+  }
+  return out;
 }

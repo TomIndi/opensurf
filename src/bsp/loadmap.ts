@@ -6,7 +6,8 @@
 //   collision  brush models (brush entities placed in world space), CollisionWorld over world brushes, solid
 //              brush entities and displacement prisms; brush entities that start disabled are made non-solid
 //   textures   pakfile, materials (VMT/VTF or procedural stand-ins), 2D sky, baked cubemaps
-//   geometry   face areas, render batches + lightmap atlas, static props packed in the map
+//   geometry   face areas, render batches + lightmap atlas, props (static props and model entities) packed in
+//              the map, lit by vrad's leaf ambient cubes
 // followed by the cheap entity-derived data (sky_camera, env_fog_controller, spawns, zones, bounds).
 //
 // Nothing in the returned LoadedMap references `data`: every array is decoded or copied, so the (possibly
@@ -37,7 +38,8 @@ import { parseEntities } from './entities';
 import { BuildRenderOptions, RenderBuildStats, buildRenderBatches } from './geometry';
 import { BuildMaterialsOptions, buildMaterials, fallbackMaterial, loadCubemaps, loadSky, normalizeMaterialName, proceduralSky } from './materials';
 import { PakFile } from './pakfile';
-import { buildStaticProps } from './props';
+import { selectLightingSource } from './lightmap';
+import { buildMapProps } from './props';
 import { parseBsp } from './reader';
 import { BspFile } from './types';
 
@@ -46,7 +48,7 @@ export interface LoadBspOptions {
   materials?: BuildMaterialsOptions;
   /** Render batch options (cell size, lightmap atlas limit...). */
   render?: Omit<BuildRenderOptions, 'entities' | 'warnings' | 'stats'>;
-  /** Decode static props packed in the map (default true). */
+  /** Decode static props and prop_dynamic/prop_physics models packed in the map (default true). */
   props?: boolean;
   /** Largest prop texture size (default 512, or 1024 with materials.compressedTextures). */
   propTextureSize?: number;
@@ -403,7 +405,14 @@ export async function loadBspMap(
   let props: RenderProp[] = [];
   if (opts.props !== false) {
     try {
-      props = buildStaticProps(bsp, pak, materials, { warnings, materials: opts.materials, maxTextureSize: opts.propTextureSize });
+      const hdrLighting = selectLightingSource(bsp, opts.render?.lighting === 'hdr')?.hdr ?? false;
+      props = buildMapProps(bsp, entities, pak, materials, {
+        warnings,
+        materials: opts.materials,
+        maxTextureSize: opts.propTextureSize,
+        hdrLighting,
+        world: collision,
+      });
     } catch (e) {
       warnings.push(`static props: ${(e as Error).message}`);
     }

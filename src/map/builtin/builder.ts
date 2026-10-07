@@ -12,9 +12,9 @@
 import { QAngle, qa } from '../../core/angles';
 import { Vec3, v3, v3clone } from '../../core/vec3';
 import { fallbackMaterial } from '../../bsp/materials';
-import { brushFromBox, brushFromPoints, brushWindings } from '../../physics/brushbuild';
+import { brushFromBox, brushFromPlanes, brushFromPoints, brushWindings } from '../../physics/brushbuild';
 import { CollisionWorld } from '../../physics/collision';
-import { Brush, CONTENTS_SOLID, CONTENTS_TRIGGER_INTERNAL } from '../../physics/types';
+import { Brush, CONTENTS_SOLID, CONTENTS_TRIGGER_INTERNAL, Plane } from '../../physics/types';
 import type {
   BrushModelInfo,
   FogDef,
@@ -27,9 +27,15 @@ import type {
   ZoneType,
 } from '../types';
 
-/** Surf faces must stay within these normal.z bounds (ground is normal.z >= 0.7). */
+/**
+ * Surf faces must stay within these normal.z bounds (ground is normal.z >= 0.7): 48-63 degree slopes. The
+ * KSF maps themselves cluster around 0.62-0.65 (measured area-weighted over surf_utopia_njv, surf_kitsune,
+ * surf_beginner, surf_rookie, surf_ing and surf_aircontrol_ksf: medians 0.615-0.655), so that is the default.
+ */
 export const RAMP_MIN_NZ = 0.45;
-export const RAMP_MAX_NZ = 0.6;
+export const RAMP_MAX_NZ = 0.66;
+/** The classic KSF ramp: normal.z 0.62, a 51.7 degree slope. */
+export const DEFAULT_RAMP_NZ = 0.62;
 
 export type RampSide = 'left' | 'right' | 'both';
 
@@ -100,6 +106,19 @@ interface RenderBrush {
   brush: Brush;
   /** Material for a side, or null to skip it. */
   mat: (normal: Vec3, sideIndex: number) => string | null;
+}
+
+/** A ramp surf face drawn straight from its ribs: smooth normals and continuous UVs across segments. */
+interface RenderStrip {
+  mat: string;
+  /** Per rib: ridge point and face bottom point. */
+  top: Vec3[];
+  bottom: Vec3[];
+  /** Per rib vertex normals (averaged over the neighbouring segments). */
+  normals: Vec3[];
+  /** Texture coordinates in world units: u along the ridge (shared by the whole rib), v down the face. */
+  u: number[];
+  vBottom: number[];
 }
 
 interface RenderPoly {
@@ -178,7 +197,7 @@ export function yawOf(d: Vec3): number {
 }
 
 /** Ramp height that gives a straight (level) ramp of the given face width the requested normal.z. */
-export function rampHeightFor(width: number, normalZ: number): number {
+export function rampHeightFor(width: number, normalZ = DEFAULT_RAMP_NZ): number {
   return (width * Math.sqrt(1 - normalZ * normalZ)) / normalZ;
 }
 
@@ -216,6 +235,8 @@ export class MapBuilder {
   private readonly worldBrushes: Brush[] = [];
   private readonly renderBrushes: RenderBrush[] = [];
   private readonly renderPolys: RenderPoly[] = [];
+  private readonly renderStrips: RenderStrip[] = [];
+  private readonly materialColors = new Map<string, [number, number, number]>();
   private readonly models: BrushModelInfo[] = [];
   private readonly entityKvs: { kv: Record<string, string>; model: number }[] = [];
   private readonly spawns: SpawnPoint[] = [];
@@ -378,6 +399,7 @@ export class MapBuilder {
       brushes: [],
       surfNormals: [],
     };
+    const segs: Brush[] = [];
     for (let i = 0; i < n - 1; i++) {
       const b = brushFromPoints([...ribs[i], ...ribs[i + 1]], CONTENTS_SOLID, 0);
       if (!b) throw new Error(`MapBuilder(${this.name}): degenerate ramp segment ${i} of ${rec.name}`);
@@ -393,13 +415,42 @@ export class MapBuilder {
           throw new Error(`MapBuilder(${this.name}): ${rec.name} has a walkable top face (normal.z ${nz.toFixed(3)})`);
         }
       }
+      segs.push(b);
+      // the exact segment is what gets drawn - minus its surf faces (drawn as smooth strips below) and the caps
+      // it shares with its neighbours (inside the ramp; drawn edge-on they would show as dark seam lines)
+      const ws = brushWindings(b);
+      const onRib = (w: Vec3[], rib: Vec3[]): boolean =>
+        w.every((p) => rib.some((q) => Math.abs(p.x - q.x) < 0.05 && Math.abs(p.y - q.y) < 0.05 && Math.abs(p.z - q.z) < 0.05));
+      const hidden = new Set<number>();
+      b.sides.forEach((sd, k) => {
+        if (sd.bevel || ws[k].length < 3) return;
+        const nz = sd.plane.normal.z;
+        if (nz > 0.05 && nz < 0.7) hidden.add(k);
+        else if ((i > 0 && onRib(ws[k], ribs[i])) || (i < n - 2 && onRib(ws[k], ribs[i + 1]))) hidden.add(k);
+      });
+      this.renderBrushes.push({ brush: b, mat: (_nrm, k) => (hidden.has(k) ? null : sideMat) });
+      if (o.trimMat) this.addRampTrim(ribs[i], ribs[i + 1], o.side, o.trimMat, o.trimWidth ?? 10);
+    }
+    // smooth surf strips (one per face)
+    for (const bi of o.side === 'both' ? [1, 2] : [1]) {
+      const top = ribs.map((r) => r[0]);
+      const bottom = ribs.map((r) => r[bi]);
+      const segN: Vec3[] = [];
+      for (let k = 0; k < n - 1; k++) {
+        let nn = norm(cross(sub(top[k + 1], top[k]), sub(bottom[k], top[k])));
+        if (nn.z < 0) nn = scale(nn, -1);
+        segN.push(nn);
+      }
+      const normals = top.map((_, k) => norm(add(segN[Math.max(0, k - 1)], segN[Math.min(n - 2, k)])));
+      const u: number[] = [0];
+      for (let k = 1; k < n; k++) u.push(u[k - 1] + Math.hypot(top[k].x - top[k - 1].x, top[k].y - top[k - 1].y, top[k].z - top[k - 1].z));
+      const vBottom = top.map((t, k) => Math.hypot(bottom[k].x - t.x, bottom[k].y - t.y, bottom[k].z - t.z));
+      this.renderStrips.push({ mat, top, bottom, normals, u, vBottom });
+    }
+    // Collision uses overlapping segments (see seamlessSegments): no brush edge at the visible seams.
+    for (const b of segs.length > 1 ? seamlessSegments(segs, ribs) : segs) {
       this.worldBrushes.push(b);
       rec.brushes.push(b);
-      this.renderBrushes.push({
-        brush: b,
-        mat: (nrm) => (nrm.z > 0.05 && nrm.z < 0.7 ? mat : sideMat),
-      });
-      if (o.trimMat) this.addRampTrim(ribs[i], ribs[i + 1], o.side, o.trimMat, o.trimWidth ?? 10);
     }
     this.ramps.push(rec);
     return rec;
@@ -457,6 +508,14 @@ export class MapBuilder {
     this.addDecal([v3(mins.x, maxs.y - w, z), v3(maxs.x, maxs.y - w, z), v3(maxs.x, maxs.y, z), v3(mins.x, maxs.y, z)], up, mat);
     this.addDecal([v3(mins.x, mins.y + w, z), v3(mins.x + w, mins.y + w, z), v3(mins.x + w, maxs.y - w, z), v3(mins.x, maxs.y - w, z)], up, mat);
     this.addDecal([v3(maxs.x - w, mins.y + w, z), v3(maxs.x, mins.y + w, z), v3(maxs.x, maxs.y - w, z), v3(maxs.x - w, maxs.y - w, z)], up, mat);
+  }
+
+  /**
+   * Gives a built-in material a custom colour (sRGB 0..1) instead of the colour word in its name. The name must
+   * not contain a colour word (e.g. "builtin/grid_sea").
+   */
+  setMaterialColor(name: string, srgb: [number, number, number]): void {
+    this.materialColors.set(name, srgb);
   }
 
   // ------------------------------------------------------------------------------------ entities
@@ -618,7 +677,10 @@ export class MapBuilder {
       let m = materials.get(name);
       if (!m) {
         const tile = tileSizeFor(name);
-        m = fallbackMaterial(name, undefined, tile, tile);
+        const c = this.materialColors.get(name);
+        // the reflectivity fallback takes linear colour
+        const refl = c ? v3(Math.pow(c[0], 2.2), Math.pow(c[1], 2.2), Math.pow(c[2], 2.2)) : undefined;
+        m = fallbackMaterial(name, refl, tile, tile);
         materials.set(name, m);
       }
       return m;
@@ -671,7 +733,44 @@ export class MapBuilder {
         emitPoly(rb.brush.model, matName, ws[i], sd.plane.normal);
       }
     }
-    for (const rp of this.renderPolys) emitPoly(rp.model, rp.mat, rp.points, rp.normal);
+    for (const st of this.renderStrips) {
+      const m = material(st.mat);
+      const acc = batchFor(0, st.mat);
+      const base = acc.positions.length / 3;
+      const n = st.top.length;
+      for (let k = 0; k < n; k++) {
+        for (const [p, v] of [
+          [st.top[k], 0],
+          [st.bottom[k], st.vBottom[k]],
+        ] as [Vec3, number][]) {
+          acc.positions.push(p.x, p.y, p.z);
+          acc.normals.push(st.normals[k].x, st.normals[k].y, st.normals[k].z);
+          acc.uvs.push(st.u[k] / m.width, v / m.height);
+          acc.mins.x = Math.min(acc.mins.x, p.x);
+          acc.mins.y = Math.min(acc.mins.y, p.y);
+          acc.mins.z = Math.min(acc.mins.z, p.z);
+          acc.maxs.x = Math.max(acc.maxs.x, p.x);
+          acc.maxs.y = Math.max(acc.maxs.y, p.y);
+          acc.maxs.z = Math.max(acc.maxs.z, p.z);
+        }
+      }
+      for (let k = 0; k + 1 < n; k++) {
+        const t0 = base + k * 2;
+        const b0 = t0 + 1;
+        const t1 = t0 + 2;
+        const b1 = t0 + 3;
+        // counter-clockwise seen from the face side
+        const c = cross(sub(st.top[k + 1], st.top[k]), sub(st.bottom[k], st.top[k]));
+        if (dot(c, st.normals[k]) >= 0) acc.indices.push(t0, t1, b1, t0, b1, b0);
+        else acc.indices.push(t0, b1, t1, t0, b0, b1);
+      }
+    }
+    for (const rp of this.renderPolys) {
+      // shade and texture with the polygon's own plane (Newell normal), on the side of the requested normal
+      let nn = newellNormal(rp.points);
+      if (dot(nn, rp.normal) < 0) nn = scale(nn, -1);
+      emitPoly(rp.model, rp.mat, rp.points, nn.x || nn.y || nn.z ? nn : rp.normal);
+    }
     const out: RenderBatch[] = [];
     for (const acc of batches.values()) {
       out.push({
@@ -716,17 +815,103 @@ export class MapBuilder {
 }
 
 /**
+ * Collision brushes for a multi-segment ramp that hide the segment seams from box traces. Each segment's
+ * brush is extended past its interior caps into its neighbours (and trimmed by the neighbours' planes that
+ * contain it), so a segment's own start/end edges end up buried under the neighbouring surface and the
+ * visible seam is just the line where two face planes meet. Without this, a hull sliding across a seam can
+ * land within DIST_EPSILON of the next segment's face and of the bevel through its exposed start edge at the
+ * same time, and the epsilon back-off then picks the edge plane, which faces against the motion: the classic
+ * surf "rampbug" that eats most of the player's speed.
+ */
+function seamlessSegments(segs: Brush[], ribs: Vec3[][]): Brush[] {
+  const n = segs.length;
+  const near = (p: Vec3, rib: Vec3[]): boolean => rib.some((q) => Math.abs(p.x - q.x) < 0.05 && Math.abs(p.y - q.y) < 0.05 && Math.abs(p.z - q.z) < 0.05);
+  interface SegInfo {
+    caps: (Plane | null)[]; // [start, end]
+    other: Plane[];
+    verts: Vec3[];
+    len: number;
+  }
+  const info: SegInfo[] = segs.map((b, i) => {
+    const ws = brushWindings(b);
+    const caps: (Plane | null)[] = [null, null];
+    const other: Plane[] = [];
+    const verts: Vec3[] = [];
+    b.sides.forEach((sd, k) => {
+      if (sd.bevel || ws[k].length < 3) return;
+      for (const p of ws[k]) verts.push(p);
+      const plane = { normal: v3clone(sd.plane.normal), dist: sd.plane.dist };
+      if (ws[k].every((p) => near(p, ribs[i]))) caps[0] = plane;
+      else if (ws[k].every((p) => near(p, ribs[i + 1]))) caps[1] = plane;
+      else other.push(plane);
+    });
+    const len = Math.hypot(ribs[i + 1][0].x - ribs[i][0].x, ribs[i + 1][0].y - ribs[i][0].y, ribs[i + 1][0].z - ribs[i][0].z);
+    return { caps, other, verts, len };
+  });
+  // A neighbour plane may trim the extension only if it doesn't cut into this segment: strictly for surf planes;
+  // the (possibly folded) back and bottom planes may shave up to a few units off this segment's underside.
+  const contains = (pl: Plane, verts: Vec3[]): boolean => {
+    const surf = pl.normal.z > 0.05 && pl.normal.z < 0.7;
+    const tol = surf ? 0.01 : 4;
+    return verts.every((v) => dot(v, pl.normal) <= pl.dist + tol);
+  };
+  const out: Brush[] = [];
+  for (let i = 0; i < n; i++) {
+    const me = info[i];
+    const planes: Plane[] = me.other.map((p) => ({ normal: v3clone(p.normal), dist: p.dist }));
+    for (let c = 0; c < 2; c++) {
+      const cap = me.caps[c];
+      if (!cap) continue;
+      const nb = c === 0 ? i - 1 : i + 1;
+      if (nb < 0 || nb >= n) {
+        planes.push(cap); // a real end of the ramp
+        continue;
+      }
+      const ext = Math.min(256, info[nb].len * 0.9);
+      planes.push({ normal: v3clone(cap.normal), dist: cap.dist + ext });
+      // keep the extension inside the neighbour: its side planes that don't cut this segment's own volume, and
+      // its far cap (the ramp's real end, or its joint with the next segment)
+      for (const pl of info[nb].other) if (contains(pl, me.verts)) planes.push(pl);
+      const far = info[nb].caps[c === 0 ? 0 : 1];
+      if (far && me.verts.every((v) => dot(v, far.normal) <= far.dist + 0.01)) planes.push(far);
+    }
+    const b = brushFromPlanes(planes, CONTENTS_SOLID, 0);
+    // never lose the exact segment: fall back to it if anything went wrong
+    out.push(b && b.mins.x <= segs[i].mins.x + 0.01 && b.maxs.x >= segs[i].maxs.x - 0.01 && b.mins.z <= segs[i].mins.z + 0.01 ? b : segs[i]);
+  }
+  return out;
+}
+
+/**
  * Texture axes of a face (world-space planar projection, one texture unit per world unit before the
- * division by the material size): floors/ceilings map x/y; walls and ramps use the face's horizontal
- * tangent and its in-plane down-slope direction (no stretching on 60 degree surf faces).
+ * division by the material size, never stretched): floors/ceilings use world x/y laid into the face plane;
+ * walls and ramps use the face's horizontal tangent and its in-plane down-slope direction.
  */
 function faceAxes(n: Vec3): [Vec3, Vec3] {
-  if (n.z >= 0.7) return [v3(1, 0, 0), v3(0, -1, 0)];
-  if (n.z <= -0.7) return [v3(1, 0, 0), v3(0, 1, 0)];
+  if (Math.abs(n.z) >= 0.7) {
+    // floors, ceilings, gentle slopes: u follows world x, v follows world -y (+y underneath), in the plane
+    const t = norm(v3(1 - n.x * n.x, -n.x * n.y, -n.x * n.z));
+    return [t, norm(cross(t, n))];
+  }
   const t = norm(v3(-n.y, n.x, 0));
   let b = cross(n, t);
   if (b.z > 0) b = scale(b, -1);
   return [t, norm(b)];
+}
+
+/** Unit normal of a polygon by Newell's method (counter-clockwise = towards the viewer). */
+function newellNormal(pts: Vec3[]): Vec3 {
+  let x = 0;
+  let y = 0;
+  let z = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i];
+    const b = pts[(i + 1) % pts.length];
+    x += (a.y - b.y) * (a.z + b.z);
+    y += (a.z - b.z) * (a.x + b.x);
+    z += (a.x - b.x) * (a.y + b.y);
+  }
+  return norm(v3(x, y, z));
 }
 
 /** Splits a wall box around a rectangular hole ([a0, a1] along the wall, [z0, z1] up). */
