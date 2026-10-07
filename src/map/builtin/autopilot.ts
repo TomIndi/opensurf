@@ -160,7 +160,8 @@ export class Autopilot {
       }
       // drifting up toward the ridge (fast through a curve whose banking can't turn you): tap the other key
       // to push off the ramp, down the face, like a player does
-      const pushOff = !this.holding && frac < band[0] * 0.7 && vOut < 40;
+      const tRidge = vOut < -1 ? f.lateral / -vOut : Infinity;
+      const pushOff = !this.holding && frac < band[0] && (tRidge < 0.35 || frac < 0.1);
       const tyaw = Math.atan2(f.tangent.y, f.tangent.x) * RAD;
       const outSign = r.face === 'left' ? 1 : -1;
       let rel = 0;

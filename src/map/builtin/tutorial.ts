@@ -56,8 +56,8 @@ export function buildTutorial(): BuiltCourse {
   // section 3: transfer from ramp 5 to the parallel ramp 6 (a bit lower, across a gap)
   R.push(chain.straight({ gap: 640, speed: 1060, land: 400, length: 3000, descent: 5, dropIn, side: 'left', width: W, mat: mats[2], sideMat: SIDE, trimMat: TRIM, trimWidth: 6, name: 'ramp 5' }));
   const r5 = R[R.length - 1];
-  // ramp 6 starts 1400 units into ramp 5 (past its drop-in), 240 units below ramp 5's ridge there
-  const r6drop = chain.pos.z - (rampPoint(r5, 'left', 1400, 0).z - 240);
+  // ramp 6 starts 1400 units into ramp 5 (past its drop-in), 300 units below ramp 5's ridge there
+  const r6drop = chain.pos.z - (rampPoint(r5, 'left', 1400, 0).z - 300);
   R.push(chain.straight({ gap: -1600, shift: 832, drop: r6drop, length: 3700, descent: 5, side: 'right', width: W, mat: mats[2], sideMat: SIDE, trimMat: TRIM, trimWidth: 6, name: 'ramp 6' }));
   // section 4: the long jumps
   R.push(chain.straight({ gap: 704, speed: 930, land: 400, length: 3200, descent: 5, dropIn, side: 'right', width: W, mat: mats[3], sideMat: SIDE, trimMat: TRIM, trimWidth: 6, name: 'ramp 7' }));

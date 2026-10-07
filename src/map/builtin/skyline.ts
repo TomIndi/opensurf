@@ -38,13 +38,13 @@ export function buildSkyline(): BuiltCourse {
   const R: RampRecord[] = [];
   // section 1: a long opener sweeping left
   R.push(ch.straight({ gap: 0, drop: 0, length: 4000, descent: 8, side: 'left', width: W, ...st, name: 'opener' }));
-  R.push(ch.curve({ gap: 448, speed: 1000, land: 400, radius: 3400, angle: 75, segments: 15, descent: 4, side: 'left', width: W, ...st, name: 'left sweep' }));
+  R.push(ch.curve({ gap: 448, speed: 1000, land: 400, radius: 3400, angle: 75, segments: 15, descent: 4, nz: 0.56, side: 'left', width: W, ...st, name: 'left sweep' }));
   // section 2: a drop-in, then a long sweep back to the right (a lateral hop onto the other face)
   R.push(ch.straight({ gap: 512, speed: 1100, land: 420, length: 3600, descent: 5, dropIn, side: 'left', width: W, ...st, name: 'cp1 drop' }));
-  R.push(ch.curve({ gap: 640, shift: 760, travel: 460, speed: 900, land: 420, radius: 3000, angle: -110, segments: 22, descent: 4, side: 'right', width: W, ...st, name: 'right sweep' }));
+  R.push(ch.curve({ gap: 640, shift: 760, travel: 460, speed: 800, land: 420, radius: 3200, angle: -110, segments: 22, descent: 4, nz: 0.56, side: 'right', width: W, ...st, name: 'right sweep' }));
   // section 3: drop-in into a tight left hook, then a long straight
   R.push(ch.straight({ gap: 640, speed: 1100, land: 420, length: 3600, descent: 5, dropIn, side: 'right', width: W, ...st, name: 'cp2 drop' }));
-  R.push(ch.curve({ gap: 704, shift: -760, travel: 460, speed: 900, land: 420, radius: 2800, angle: 95, segments: 19, descent: 4, side: 'left', width: W, ...st, name: 'left hook' }));
+  R.push(ch.curve({ gap: 704, shift: -760, travel: 460, speed: 820, land: 420, radius: 3400, angle: 95, segments: 19, descent: 4, nz: 0.56, side: 'left', width: W, ...st, name: 'left hook' }));
   // section 4: drop-in, a long straight and the big final gap onto the end platform
   R.push(ch.straight({ gap: 768, speed: 1100, land: 420, length: 4200, descent: 5, dropIn, side: 'left', width: W, ...st, name: 'cp3 drop' }));
   R.push(ch.straight({ gap: 960, speed: 820, land: 420, length: 4800, descent: 5, side: 'left', width: W, ...st, name: 'finale' }));
