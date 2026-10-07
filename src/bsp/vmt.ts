@@ -319,6 +319,14 @@ function paramCondition(cond: string): boolean {
   return neg ? !v : v;
 }
 
+/**
+ * Strips DX-level / HDR suffixes from a shader name ("LightmappedGeneric_DX9" → "lightmappedgeneric",
+ * "UnlitGeneric_DX6" → "unlitgeneric", "Water_DX81" → "water"): old VMTs sometimes name a fallback shader directly.
+ */
+export function normalizeShaderName(shader: string): string {
+  return shader.toLowerCase().replace(/(_nobump)?(_hdr)?_dx\d+$/, '');
+}
+
 function firstBlockKey(kv: KeyValues): string | null {
   for (const k of Object.keys(kv)) if (isBlock(kv[k])) return k;
   return null;
@@ -393,7 +401,8 @@ export function parseVmt(text: string, readFile?: (path: string) => string | nul
   } catch {
     r = { shader: '', body: newKv(), includes: [] };
   }
-  const shader = r.shader;
+  const rawShader = r.shader;
+  const shader = rawShader === 'patch' ? rawShader : normalizeShaderName(rawShader);
   const params: Record<string, string> = Object.create(null);
   let proxies: KeyValues | null = null;
 
@@ -423,7 +432,9 @@ export function parseVmt(text: string, readFile?: (path: string) => string | nul
   // Shader fallback blocks for a DX9 PC with HDR enabled.
   if (shader && shader !== 'patch') {
     for (const suffix of ['_dx9', '_dx90', '_hdr_dx9']) {
-      const blk = r.body[shader + suffix];
+      const key = shader + suffix;
+      if (key === rawShader) continue;
+      const blk = r.body[key];
       if (isBlock(blk)) applyScalars(blk);
     }
   }

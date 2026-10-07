@@ -34,14 +34,29 @@
 //    scrubbing.
 //  - Ramps steeper than normal.z 0.7 are never ground: the player "surfs" them, the into-ramp velocity
 //    is clipped away every tick (no bounce with sv_bounce 0) and gravity accelerates the slide.
-//  - Ducking: ground transition over vars.duckTime (spline-eased view 64 -> 46), instant in the air with
-//    the origin raised by the hull difference (18) so the head stays put (Source in-air FinishDuck);
-//    unducking only when the standing hull fits; duck speed crop (0.34) while ducked on the ground.
+//  - CategorizePosition does not snap the player down to the ground it finds (2007+ engine): after a
+//    vertical landing the player may rest up to 2 units above the floor until StayOnGround runs on the next
+//    ground move. Walking down an exactly-18-unit drop is just out of StayOnGround's reach (needs 18 + eps).
+//  - Ducking: ground transition over vars.duckTime (spline-eased view 64 -> 46); instant hull switch in
+//    the air where CS:GO shrinks/grows the hull around its center (origin +-9; CS:S used 18) - crouch
+//    jumping reaches 9 units higher (63 @64 / 64 @128 tick, Valve's CS:GO Mapper's Reference); the camera
+//    keeps its height at the switch and eases the rest. Unducking only when the standing hull fits; ducked
+//    ground speed crop 0.34, eased in with the duck amount during the transition (CS:GO).
 //  - Base velocity (conveyors / trigger_push): vertical part is consumed by StartGravity as an
 //    acceleration, horizontal part is added for the move and removed afterwards.
 //  - Water (CheckWater levels feet/waist/eyes, WaterMove, swim up, sink, water jump), noclip
 //    (FullNoClipMove with sv_noclipspeed/sv_noclipaccelerate) and func_ladder climbing (LadderMove).
-//  - CheckStuck: a player starting a tick inside solid is nudged out (unstuckPlayer) before moving.
+//  - CheckStuck: a player starting a tick inside solid is nudged out (unstuckPlayer) before moving;
+//    a failed search is retried every STUCK_RETRY_TICKS (a move leaving the brush in one trace escapes).
+//  - laggedMovement (player_speedmod) scales the simulated frametime.
+//
+// Beyond vanilla (switchable via movementOptions): the rampbug fix surf servers run - TryPlayerMove never
+// zeroes the velocity just because the hull is embedded by a precision hair; it steps out and keeps going.
+//
+// Surf facts that fall out of the above (and are covered by tests/movement.test.ts): holding the strafe
+// key into a ramp holds the surfer's height (the 30 u/s push is clipped into a slow climb) and keeps all
+// along-ramp speed; releasing slides down the ramp at g*sin(slope); pressing into the ramp while sliding
+// down brakes the slide; synced air strafing grows |v|^2 by exactly 30^2 per tick (faster at 128 tick).
 import { Vec3, v3 } from '../core/vec3';
 import {
   DUCK_HULL_MAXS,
@@ -101,6 +116,12 @@ const KNIFE_SPEED = 250;
 const BUNNYJUMP_MAX_SPEED_FACTOR = 1.1;
 /** Height difference between the standing and ducked hulls (72 - 54). */
 const DUCK_HULL_DELTA = HULL_MAXS.z - DUCK_HULL_MAXS.z;
+/**
+ * CS:GO ducks/unducks around the hull center in the air: the origin moves by half the hull difference (9).
+ * (CS:S/Source 2007 moves it by the full 18.) Matches Valve's CS:GO Mapper's Reference: jump-then-crouch
+ * reaches 63 units at 64 tick / 64 at 128 = the standing jump apex (54.65 / 55.83) + 9.
+ */
+const AIR_DUCK_SHIFT = DUCK_HULL_DELTA * 0.5;
 /** surfaceFriction while airborne and moving up (Source CategorizePosition quirk). */
 const RISING_SURFACE_FRICTION = 0.25;
 
@@ -170,16 +191,31 @@ let W: TraceWorld;
 let V: MoveVars;
 let P: PlayerState;
 let EV: MoveEvents;
-/** Effective frametime of this move (frametime * laggedMovement). */
-let FT = 0;
-// CheckParameters results
-let fmove = 0;
-let smove = 0;
-let umove = 0;
-/** mv->m_flMaxSpeed: player speed after the walk modifier. */
-let maxspeed = KNIFE_SPEED;
-/** The player's own max speed (knife 250 / override), before walk/duck modifiers. */
-let playerMaxspeed = KNIFE_SPEED;
+/**
+ * Per-call numeric state. Kept as fields of one object (initialized with non-integer values so V8 gives
+ * them unboxed double representation) rather than module-level `let`s, which would box every double write.
+ */
+const M = {
+  /** Effective frametime of this move (frametime * laggedMovement). */
+  ft: 0.5,
+  // CheckParameters results
+  fmove: 0.5,
+  smove: 0.5,
+  umove: 0.5,
+  /** mv->m_flMaxSpeed: player speed after the walk modifier. */
+  maxspeed: 0.5,
+  /** The player's own max speed (knife 250 / override), before walk/duck modifiers. */
+  playerMaxspeed: 0.5,
+  /**
+   * Wish speed for accelerate/airAccelerate (doubles passed as arguments to or returned from non-inlined
+   * functions are boxed by V8, so hot-path doubles travel through this object instead).
+   */
+  wishspeed: 0.5,
+  /** Acceleration for accelerate(). */
+  accel: 0.5,
+  /** Overbounce for clipVelocity(). */
+  overbounce: 0.5,
+};
 
 const dummyEvents = newMoveEvents();
 
@@ -246,14 +282,10 @@ function copyVec(out: Vec3, a: Vec3): void {
   out.z = a.z;
 }
 
-function finiteOr(x: number, fallback: number): number {
-  return Number.isFinite(x) ? x : fallback;
-}
-
 /** Source AngleVectors (forward, right) for pitch/yaw with roll 0. */
 function computeViewVectors(pitch: number, yaw: number): void {
-  const p = (finiteOr(pitch, 0) * Math.PI) / 180;
-  const y = (finiteOr(yaw, 0) * Math.PI) / 180;
+  const p = ((Number.isFinite(pitch) ? pitch : 0) * Math.PI) / 180;
+  const y = ((Number.isFinite(yaw) ? yaw : 0) * Math.PI) / 180;
   const sp = Math.sin(p);
   const cp = Math.cos(p);
   const sy = Math.sin(y);
@@ -268,9 +300,9 @@ function computeViewVectors(pitch: number, yaw: number): void {
 
 /**
  * Horizontal wish velocity for walking/air moves: forward and right with z zeroed and renormalized,
- * combined with the move amounts, clamped to maxspeed. Fills wishvel/wishdir, returns wishspeed.
+ * combined with the move amounts, clamped to maxspeed. Fills wishvel/wishdir and M.wishspeed.
  */
-function buildFlatWish(): number {
+function buildFlatWish(): void {
   let fx = FWD.x;
   let fy = FWD.y;
   let fl = Math.sqrt(fx * fx + fy * fy);
@@ -291,8 +323,8 @@ function buildFlatWish(): number {
     rx = 0;
     ry = 0;
   }
-  wishvel.x = fx * fmove + rx * smove;
-  wishvel.y = fy * fmove + ry * smove;
+  wishvel.x = fx * M.fmove + rx * M.smove;
+  wishvel.y = fy * M.fmove + ry * M.smove;
   wishvel.z = 0;
   let wishspeed = Math.sqrt(wishvel.x * wishvel.x + wishvel.y * wishvel.y);
   if (wishspeed > 0) {
@@ -303,13 +335,13 @@ function buildFlatWish(): number {
     wishdir.y = 0;
   }
   wishdir.z = 0;
-  if (wishspeed !== 0 && wishspeed > maxspeed) {
-    const s = maxspeed / wishspeed;
+  if (wishspeed !== 0 && wishspeed > M.maxspeed) {
+    const s = M.maxspeed / wishspeed;
     wishvel.x *= s;
     wishvel.y *= s;
-    wishspeed = maxspeed;
+    wishspeed = M.maxspeed;
   }
-  return wishspeed;
+  M.wishspeed = wishspeed;
 }
 
 // ------------------------------------------------------------------------------------------ velocity
@@ -336,21 +368,21 @@ function gravityScale(): number {
 
 function startGravity(): void {
   const v = P.velocity;
-  v.z -= gravityScale() * V.gravity * 0.5 * FT;
-  v.z += P.baseVelocity.z * FT;
+  v.z -= gravityScale() * V.gravity * 0.5 * M.ft;
+  v.z += P.baseVelocity.z * M.ft;
   P.baseVelocity.z = 0;
   checkVelocity();
 }
 
 function finishGravity(): void {
   if (P.waterJumpTime > 0) return;
-  P.velocity.z -= gravityScale() * V.gravity * 0.5 * FT;
+  P.velocity.z -= gravityScale() * V.gravity * 0.5 * M.ft;
   checkVelocity();
 }
 
-/** out = in clipped against the plane (overbounce 1 = slide); in and out may alias. */
-function clipVelocity(inv: Vec3, n: Vec3, out: Vec3, overbounce: number): void {
-  const backoff = (inv.x * n.x + inv.y * n.y + inv.z * n.z) * overbounce;
+/** out = in clipped against the plane with overbounce M.overbounce (1 = slide); in and out may alias. */
+function clipVelocity(inv: Vec3, n: Vec3, out: Vec3): void {
+  const backoff = (inv.x * n.x + inv.y * n.y + inv.z * n.z) * M.overbounce;
   let ox = inv.x - n.x * backoff;
   let oy = inv.y - n.y * backoff;
   let oz = inv.z - n.z * backoff;
@@ -375,7 +407,7 @@ function friction(): void {
   if (P.onGround) {
     const fric = V.friction * P.surfaceFriction;
     const control = speed < V.stopspeed ? V.stopspeed : speed;
-    drop += control * fric * FT;
+    drop += control * fric * M.ft;
   }
   let newspeed = speed - drop;
   if (newspeed < 0) newspeed = 0;
@@ -391,13 +423,15 @@ function friction(): void {
  * Ground/noclip acceleration. CS:GO scales the per-tick gain by the weapon speed (knife 250) rather
  * than the (walk/duck reduced) wish speed: sv_accelerate_use_weapon_speed 1.
  */
-function accelerate(dir: Vec3, wishspeed: number, accel: number): void {
+function accelerate(dir: Vec3): void {
+  const wishspeed = M.wishspeed;
+  const accel = M.accel;
   const v = P.velocity;
   const current = v.x * dir.x + v.y * dir.y + v.z * dir.z;
   const addspeed = wishspeed - current;
   if (addspeed <= 0) return;
-  const scale = wishspeed > playerMaxspeed ? wishspeed : playerMaxspeed;
-  let accelspeed = accel * FT * scale * P.surfaceFriction;
+  const scale = wishspeed > M.playerMaxspeed ? wishspeed : M.playerMaxspeed;
+  let accelspeed = accel * M.ft * scale * P.surfaceFriction;
   if (accelspeed > addspeed) accelspeed = addspeed;
   v.x += accelspeed * dir.x;
   v.y += accelspeed * dir.y;
@@ -405,15 +439,17 @@ function accelerate(dir: Vec3, wishspeed: number, accel: number): void {
 }
 
 /** Source AirAccelerate: projection capped at sv_air_max_wishspeed, gain uses the uncapped wishspeed. */
-function airAccelerate(dir: Vec3, wishspeed: number, accel: number): void {
+function airAccelerate(dir: Vec3): void {
   if (P.waterJumpTime > 0) return;
+  const wishspeed = M.wishspeed;
+  const accel = V.airaccelerate;
   const cap = V.airMaxWishspeed;
   const wishspd = wishspeed > cap ? cap : wishspeed;
   const v = P.velocity;
   const current = v.x * dir.x + v.y * dir.y + v.z * dir.z;
   const addspeed = wishspd - current;
   if (addspeed <= 0) return;
-  let accelspeed = accel * wishspeed * FT * P.surfaceFriction;
+  let accelspeed = accel * wishspeed * M.ft * P.surfaceFriction;
   if (accelspeed > addspeed) accelspeed = addspeed;
   v.x += accelspeed * dir.x;
   v.y += accelspeed * dir.y;
@@ -430,6 +466,53 @@ function addBaseVelocity(sign: number): void {
 
 // ------------------------------------------------------------------------------------------ sliding
 
+/** Behaviour switches beyond vanilla CS:GO, exported so the game can expose them as server cvars. */
+export const movementOptions = {
+  /**
+   * Rampbug fix (what CS:GO surf servers run as plugins): when vanilla TryPlayerMove would zero the
+   * velocity because the hull is embedded in a surface by a precision hair (allsolid sweep, or the CS:GO
+   * stuck guard), step out to the nearest free spot within half a unit and keep the velocity instead.
+   * Has no effect on any move vanilla handles without killing the velocity.
+   */
+  rampbugFix: true,
+};
+
+const NUDGE_STEPS = [1 / 32, 1 / 16, 1 / 8, 1 / 4, 1 / 2];
+/** +z first (floors/ramps are what players slide on), then the horizontal axes, then down. */
+const NUDGE_DIRS = [0, 0, 1, 1, 0, 0, -1, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, -1];
+const lastNormal = v3();
+const nudgePos = v3();
+const nudgeTest = v3();
+
+/**
+ * Moves `pos` to the nearest free hull position within half a unit: along the last clip plane's normal
+ * first, then the axes. Returns false (pos untouched) if there is none.
+ */
+function nudgeFree(pos: Vec3, hull: { mins: Vec3; maxs: Vec3 }, useNormal: boolean): boolean {
+  for (let s = 0; s < NUDGE_STEPS.length; s++) {
+    const step = NUDGE_STEPS[s];
+    if (useNormal) {
+      nudgeTest.x = pos.x + lastNormal.x * step;
+      nudgeTest.y = pos.y + lastNormal.y * step;
+      nudgeTest.z = pos.z + lastNormal.z * step;
+      if (!hullStuckAt(nudgeTest, hull)) {
+        copyVec(pos, nudgeTest);
+        return true;
+      }
+    }
+    for (let d = 0; d < NUDGE_DIRS.length; d += 3) {
+      nudgeTest.x = pos.x + NUDGE_DIRS[d] * step;
+      nudgeTest.y = pos.y + NUDGE_DIRS[d + 1] * step;
+      nudgeTest.z = pos.z + NUDGE_DIRS[d + 2] * step;
+      if (!hullStuckAt(nudgeTest, hull)) {
+        copyVec(pos, nudgeTest);
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 /**
  * Source TryPlayerMove: moves the player by velocity * frametime, sliding along everything it hits.
  * Returns the "blocked" flags (1 = floor, 2 = wall/step, 4 = trapped).
@@ -441,7 +524,8 @@ function tryPlayerMove(): number {
   let blocked = 0;
   let numplanes = 0;
   let allFraction = 0;
-  let timeLeft = FT;
+  let timeLeft = M.ft;
+  let haveLastNormal = false;
   copyVec(originalVel, vel);
   copyVec(primalVel, vel);
 
@@ -453,7 +537,10 @@ function tryPlayerMove(): number {
     const tr = W.traceBox(org, endPos, hull.mins, hull.maxs, MASK_PLAYERSOLID, trMove);
     allFraction += tr.fraction;
     if (tr.allsolid) {
-      // trapped in solid: Source zeroes velocity (CheckStuck frees the player next tick)
+      // Trapped in solid: Source zeroes the velocity here. When the hull is merely embedded by a hair
+      // (sub-epsilon precision error), that is the classic surf "rampbug"; like the rampbug fixes surf
+      // servers run, step out to the nearest free spot and keep sliding with the velocity intact.
+      if (movementOptions.rampbugFix && nudgeFree(org, hull, haveLastNormal)) continue;
       zeroVec(vel);
       return 4;
     }
@@ -462,6 +549,11 @@ function tryPlayerMove(): number {
         // CS:GO precision guard: a full sweep whose end box is nevertheless in solid is not taken.
         const st = W.traceBox(tr.endpos, tr.endpos, hull.mins, hull.maxs, MASK_PLAYERSOLID, trTest);
         if (st.startsolid || st.allsolid || st.fraction !== 1) {
+          copyVec(nudgePos, tr.endpos);
+          if (movementOptions.rampbugFix && nudgeFree(nudgePos, hull, haveLastNormal)) {
+            copyVec(org, nudgePos);
+            break;
+          }
           zeroVec(vel);
           break;
         }
@@ -483,18 +575,21 @@ function tryPlayerMove(): number {
     }
     copyVec(clipPlanes[numplanes], n);
     numplanes++;
+    copyVec(lastNormal, n);
+    haveLastNormal = true;
 
     if (numplanes === 1 && P.moveType === MOVETYPE_WALK && !P.onGround) {
       // airborne, first impact: reflect/slide off this one plane only
       const p0 = clipPlanes[0];
-      const overbounce = p0.z > MIN_WALK_NORMAL ? 1 : 1 + V.bounce * (1 - P.surfaceFriction);
-      clipVelocity(originalVel, p0, newVel, overbounce);
+      M.overbounce = p0.z > MIN_WALK_NORMAL ? 1 : 1 + V.bounce * (1 - P.surfaceFriction);
+      clipVelocity(originalVel, p0, newVel);
       copyVec(vel, newVel);
       copyVec(originalVel, newVel);
     } else {
       let i = 0;
       for (; i < numplanes; i++) {
-        clipVelocity(originalVel, clipPlanes[i], vel, 1);
+        M.overbounce = 1;
+        clipVelocity(originalVel, clipPlanes[i], vel);
         let j = 0;
         for (; j < numplanes; j++) {
           if (j !== i) {
@@ -797,7 +892,7 @@ function checkWaterJump(): void {
 function waterJump(): void {
   if (P.waterJumpTime > 10) P.waterJumpTime = 10;
   if (!(P.waterJumpTime > 0)) return;
-  P.waterJumpTime -= FT;
+  P.waterJumpTime -= M.ft;
   if (P.waterJumpTime <= 0 || P.waterLevel === 0) {
     P.waterJumpTime = 0;
     P.flags &= ~FL_WATERJUMP;
@@ -809,19 +904,19 @@ function waterJump(): void {
 /** Source WaterMove: 3D swimming with water friction and acceleration. */
 function waterMove(cmd: UserCmd): void {
   const vel = P.velocity;
-  wishvel.x = FWD.x * fmove + RIGHT.x * smove;
-  wishvel.y = FWD.y * fmove + RIGHT.y * smove;
-  wishvel.z = FWD.z * fmove + RIGHT.z * smove;
+  wishvel.x = FWD.x * M.fmove + RIGHT.x * M.smove;
+  wishvel.y = FWD.y * M.fmove + RIGHT.y * M.smove;
+  wishvel.z = FWD.z * M.fmove + RIGHT.z * M.smove;
   if (cmd.buttons & IN_JUMP) {
-    wishvel.z += playerMaxspeed; // swim straight up
-  } else if (!fmove && !smove && !umove) {
+    wishvel.z += M.playerMaxspeed; // swim straight up
+  } else if (!M.fmove && !M.smove && !M.umove) {
     wishvel.z -= WATER_SINK_SPEED; // drift towards the bottom
   } else {
     // exaggerate upward movement along forward as well
-    let up = fmove * FWD.z * 2;
+    let up = M.fmove * FWD.z * 2;
     if (up < 0) up = 0;
-    else if (up > playerMaxspeed) up = playerMaxspeed;
-    wishvel.z += umove + up;
+    else if (up > M.playerMaxspeed) up = M.playerMaxspeed;
+    wishvel.z += M.umove + up;
   }
   let wishspeed = Math.sqrt(wishvel.x * wishvel.x + wishvel.y * wishvel.y + wishvel.z * wishvel.z);
   if (wishspeed > 0) {
@@ -829,14 +924,14 @@ function waterMove(cmd: UserCmd): void {
     wishdir.y = wishvel.y / wishspeed;
     wishdir.z = wishvel.z / wishspeed;
   } else zeroVec(wishdir);
-  if (wishspeed > maxspeed) wishspeed = maxspeed;
+  if (wishspeed > M.maxspeed) wishspeed = M.maxspeed;
   wishspeed *= WATER_WISH_SCALE;
 
   // water friction
   const speed = Math.sqrt(vel.x * vel.x + vel.y * vel.y + vel.z * vel.z);
   let newspeed = 0;
   if (speed > 0) {
-    newspeed = speed - FT * speed * V.waterfriction * P.surfaceFriction;
+    newspeed = speed - M.ft * speed * V.waterfriction * P.surfaceFriction;
     if (newspeed < 0.1) newspeed = 0;
     const s = newspeed / speed;
     vel.x *= s;
@@ -847,7 +942,7 @@ function waterMove(cmd: UserCmd): void {
   if (wishspeed >= 0.1) {
     const addspeed = wishspeed - newspeed;
     if (addspeed > 0) {
-      let accelspeed = V.wateraccelerate * wishspeed * FT * P.surfaceFriction;
+      let accelspeed = V.wateraccelerate * wishspeed * M.ft * P.surfaceFriction;
       if (accelspeed > addspeed) accelspeed = addspeed;
       vel.x += accelspeed * wishdir.x;
       vel.y += accelspeed * wishdir.y;
@@ -857,9 +952,9 @@ function waterMove(cmd: UserCmd): void {
 
   addBaseVelocity(1);
   const org = P.origin;
-  tmpPos.x = org.x + vel.x * FT;
-  tmpPos.y = org.y + vel.y * FT;
-  tmpPos.z = org.z + vel.z * FT;
+  tmpPos.x = org.x + vel.x * M.ft;
+  tmpPos.y = org.y + vel.y * M.ft;
+  tmpPos.z = org.z + vel.z * M.ft;
   const tr = tracePlayer(org, tmpPos, trAux);
   if (tr.fraction === 1) {
     copyVec(org, tr.endpos);
@@ -874,7 +969,7 @@ function waterMove(cmd: UserCmd): void {
 // ------------------------------------------------------------------------------------------ jumping
 
 function preventBunnyJumping(): void {
-  const cap = BUNNYJUMP_MAX_SPEED_FACTOR * playerMaxspeed;
+  const cap = BUNNYJUMP_MAX_SPEED_FACTOR * M.playerMaxspeed;
   if (cap <= 0) return;
   const v = P.velocity;
   const spd = Math.sqrt(v.x * v.x + v.y * v.y);
@@ -887,7 +982,7 @@ function preventBunnyJumping(): void {
 /** Source/CS:GO CheckJumpButton. Returns true when a jump happened. */
 function checkJumpButton(): boolean {
   if (P.waterJumpTime > 0) {
-    P.waterJumpTime -= FT;
+    P.waterJumpTime -= M.ft;
     if (P.waterJumpTime < 0) P.waterJumpTime = 0;
     return false;
   }
@@ -922,10 +1017,11 @@ function checkJumpButton(): boolean {
 function walkMove(): void {
   const vel = P.velocity;
   const org = P.origin;
-  const wishspeed = buildFlatWish();
+  buildFlatWish();
 
   vel.z = 0;
-  accelerate(wishdir, wishspeed, V.accelerate);
+  M.accel = V.accelerate;
+  accelerate(wishdir);
   vel.z = 0;
 
   addBaseVelocity(1);
@@ -939,8 +1035,8 @@ function walkMove(): void {
   const sy = org.y;
 
   // first try moving straight to the destination at the current height
-  tmpPos.x = org.x + vel.x * FT;
-  tmpPos.y = org.y + vel.y * FT;
+  tmpPos.x = org.x + vel.x * M.ft;
+  tmpPos.y = org.y + vel.y * M.ft;
   tmpPos.z = org.z;
   const tr = tracePlayer(org, tmpPos, trAux);
   if (tr.fraction === 1) {
@@ -960,8 +1056,8 @@ function walkMove(): void {
 }
 
 function airMove(): void {
-  const wishspeed = buildFlatWish();
-  airAccelerate(wishdir, wishspeed, V.airaccelerate);
+  buildFlatWish();
+  airAccelerate(wishdir);
   addBaseVelocity(1);
   tryPlayerMove();
   addBaseVelocity(-1);
@@ -1019,11 +1115,11 @@ function fullNoClipMove(cmd: UserCmd): void {
   const maxspd = svMaxspeed * V.noclipspeed;
   let factor = V.noclipspeed;
   if (cmd.buttons & IN_SPEED) factor /= 2;
-  const fm = fmove * factor;
-  const sm = smove * factor;
+  const fm = M.fmove * factor;
+  const sm = M.smove * factor;
   wishvel.x = FWD.x * fm + RIGHT.x * sm;
   wishvel.y = FWD.y * fm + RIGHT.y * sm;
-  wishvel.z = FWD.z * fm + RIGHT.z * sm + umove * factor;
+  wishvel.z = FWD.z * fm + RIGHT.z * sm + M.umove * factor;
   let wishspeed = Math.sqrt(wishvel.x * wishvel.x + wishvel.y * wishvel.y + wishvel.z * wishvel.z);
   if (wishspeed > 0) {
     wishdir.x = wishvel.x / wishspeed;
@@ -1039,7 +1135,9 @@ function fullNoClipMove(cmd: UserCmd): void {
   }
   P.surfaceFriction = 1;
   if (V.noclipaccelerate > 0) {
-    accelerate(wishdir, wishspeed, V.noclipaccelerate);
+    M.wishspeed = wishspeed;
+    M.accel = V.noclipaccelerate;
+    accelerate(wishdir);
     const spd = Math.sqrt(vel.x * vel.x + vel.y * vel.y + vel.z * vel.z);
     if (spd < 1) {
       zeroVec(vel);
@@ -1047,7 +1145,7 @@ function fullNoClipMove(cmd: UserCmd): void {
     }
     // bleed off speed (friction-like), at least a quarter of max speed worth
     const control = spd < maxspd / 4 ? maxspd / 4 : spd;
-    const drop = control * V.friction * P.surfaceFriction * FT;
+    const drop = control * V.friction * P.surfaceFriction * M.ft;
     let newspeed = spd - drop;
     if (newspeed < 0) newspeed = 0;
     const s = newspeed / spd;
@@ -1059,9 +1157,9 @@ function fullNoClipMove(cmd: UserCmd): void {
   }
   checkVelocity();
   // just move: no collision at all
-  org.x += vel.x * FT;
-  org.y += vel.y * FT;
-  org.z += vel.z * FT;
+  org.x += vel.x * M.ft;
+  org.y += vel.y * M.ft;
+  org.z += vel.z * M.ft;
   if (V.noclipaccelerate < 0) zeroVec(vel);
 }
 
@@ -1076,10 +1174,10 @@ function ladderMove(cmd: UserCmd): boolean {
     wishdir.x = -stored.x;
     wishdir.y = -stored.y;
     wishdir.z = -stored.z;
-  } else if (fmove || smove) {
-    wishdir.x = FWD.x * fmove + RIGHT.x * smove;
-    wishdir.y = FWD.y * fmove + RIGHT.y * smove;
-    wishdir.z = FWD.z * fmove + RIGHT.z * smove;
+  } else if (M.fmove || M.smove) {
+    wishdir.x = FWD.x * M.fmove + RIGHT.x * M.smove;
+    wishdir.y = FWD.y * M.fmove + RIGHT.y * M.smove;
+    wishdir.z = FWD.z * M.fmove + RIGHT.z * M.smove;
     const l = Math.sqrt(wishdir.x * wishdir.x + wishdir.y * wishdir.y + wishdir.z * wishdir.z);
     if (l === 0) return false;
     wishdir.x /= l;
@@ -1136,8 +1234,8 @@ function ladderMove(cmd: UserCmd): boolean {
   const onFloor = (W.pointContents(tmpPos, CONTENTS_SOLID) & CONTENTS_SOLID) !== 0 || P.onGround;
 
   const climb = V.ladderSpeed;
-  const forwardSpeed = fmove > 0 ? climb : fmove < 0 ? -climb : 0;
-  const rightSpeed = smove > 0 ? climb : smove < 0 ? -climb : 0;
+  const forwardSpeed = M.fmove > 0 ? climb : M.fmove < 0 ? -climb : 0;
+  const rightSpeed = M.smove > 0 ? climb : M.smove < 0 ? -climb : 0;
   const vel = P.velocity;
   const n = ladderNormal;
 
@@ -1196,23 +1294,38 @@ function fullLadderMove(cmd: UserCmd): void {
 
 // ------------------------------------------------------------------------------------------ ducking
 
-function simpleSpline(t: number): number {
-  const t2 = t * t;
-  return 3 * t2 - 2 * t2 * t;
-}
-
-function setDuckView(amount: number): void {
-  const f = simpleSpline(amount < 0 ? 0 : amount > 1 ? 1 : amount);
+/** View height for P.duckAmount, eased with Source's SimpleSpline (3t^2 - 2t^3). */
+function setDuckView(): void {
+  const a = P.duckAmount;
+  const t = a < 0 ? 0 : a > 1 ? 1 : a;
+  const f = t * t * (3 - 2 * t);
   P.viewOffsetZ = VIEW_OFFSET_STAND + (VIEW_OFFSET_DUCK - VIEW_OFFSET_STAND) * f;
 }
 
-/** Switch to the duck hull. In the air the feet are pulled up so the head stays in place. */
+/**
+ * Keeps the eye at world height `eyeZ` after an in-air hull switch moved the origin, by restarting the duck
+ * view transition from the matching duck amount (the view then eases to its target over the remaining
+ * duck time instead of snapping by the 9 units the origin moved).
+ */
+function keepEyeHeight(eyeZ: number): void {
+  const view = eyeZ - P.origin.z;
+  // invert view = 64 - 18 * smoothstep(a)
+  const y = (VIEW_OFFSET_STAND - view) / (VIEW_OFFSET_STAND - VIEW_OFFSET_DUCK);
+  if (y <= 0 || y >= 1 || !(V.duckTime > 0)) return; // out of range: keep the snapped view
+  // (only the view/duck amount: P.ducking stays false, so jump and speed rules follow the hull alone)
+  P.duckAmount = 0.5 - Math.sin(Math.asin(1 - 2 * y) / 3);
+  setDuckView();
+}
+
+/** Switch to the duck hull. In the air the hull shrinks around its center (origin up by 9). */
 function finishDuck(inAir: boolean): void {
+  let eyeZ = NaN;
   if (!P.ducked) {
     if (inAir) {
       const org = P.origin;
+      eyeZ = org.z + P.viewOffsetZ;
       copyVec(tmpPos, org);
-      tmpPos.z += DUCK_HULL_DELTA;
+      tmpPos.z += AIR_DUCK_SHIFT;
       // the raised duck hull lies inside the old standing hull; fall back to the unraised one if not free
       if (!hullStuckAt(tmpPos, DUCK_HULL) || hullStuckAt(org, DUCK_HULL)) copyVec(org, tmpPos);
     }
@@ -1223,17 +1336,19 @@ function finishDuck(inAir: boolean): void {
   P.duckAmount = 1;
   P.duckTimer = 0;
   P.viewOffsetZ = VIEW_OFFSET_DUCK;
+  if (inAir && eyeZ === eyeZ) keepEyeHeight(eyeZ);
   categorizeInternal();
 }
 
-/** Back to the standing hull (origin already validated by the caller). */
-function finishUnduck(): void {
+/** Back to the standing hull (origin already validated by the caller; eyeZ NaN = no view easing). */
+function finishUnduck(eyeZ: number): void {
   P.ducked = false;
   P.flags &= ~FL_DUCKING;
   P.ducking = false;
   P.duckAmount = 0;
   P.duckTimer = 0;
   P.viewOffsetZ = VIEW_OFFSET_STAND;
+  if (eyeZ === eyeZ) keepEyeHeight(eyeZ);
   categorizeInternal();
 }
 
@@ -1243,19 +1358,24 @@ function canUnduckOnGround(): boolean {
 }
 
 /**
- * In the air the standing hull goes down by the hull difference (head stays put): sweep it down; if it
- * hits the floor first the feet end on the floor. If the standing hull doesn't fit at the current origin
- * (low ceiling), the fully lowered position is still fine when free. Returns false if no room.
+ * In the air the hull grows around its center: the standing hull at origin - 9 (9 more room below the
+ * feet and above the head). Without room below, stand on what is there (sweep down from the origin, which
+ * needs the full 18 above the ducked head); without room above, lower by the whole 18. False if no room.
  */
 function tryUnduckInAir(): boolean {
   const org = P.origin;
   copyVec(tmpPos, org);
-  tmpPos.z -= DUCK_HULL_DELTA;
+  tmpPos.z -= AIR_DUCK_SHIFT;
+  if (!hullStuckAt(tmpPos, STAND_HULL)) {
+    copyVec(org, tmpPos);
+    return true;
+  }
   const tr = W.traceBox(org, tmpPos, STAND_HULL.mins, STAND_HULL.maxs, MASK_PLAYERSOLID, trAux);
   if (!tr.startsolid && !tr.allsolid) {
     copyVec(org, tr.endpos);
     return true;
   }
+  tmpPos.z = org.z - DUCK_HULL_DELTA;
   if (!hullStuckAt(tmpPos, STAND_HULL)) {
     copyVec(org, tmpPos);
     return true;
@@ -1265,18 +1385,23 @@ function tryUnduckInAir(): boolean {
 
 /** CS:GO-style duck state machine (see the module header). */
 function duck(cmd: UserCmd): void {
+  const holding = (cmd.buttons & IN_DUCK) !== 0;
+  // fast path (nearly every tick): standing, not touching the duck key
+  if (!holding && !P.ducked && !P.ducking && P.duckAmount === 0) {
+    P.duckTimer = 0;
+    return;
+  }
   const inAir = !P.onGround;
   // HandleDuckingSpeedCrop: ducked players move at 34% on the ground. CS:GO eases the crop in with the
   // duck amount (no full-speed burst during the duck transition); fully ducked it is exactly 0.34.
   if (P.onGround && ((P.flags & FL_DUCKING) !== 0 || P.ducking)) {
     const amount = (P.flags & FL_DUCKING) !== 0 && !P.ducking ? 1 : P.duckAmount;
     const crop = 1 - (1 - V.duckSpeedMultiplier) * (amount < 0 ? 0 : amount > 1 ? 1 : amount);
-    fmove *= crop;
-    smove *= crop;
-    umove *= crop;
+    M.fmove *= crop;
+    M.smove *= crop;
+    M.umove *= crop;
   }
-  const holding = (cmd.buttons & IN_DUCK) !== 0;
-  const rate = V.duckTime > 0 ? FT / V.duckTime : Infinity;
+  const rate = V.duckTime > 0 ? M.ft / V.duckTime : Infinity;
 
   if (holding) {
     if (!P.ducked) {
@@ -1286,7 +1411,7 @@ function duck(cmd: UserCmd): void {
         P.ducking = true;
         P.duckAmount = Math.min(1, P.duckAmount + rate);
         if (P.duckAmount >= 1) finishDuck(false);
-        else setDuckView(P.duckAmount);
+        else setDuckView();
       }
     } else if (P.ducking || P.duckAmount < 1) {
       // pressed again during an unduck transition: go back down (hull is still ducked)
@@ -1295,11 +1420,12 @@ function duck(cmd: UserCmd): void {
         P.duckAmount = 1;
         P.ducking = false;
       }
-      setDuckView(P.duckAmount);
+      setDuckView();
     }
   } else if (P.ducked) {
     if (inAir) {
-      if (tryUnduckInAir()) finishUnduck();
+      const eyeZ = P.origin.z + P.viewOffsetZ;
+      if (tryUnduckInAir()) finishUnduck(eyeZ);
       else {
         P.ducking = false;
         P.duckAmount = 1;
@@ -1308,8 +1434,8 @@ function duck(cmd: UserCmd): void {
     } else if (canUnduckOnGround()) {
       P.ducking = true;
       P.duckAmount = Math.max(0, P.duckAmount - rate);
-      if (P.duckAmount <= 0) finishUnduck();
-      else setDuckView(P.duckAmount);
+      if (P.duckAmount <= 0) finishUnduck(NaN);
+      else setDuckView();
     } else {
       // still under something: stay fully ducked and retry every tick
       P.ducking = false;
@@ -1323,7 +1449,7 @@ function duck(cmd: UserCmd): void {
       P.duckAmount = 0;
       P.ducking = false;
       P.viewOffsetZ = VIEW_OFFSET_STAND;
-    } else setDuckView(P.duckAmount);
+    } else setDuckView();
   }
 
   if (P.ducking && V.duckTime > 0) {
@@ -1333,9 +1459,9 @@ function duck(cmd: UserCmd): void {
 
 // ------------------------------------------------------------------------------------------ stuck
 
-/** Nudge offsets, nearest first: +-0.125..+-2 on every axis combination, then up to 18 units up. */
+/** Nudge offsets, nearest first: +-1/32..+-2 on every axis combination, then up to 18 units up. */
 const STUCK_OFFSETS: Float64Array = (() => {
-  const vals = [0, 0.125, -0.125, 0.25, -0.25, 0.5, -0.5, 1, -1, 2, -2];
+  const vals = [0, 1 / 32, -1 / 32, 1 / 16, -1 / 16, 0.125, -0.125, 0.25, -0.25, 0.5, -0.5, 1, -1, 2, -2];
   const list: [number, number, number][] = [];
   for (const z of vals) for (const y of vals) for (const x of vals) if (x || y || z) list.push([x, y, z]);
   // prefer upward on ties (floors are far more common than ceilings), then deterministic order
@@ -1360,6 +1486,10 @@ const STUCK_OFFSETS: Float64Array = (() => {
 
 const stuckBase = v3();
 const stuckTest = v3();
+/** Ticks to wait after a failed full unstuck search before searching again. */
+const STUCK_RETRY_TICKS = 32;
+/** Per-player unstuck retry cooldown. */
+const stuckState = new WeakMap<PlayerState, { cooldown: number }>();
 
 /**
  * Source CheckStuck: if the player's hull at its origin is in solid, move it to the nearest free spot from
@@ -1393,7 +1523,7 @@ export function categorizePosition(ps: PlayerState, world: TraceWorld, vars: Mov
   V = vars;
   P = ps;
   EV = resetMoveEvents(dummyEvents);
-  FT = 0;
+  M.ft = 0;
   categorizeInternal();
   if (ps.ducked) ps.flags |= FL_DUCKING;
   else ps.flags &= ~FL_DUCKING;
@@ -1425,8 +1555,8 @@ export function playerMove(
   let lagged = ps.laggedMovement;
   if (Number.isNaN(lagged)) lagged = 1;
   if (!(lagged > 0)) lagged = 0;
-  FT = finiteOr(frametime, 0) * lagged;
-  if (!(FT > 0)) FT = 0;
+  M.ft = (Number.isFinite(frametime) ? frametime : 0) * lagged;
+  if (!(M.ft > 0)) M.ft = 0;
 
   ps.viewAngles.pitch = cmd.viewangles.pitch;
   ps.viewAngles.yaw = cmd.viewangles.yaw;
@@ -1437,26 +1567,35 @@ export function playerMove(
   const oldWaterLevel = ps.waterLevel;
 
   // ---- CheckParameters
-  fmove = finiteOr(cmd.forwardmove, 0);
-  smove = finiteOr(cmd.sidemove, 0);
-  umove = finiteOr(cmd.upmove, 0);
-  playerMaxspeed = ps.maxSpeedOverride > 0 ? ps.maxSpeedOverride : Math.min(vars.maxspeed > 0 ? vars.maxspeed : KNIFE_SPEED, KNIFE_SPEED);
-  maxspeed = playerMaxspeed;
+  M.fmove = Number.isFinite(cmd.forwardmove) ? cmd.forwardmove : 0;
+  M.smove = Number.isFinite(cmd.sidemove) ? cmd.sidemove : 0;
+  M.umove = Number.isFinite(cmd.upmove) ? cmd.upmove : 0;
+  M.playerMaxspeed = ps.maxSpeedOverride > 0 ? ps.maxSpeedOverride : Math.min(vars.maxspeed > 0 ? vars.maxspeed : KNIFE_SPEED, KNIFE_SPEED);
+  M.maxspeed = M.playerMaxspeed;
   const noclip = ps.moveType === MOVETYPE_NOCLIP || ps.moveType === MOVETYPE_OBSERVER;
   if (!noclip) {
-    if ((cmd.buttons & IN_SPEED) !== 0 && ps.onGround) maxspeed *= vars.walkSpeedMultiplier;
-    const spd2 = fmove * fmove + smove * smove + umove * umove;
-    if (spd2 !== 0 && spd2 > maxspeed * maxspeed) {
-      const ratio = maxspeed / Math.sqrt(spd2);
-      fmove *= ratio;
-      smove *= ratio;
-      umove *= ratio;
+    if ((cmd.buttons & IN_SPEED) !== 0 && ps.onGround) M.maxspeed *= vars.walkSpeedMultiplier;
+    const spd2 = M.fmove * M.fmove + M.smove * M.smove + M.umove * M.umove;
+    if (spd2 !== 0 && spd2 > M.maxspeed * M.maxspeed) {
+      const ratio = M.maxspeed / Math.sqrt(spd2);
+      M.fmove *= ratio;
+      M.smove *= ratio;
+      M.umove *= ratio;
     }
   }
 
-  // ---- CheckStuck
+  // ---- CheckStuck (Source tries one nudge per 0.05 s; we search the whole table at once, and after a
+  // failed search wait STUCK_RETRY_TICKS before searching again so a deeply embedded player stays cheap -
+  // meanwhile the move runs normally: a trace that leaves the embedding brush is not blocked by it)
   if (ps.moveType === MOVETYPE_WALK || ps.moveType === MOVETYPE_LADDER) {
-    if (hullStuckAt(ps.origin, currentHull())) unstuckPlayer(ps, world);
+    if (hullStuckAt(ps.origin, currentHull())) {
+      let st = stuckState.get(ps);
+      if (st && st.cooldown > 0) st.cooldown--;
+      else if (!unstuckPlayer(ps, world)) {
+        if (!st) stuckState.set(ps, (st = { cooldown: 0 }));
+        st.cooldown = STUCK_RETRY_TICKS;
+      }
+    }
   }
 
   // ---- where are we (walkers keep last tick's categorization unless launched upward)

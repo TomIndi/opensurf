@@ -184,7 +184,9 @@ Per tick:
 2. **Base velocity** (CBasePlayer::PhysicsSimulate semantics): if `FL_BASEVELOCITY` was NOT set by a trigger
    during the previous tick, convert: `velocity += baseVelocity * (1 + frametime*0.5)`, `baseVelocity = 0`.
    Then clear `FL_BASEVELOCITY`.
-3. `playerMove(...)` with `frametime = tickInterval * laggedMovement`.
+3. `playerMove(ps, cmd, world, vars, tickInterval, ev)` — pass the RAW tick interval: playerMove multiplies by
+   `ps.laggedMovement` internally (player_speedmod). playerMove also runs CheckStuck itself. After any teleport call
+   `categorizePosition` (+ `unstuckPlayer`). `movementOptions.rampbugFix` (default on) can be exposed as `sv_rampbugfix`.
 4. Touch triggers: overlap of the player hull AABB with trigger brushes (`boxIntersectsBrush`), fire
    StartTouch / Touch / EndTouch (trigger_push sets base velocity + FL_BASEVELOCITY each Touch).
 5. Entity I/O queue (delayed outputs), logic_timer etc.

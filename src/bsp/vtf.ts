@@ -9,7 +9,7 @@
 //
 // decodeVtf() picks frame 0 / face 0 / slice 0 of the largest mip that fits `maxSize` and converts it to RGBA8
 // (sRGB colour, straight alpha). HDR formats are tone-mapped to sRGB8. It never throws on bad input.
-import type { DecodedImage } from '../map/types';
+import type { CompressedImage, DecodedImage } from '../map/types';
 
 /** VTF image formats (values of the header's highResImageFormat / lowResImageFormat). */
 export const VtfFormat = {
@@ -402,14 +402,28 @@ function clampByte(x: number): number {
 
 // ------------------------------------------------------------------ block decoders
 
-/** Decodes BC1/BC2/BC3 (DXT1/3/5) data into RGBA8. */
+const LITTLE_ENDIAN = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
+
+/** Packs RGBA bytes into the Uint32 that has that byte order in memory on this host. */
+function pack(r: number, g: number, b: number, a: number): number {
+  return LITTLE_ENDIAN ? (r | (g << 8) | (b << 16) | (a << 24)) >>> 0 : ((r << 24) | (g << 16) | (b << 8) | a) >>> 0;
+}
+const ALPHA_SHIFT = LITTLE_ENDIAN ? 24 : 0;
+const RGB_MASK = LITTLE_ENDIAN ? 0x00ffffff : 0xffffff00;
+
+/**
+ * Decodes BC1/BC2/BC3 (DXT1/3/5) data into RGBA8. Pixels are written as packed 32-bit words; `out` must be a
+ * freshly allocated (4-byte aligned) buffer of w*h*4 bytes.
+ */
 function decodeDxt(src: Uint8Array, off: number, w: number, h: number, kind: 1 | 3 | 5, out: Uint8Array): void {
+  const out32 = new Uint32Array(out.buffer, out.byteOffset, w * h);
   const bw = (w + 3) >> 2;
   const bh = (h + 3) >> 2;
   const blockBytes = kind === 1 ? 8 : 16;
-  const pal = new Int32Array(16); // 4 colours × RGBA
-  const alphas = new Uint8Array(16);
+  const pal = new Uint32Array(4);
+  const alphas = new Uint32Array(16); // alpha already shifted into place
   const aPal = new Int32Array(8);
+  const hasA = kind !== 1;
   let p = off;
   for (let by = 0; by < bh; by++) {
     for (let bx = 0; bx < bw; bx++, p += blockBytes) {
@@ -417,8 +431,8 @@ function decodeDxt(src: Uint8Array, off: number, w: number, h: number, kind: 1 |
       if (kind === 3) {
         for (let i = 0; i < 8; i++) {
           const b = src[p + i];
-          alphas[i * 2] = (b & 15) * 17;
-          alphas[i * 2 + 1] = (b >> 4) * 17;
+          alphas[i * 2] = (((b & 15) * 17) << ALPHA_SHIFT) >>> 0;
+          alphas[i * 2 + 1] = (((b >> 4) * 17) << ALPHA_SHIFT) >>> 0;
         }
       } else if (kind === 5) {
         const a0 = src[p];
@@ -436,8 +450,8 @@ function decodeDxt(src: Uint8Array, off: number, w: number, h: number, kind: 1 |
         const lo = src[p + 2] | (src[p + 3] << 8) | (src[p + 4] << 16);
         const hi = src[p + 5] | (src[p + 6] << 8) | (src[p + 7] << 16);
         for (let i = 0; i < 8; i++) {
-          alphas[i] = aPal[(lo >> (3 * i)) & 7];
-          alphas[i + 8] = aPal[(hi >> (3 * i)) & 7];
+          alphas[i] = (aPal[(lo >> (3 * i)) & 7] << ALPHA_SHIFT) >>> 0;
+          alphas[i + 8] = (aPal[(hi >> (3 * i)) & 7] << ALPHA_SHIFT) >>> 0;
         }
       }
       // ---- colour
@@ -456,47 +470,44 @@ function decodeDxt(src: Uint8Array, off: number, w: number, h: number, kind: 1 |
       r1 = (r1 << 3) | (r1 >> 2);
       g1 = (g1 << 2) | (g1 >> 4);
       b1 = (b1 << 3) | (b1 >> 2);
-      pal[0] = r0;
-      pal[1] = g0;
-      pal[2] = b0;
-      pal[3] = 255;
-      pal[4] = r1;
-      pal[5] = g1;
-      pal[6] = b1;
-      pal[7] = 255;
-      if (kind !== 1 || c0 > c1) {
-        pal[8] = ((2 * r0 + r1 + 1) / 3) | 0;
-        pal[9] = ((2 * g0 + g1 + 1) / 3) | 0;
-        pal[10] = ((2 * b0 + b1 + 1) / 3) | 0;
-        pal[11] = 255;
-        pal[12] = ((r0 + 2 * r1 + 1) / 3) | 0;
-        pal[13] = ((g0 + 2 * g1 + 1) / 3) | 0;
-        pal[14] = ((b0 + 2 * b1 + 1) / 3) | 0;
-        pal[15] = 255;
+      // For DXT3/5 the colour words carry alpha 0 and the per-pixel alpha is OR-ed in.
+      const ab = hasA ? 0 : 255;
+      pal[0] = pack(r0, g0, b0, ab);
+      pal[1] = pack(r1, g1, b1, ab);
+      if (hasA || c0 > c1) {
+        pal[2] = pack(((2 * r0 + r1 + 1) / 3) | 0, ((2 * g0 + g1 + 1) / 3) | 0, ((2 * b0 + b1 + 1) / 3) | 0, ab);
+        pal[3] = pack(((r0 + 2 * r1 + 1) / 3) | 0, ((g0 + 2 * g1 + 1) / 3) | 0, ((b0 + 2 * b1 + 1) / 3) | 0, ab);
       } else {
-        pal[8] = (r0 + r1 + 1) >> 1;
-        pal[9] = (g0 + g1 + 1) >> 1;
-        pal[10] = (b0 + b1 + 1) >> 1;
-        pal[11] = 255;
-        pal[12] = 0;
-        pal[13] = 0;
-        pal[14] = 0;
-        pal[15] = 0; // punch-through
+        pal[2] = pack((r0 + r1 + 1) >> 1, (g0 + g1 + 1) >> 1, (b0 + b1 + 1) >> 1, 255);
+        pal[3] = 0; // punch-through: transparent black
       }
       const idx = (src[c + 4] | (src[c + 5] << 8) | (src[c + 6] << 16) | (src[c + 7] << 24)) >>> 0;
       const x0 = bx << 2;
       const y0 = by << 2;
-      const full = x0 + 4 <= w && y0 + 4 <= h;
-      for (let i = 0; i < 16; i++) {
-        const px = x0 + (i & 3);
-        const py = y0 + (i >> 2);
-        if (!full && (px >= w || py >= h)) continue;
-        const k = ((idx >>> (2 * i)) & 3) << 2;
-        const o = (py * w + px) << 2;
-        out[o] = pal[k];
-        out[o + 1] = pal[k + 1];
-        out[o + 2] = pal[k + 2];
-        out[o + 3] = kind === 1 ? pal[k + 3] : alphas[i];
+      if (x0 + 4 <= w && y0 + 4 <= h) {
+        let o = y0 * w + x0;
+        for (let r = 0, k = 0; r < 4; r++, o += w) {
+          const bits = idx >>> (r << 3);
+          if (hasA) {
+            out32[o] = (pal[bits & 3] | alphas[k++]) >>> 0;
+            out32[o + 1] = (pal[(bits >>> 2) & 3] | alphas[k++]) >>> 0;
+            out32[o + 2] = (pal[(bits >>> 4) & 3] | alphas[k++]) >>> 0;
+            out32[o + 3] = (pal[(bits >>> 6) & 3] | alphas[k++]) >>> 0;
+          } else {
+            out32[o] = pal[bits & 3];
+            out32[o + 1] = pal[(bits >>> 2) & 3];
+            out32[o + 2] = pal[(bits >>> 4) & 3];
+            out32[o + 3] = pal[(bits >>> 6) & 3];
+          }
+        }
+      } else {
+        for (let i = 0; i < 16; i++) {
+          const px = x0 + (i & 3);
+          const py = y0 + (i >> 2);
+          if (px >= w || py >= h) continue;
+          const v = pal[(idx >>> (2 * i)) & 3];
+          out32[py * w + px] = hasA ? ((v & RGB_MASK) | alphas[i]) >>> 0 : v;
+        }
       }
     }
   }
@@ -863,6 +874,51 @@ export interface DecodeVtfOptions extends ConvertOptions {
   face?: number;
   /** Volume texture slice (default 0, clamped). */
   slice?: number;
+  /**
+   * For DXT1/3/5 textures: attach the original block-compressed mip chain (largest mip <= maxSize first) as
+   * `compressed`, and decode the RGBA `data` from a smaller mip (max dimension <= rgbaMaxSize, default 256).
+   */
+  compressed?: boolean;
+  rgbaMaxSize?: number;
+}
+
+const DXT_FORMATS: Record<number, CompressedImage['format']> = {
+  [VtfFormat.DXT1]: 'dxt1',
+  [VtfFormat.DXT1_ONEBITALPHA]: 'dxt1',
+  [VtfFormat.DXT3]: 'dxt3',
+  [VtfFormat.DXT5]: 'dxt5',
+};
+
+/**
+ * Extracts the block-compressed mip chain (copies, largest first, starting at the largest mip <= maxSize) of
+ * a DXT VTF for frame/face 0. Returns null for other formats or when no mip is readable.
+ */
+export function extractVtfCompressed(data: Uint8Array, opts: { maxSize?: number; frame?: number; face?: number } = {}): CompressedImage | null {
+  try {
+    const h = parseVtfHeader(data);
+    if (!h) return null;
+    return extractCompressed(data, h, Math.max(1, opts.maxSize ?? 2048), opts.frame ?? 0, opts.face ?? 0);
+  } catch {
+    return null;
+  }
+}
+
+function extractCompressed(data: Uint8Array, h: VtfHeader, maxSize: number, frame: number, face: number): CompressedImage | null {
+  const format = DXT_FORMATS[h.format];
+  if (!format) return null;
+  const f = Math.min(Math.max(0, frame), h.frames - 1);
+  const c = Math.min(Math.max(0, face), h.faces - 1);
+  const mips: CompressedImage['mips'] = [];
+  for (let m = vtfPickMip(h, maxSize); m < h.mipCount; m++) {
+    const ref = vtfImageRef(h, data.length, m, f, c, 0);
+    if (!ref) {
+      if (mips.length) break; // keep the contiguous chain we have
+      continue; // truncated large mips: start at the first readable one
+    }
+    mips.push({ width: ref.width, height: ref.height, data: data.slice(ref.offset, ref.offset + ref.size) });
+  }
+  if (!mips.length) return null;
+  return { format, width: mips[0].width, height: mips[0].height, mips };
 }
 
 /**
@@ -880,8 +936,13 @@ export function decodeVtf(data: Uint8Array, opts: DecodeVtfOptions = {}): Decode
 }
 
 function decodeVtfWithHeader(data: Uint8Array, h: VtfHeader, opts: DecodeVtfOptions): DecodedImage | null {
-  const maxSize = Math.max(1, opts.maxSize ?? 2048);
+  let maxSize = Math.max(1, opts.maxSize ?? 2048);
   if (!vtfFormatSupported(h.format)) return null;
+  let compressed: CompressedImage | null = null;
+  if (opts.compressed && DXT_FORMATS[h.format]) {
+    compressed = extractCompressed(data, h, maxSize, opts.frame ?? 0, opts.face ?? 0);
+    if (compressed) maxSize = Math.min(maxSize, Math.max(1, opts.rgbaMaxSize ?? 256));
+  }
   const frame = Math.min(Math.max(0, opts.frame ?? 0), h.frames - 1);
   const face = Math.min(Math.max(0, opts.face ?? 0), h.faces - 1);
   // Prefer the requested mip; if it lies beyond the end of a truncated file, fall back to smaller mips.
@@ -895,27 +956,32 @@ function decodeVtfWithHeader(data: Uint8Array, h: VtfHeader, opts: DecodeVtfOpti
   let img = convertVtfImage(h.format, data, ref.offset, ref.width, ref.height, opts);
   if (!img) return null;
   while (Math.max(img.width, img.height) > maxSize && (img.width > 1 || img.height > 1)) img = halveImage(img);
+  if (compressed) img.compressed = compressed;
   return img;
 }
 
 /**
  * Decodes every animation frame (for AnimatedTexture proxies). At most `maxFrames` frames are returned and the
- * frame size is reduced (by picking a smaller mip) until frames × pixels stays under `maxTotalPixels`.
+ * frame size is reduced (by picking a smaller mip) until all frames fit in `maxTotalBytes` (default 64 MB,
+ * counting RGBA bytes, or the DXT mip chains in compressed mode).
  */
 export function decodeVtfFrames(
   data: Uint8Array,
-  opts: DecodeVtfOptions & { maxFrames?: number; maxTotalPixels?: number } = {},
+  opts: DecodeVtfOptions & { maxFrames?: number; maxTotalBytes?: number } = {},
 ): DecodedImage[] | null {
   try {
     const h = parseVtfHeader(data);
     if (!h) return null;
     const count = Math.min(h.frames, Math.max(1, opts.maxFrames ?? 64));
-    const budget = opts.maxTotalPixels ?? 16 * 1024 * 1024;
+    const budget = opts.maxTotalBytes ?? 64 * 1024 * 1024;
+    const dxt = !!opts.compressed && !!DXT_FORMATS[h.format];
     let maxSize = Math.max(1, opts.maxSize ?? 2048);
     while (maxSize > 1) {
       const mip = vtfPickMip(h, maxSize);
-      const px = Math.max(1, h.width >> mip) * Math.max(1, h.height >> mip);
-      if (px * count <= budget) break;
+      const w = Math.max(1, h.width >> mip);
+      const hh = Math.max(1, h.height >> mip);
+      const bytes = dxt ? (vtfImageSize(h.format, w, hh) * 4) / 3 : w * hh * 4;
+      if (bytes * count <= budget) break;
       maxSize >>= 1;
     }
     const frames: DecodedImage[] = [];

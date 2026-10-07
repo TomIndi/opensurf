@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { qa } from '../src/core/angles';
 import { Vec3, v3 } from '../src/core/vec3';
 import { CollisionWorld } from '../src/physics/collision';
+import * as movementModule from '../src/physics/movement';
 import { categorizePosition, defaultMoveVars, playerHull, playerMove, unstuckPlayer } from '../src/physics/movement';
 import {
   DUCK_HULL_MAXS,
@@ -377,6 +378,27 @@ for (const W of WORLDS) {
         });
       }
 
+      it('a floor tiled from many brushes: running and bhopping across seams never catches', () => {
+        const tiles: Brush[] = [];
+        for (let i = -20; i < 20; i++) for (let j = -2; j < 2; j++) tiles.push(boxBrush(v3(i * 64, j * 64, -64), v3((i + 1) * 64, (j + 1) * 64, 0)));
+        const w = W.make(tiles);
+        const s = new Sim(w, 0.01, v3(-1200, 10, 8), 0).settle();
+        s.run(100, () => ({ fmove: 450, yaw: 0 }));
+        expect(s.hspeed).toBeCloseTo(250, 6);
+        s.run(200, () => ({ fmove: 450, yaw: 0 }), () => {
+          expect(s.hspeed).toBeCloseTo(250, 6);
+          expect(s.ps.onGround).toBe(true);
+          expect(s.ps.origin.z).toBeCloseTo(DIST_EPSILON, 9);
+        });
+        // autobhop across the tiles keeps 600 exactly
+        const b = new Sim(w, 0.01, v3(-1200, 10, 30));
+        b.ps.velocity = v3(600, 0, 0);
+        b.run(300, () => ({ buttons: IN_JUMP }), () => {
+          expect(b.hspeed).toBeCloseTo(600, 9);
+          expect(b.inSolid()).toBe(false);
+        });
+      });
+
       it('friction: one tick from 250 drops by speed*friction*ft; below stopspeed by stopspeed*friction*ft', () => {
         const w = W.make([floorBrush(0)]);
         const s = new Sim(w, 0.01, v3(0, 0, 8)).settle();
@@ -571,7 +593,7 @@ for (const W of WORLDS) {
           const N = Math.ceil(4 / T.ft);
           s.run(
             N,
-            () => ((s.t % 0.75) < 0.5 ? { smove: 450, yaw: 90 } : { yaw: 90 }),
+            () => ((s.t % 0.6) < 0.15 ? { smove: 450, yaw: 90 } : { yaw: 90 }),
             () => {
               expect(s.ps.onGround).toBe(false);
               if (hullGap(s.ps.origin, face.n, face.d) < 1) contact++;
@@ -585,11 +607,31 @@ for (const W of WORLDS) {
             },
           );
           expect(contact).toBeGreaterThan(N * 0.95);
-          // descending during the releases converts height into speed
+          // the releases let the surfer descend; each hold brakes the down-slope slide again
+          // (pressing into the ramp cancels most of the accumulated down-slope speed)
           expect(s.ps.origin.z).toBeLessThan(z0 - 200);
-          expect(s.speed).toBeGreaterThan(v0 + 50);
+          expect(s.speed).toBeGreaterThan(v0 - 50);
         });
       }
+
+      it('a ramp built from many coplanar brushes: seams are invisible (no speed loss, no hitch)', () => {
+        const segs: Brush[] = [];
+        for (let k = 0; k < 40; k++) segs.push(surfRamp(0, 0, 4000, NZ, -2000 + k * 400, -2000 + (k + 1) * 400));
+        const w = W.make(segs);
+        const s = new Sim(w, 0.01, originAtGap(face.n, face.d, 1800, -1900, 0.5), 90);
+        s.ps.velocity = v3(0, 2000, 0);
+        let contact = 0;
+        let prev = { ...s.ps.origin };
+        s.run(300, () => ({ smove: 450, yaw: 90 }), () => {
+          expect(s.ps.velocity.y).toBeCloseTo(2000, 6);
+          expect(s.ps.origin.y - prev.y).toBeCloseTo(20, 6);
+          if (hullGap(s.ps.origin, face.n, face.d) < 1) contact++;
+          prev = { ...s.ps.origin };
+          expect(s.inSolid()).toBe(false);
+        });
+        expect(s.ps.origin.y).toBeGreaterThan(-1900 + 5900);
+        expect(contact).toBeGreaterThan(295);
+      });
 
       it('velocity into the ramp is clipped away in one tick, no bounce, tangent preserved', () => {
         const w = W.make([ramp()]);
@@ -903,27 +945,83 @@ for (const W of WORLDS) {
         });
       }
 
-      it('in-air duck raises the origin by 18 (head stays put), unduck lowers it back', () => {
+      it('in-air duck shrinks the hull around its center (origin +9, CS:GO), camera eases; unduck mirrors it', () => {
         const w = W.make([floorBrush(-100000)]);
         const a = new Sim(w, 0.01, v3(0, 0, 500));
         const b = new Sim(w, 0.01, v3(0, 0, 500));
         a.step();
         b.step({ buttons: IN_DUCK });
         expect(b.ps.ducked).toBe(true);
-        expect(b.ps.origin.z - a.ps.origin.z).toBeCloseTo(18, 9);
-        expect(b.ps.viewOffsetZ).toBe(VIEW_OFFSET_DUCK);
-        expect(a.ps.viewOffsetZ).toBe(VIEW_OFFSET_STAND);
+        expect(b.ps.flags & FL_DUCKING).toBe(FL_DUCKING);
+        expect(b.ps.origin.z - a.ps.origin.z).toBeCloseTo(9, 9);
+        // the camera did not jump at the switch: eyes still level with the non-ducking player
         expect(b.ps.origin.z + b.ps.viewOffsetZ).toBeCloseTo(a.ps.origin.z + a.ps.viewOffsetZ, 9);
-        for (let i = 0; i < 10; i++) {
+        let prevView = b.ps.viewOffsetZ;
+        for (let i = 0; i < 20; i++) {
           a.step();
           b.step({ buttons: IN_DUCK });
+          expect(b.ps.viewOffsetZ).toBeLessThanOrEqual(prevView);
+          prevView = b.ps.viewOffsetZ;
         }
+        expect(b.ps.viewOffsetZ).toBe(VIEW_OFFSET_DUCK);
+        expect(b.ps.origin.z + b.ps.viewOffsetZ).toBeCloseTo(a.ps.origin.z + a.ps.viewOffsetZ - 9, 9);
+        // release: back to the standing hull 9 lower, camera continuous again and easing up to 64
         a.step();
         b.step();
         expect(b.ps.ducked).toBe(false);
         expect(b.ps.origin.z).toBeCloseTo(a.ps.origin.z, 9);
+        expect(b.ps.viewOffsetZ).toBeCloseTo(VIEW_OFFSET_DUCK + 9, 9);
+        for (let i = 0; i < 20; i++) {
+          a.step();
+          b.step();
+        }
         expect(b.ps.viewOffsetZ).toBe(VIEW_OFFSET_STAND);
+        expect(b.ps.ducking).toBe(false);
       });
+
+      for (const T of TICKS) {
+        it(`crouch-jump reach matches Valve's CS:GO Mapper's Reference @${T.name} tick`, () => {
+          // reachable block height = highest feet position, with the player starting on the floor
+          const reach = (pattern: 'stand' | 'crouched' | 'jumpThenCrouch' | 'crouchThenJump'): number => {
+            const w = W.make([floorBrush(0)]);
+            const s = new Sim(w, T.ft, v3(0, 0, 8)).settle();
+            s.run(5, () => ({ fmove: 450 })); // glued to the floor (DIST_EPSILON)
+            s.ps.velocity = v3(0, 0, 0);
+            if (pattern === 'crouched') s.run(40, () => ({ buttons: IN_DUCK }));
+            const z0 = s.ps.origin.z - DIST_EPSILON;
+            let best = 0;
+            s.run(Math.ceil(1 / T.ft), (i) => {
+              const duck =
+                pattern === 'crouched' || (pattern === 'crouchThenJump' && i >= 0) || (pattern === 'jumpThenCrouch' && i >= 1);
+              const jump = pattern === 'crouchThenJump' ? i === 1 : i === 0;
+              return { buttons: (jump ? IN_JUMP : 0) | (duck ? IN_DUCK : 0) };
+            }, () => {
+              best = Math.max(best, s.ps.origin.z - z0);
+            });
+            return best;
+          };
+          const is128 = T.ft < 0.009;
+          const is64 = T.ft > 0.015;
+          const stand = reach('stand');
+          const jumpThenCrouch = reach('jumpThenCrouch');
+          // Mapper's Reference (64 / 128 tick): stand 54 / 55, jump-then-crouch 63 / 64
+          if (is64) {
+            expect(Math.floor(stand)).toBe(54);
+            expect(Math.floor(jumpThenCrouch)).toBe(63);
+          }
+          if (is128) {
+            expect(Math.floor(stand)).toBe(55);
+            expect(Math.floor(jumpThenCrouch)).toBe(64);
+          }
+          expect(jumpThenCrouch - stand).toBeCloseTo(9, 6);
+          // crouched / crouch-then-jump (reference 56 / 57 and 65 / 66): ducked jumps set vz = impulse
+          const crouched = reach('crouched');
+          const crouchThenJump = reach('crouchThenJump');
+          expect(crouched).toBeGreaterThan(56.9);
+          expect(crouched).toBeLessThan(57.1);
+          expect(crouchThenJump - crouched).toBeCloseTo(9, 6);
+        });
+      }
 
       it('in-air unduck close above the ground puts the feet on the ground', () => {
         const w = W.make([floorBrush(0)]);
@@ -1331,7 +1429,7 @@ for (const W of WORLDS) {
       for (const T of TICKS) {
         it(`30 s synced surf down a long ramp onto flat ground - finite, never in solid, no sticking @${T.name} tick`, () => {
           const NZ = 0.5;
-          const w = W.make([floorBrush(0), surfRamp(0, 200, 2400, NZ, 0, 16000)]);
+          const w = W.make([floorBrush(0, 100000), surfRamp(0, 200, 2400, NZ, 0, 16000)]);
           const face = rampFace(0, 200, NZ);
           const s = new Sim(w, T.ft, originAtGap(face.n, face.d, 1000, 300, 1), 90);
           s.ps.velocity = v3(0, 900, 0);
@@ -1343,6 +1441,7 @@ for (const W of WORLDS) {
           let prevSpeed = s.speed;
           let prevAir = true;
           let prevOrigin = { ...s.ps.origin };
+          let prevDucked = false;
           let maxSpeed = 0;
           const N = Math.ceil(30 / T.ft);
           s.run(
@@ -1366,15 +1465,19 @@ for (const W of WORLDS) {
               if (ev.landed) landed++;
               const air = !s.ps.onGround;
               if (air && o.y < 16000 && hullGap(o, face.n, face.d, s.ps.ducked) < 1) rampTicks++;
-              // no sticking: never a dead stop or a stalled position while flying
+              // no sticking: never a dead stop or a stalled position while flying (an in-air duck/unduck
+              // legitimately shifts the origin by 18, so those ticks are not compared)
               if (air && prevAir && prevSpeed > 100) {
                 expect(s.speed).toBeGreaterThan(1);
-                const moved = Math.hypot(o.x - prevOrigin.x, o.y - prevOrigin.y, o.z - prevOrigin.z);
-                expect(moved).toBeGreaterThan(prevSpeed * T.ft * 0.5);
+                if (s.ps.ducked === prevDucked) {
+                  const moved = Math.hypot(o.x - prevOrigin.x, o.y - prevOrigin.y, o.z - prevOrigin.z);
+                  expect(moved).toBeGreaterThan(prevSpeed * T.ft * 0.5);
+                }
               }
               prevSpeed = s.speed;
               prevAir = air;
               prevOrigin = { ...o };
+              prevDucked = s.ps.ducked;
               maxSpeed = Math.max(maxSpeed, s.speed);
             },
           );
@@ -1386,7 +1489,7 @@ for (const W of WORLDS) {
 
         it(`30 s chaos input on the ramp - finite, never in solid, never a velocity kill in the air @${T.name} tick`, () => {
           const NZ = 0.5;
-          const w = W.make([floorBrush(0), surfRamp(0, 200, 2400, NZ, 0, 16000), boxBrush(v3(-3000, 9000, 0), v3(3000, 9100, 600))]);
+          const w = W.make([floorBrush(0, 100000), surfRamp(0, 200, 2400, NZ, 0, 16000), boxBrush(v3(-3000, 9000, 0), v3(3000, 9100, 600))]);
           const face = rampFace(0, 200, NZ);
           const s = new Sim(w, T.ft, originAtGap(face.n, face.d, 1000, 300, 1), 90);
           s.ps.velocity = v3(0, 900, 0);
@@ -1519,6 +1622,85 @@ describe('Source quirks not tied to a world implementation', () => {
     playerMove(ps, newUserCmd(), liar, defaultMoveVars(), 0.01, ev);
     expect(ps.origin.x).toBe(9);
     expect(ps.velocity.x).toBe(0);
+  });
+
+  for (const W of WORLDS) {
+    it(`rampbug fix: a hull embedded by a hair in a ramp keeps sliding instead of stopping dead [${W.name}]`, () => {
+      const NZ = 0.5;
+      const inner = W.make([surfRamp(0, 0, 4000, NZ, -30000, 30000)]);
+      const face = rampFace(0, 0, NZ);
+      const start = originAtGap(face.n, face.d, 1500, 0, -0.01); // 0.01 inside the ramp
+      // hide the embedding from the tick-start CheckStuck so the slide sweep itself starts allsolid
+      const world: TestWorld = {
+        traceBox(s: Vec3, e: Vec3, mins: Vec3, maxs: Vec3, mask: number, out?: TraceResult): TraceResult {
+          const same = s.x === e.x && s.y === e.y && s.z === e.z;
+          const tr = inner.traceBox(s, e, mins, maxs, mask, out);
+          if (same && s.x === start.x && s.y === start.y && s.z === start.z) {
+            tr.startsolid = false;
+            tr.allsolid = false;
+            tr.fraction = 1;
+          }
+          return tr;
+        },
+        pointContents: (p, m) => inner.pointContents(p, m),
+        testBox: (o, mn, mx, m) => inner.testBox(o, mn, mx, m),
+      };
+      const { movementOptions } = movementModule;
+      for (const fix of [false, true]) {
+        movementOptions.rampbugFix = fix;
+        try {
+          const ps = createPlayerState(v3(start.x, start.y, start.z));
+          ps.velocity = v3(0, 1000, 0);
+          playerMove(ps, newUserCmd(), world, defaultMoveVars(), 0.01, newMoveEvents());
+          if (fix) {
+            expect(ps.velocity.y).toBeCloseTo(1000, 6);
+            expect(ps.origin.y).toBeGreaterThan(start.y + 9);
+            expect(inner.testBox(ps.origin, HULL_MINS, HULL_MAXS, MASK_PLAYERSOLID)).toBe(false);
+            expect(hullGap(ps.origin, face.n, face.d)).toBeLessThan(0.6);
+          } else {
+            // vanilla Source/CS:GO: allsolid sweep -> velocity zeroed (the rampbug)
+            expect(ps.velocity.y).toBe(0);
+          }
+        } finally {
+          movementOptions.rampbugFix = true;
+        }
+      }
+    });
+  }
+
+  it('a deeply embedded player stays cheap: the full unstuck search is throttled', () => {
+    const inner = new CollisionWorld([boxBrush(v3(-1000, -1000, -1000), v3(1000, 1000, 1000))]);
+    let traces = 0;
+    const world: TraceWorld = {
+      traceBox: (a, b, mn, mx, m, out) => {
+        traces++;
+        return inner.traceBox(a, b, mn, mx, m, out);
+      },
+      pointContents: (p, m) => inner.pointContents(p, m),
+    };
+    const ps = createPlayerState(v3(0, 0, 0));
+    const ev = newMoveEvents();
+    const cmd = newUserCmd();
+    cmd.forwardmove = 450;
+    for (let i = 0; i < 330; i++) playerMove(ps, cmd, world, defaultMoveVars(), 0.01, ev);
+    // ~11 full searches (one per 33 ticks) instead of one every tick
+    expect(traces / 330).toBeLessThan(250);
+    expect(Number.isFinite(ps.origin.x)).toBe(true);
+  });
+
+  it('a move that leaves an embedding brush within one trace escapes it (startsolid ignores that brush)', () => {
+    const w = new RefWorld([floorBrush(-1000), boxBrush(v3(-40, -500, 0), v3(40, 500, 200))]);
+    const s = new Sim(w, 0.01, v3(51, 0, 100)); // hull overlaps the box by 5 units: too deep for the nudges
+    expect(s.inSolid()).toBe(true);
+    s.ps.velocity = v3(1000, 0, 0);
+    s.step();
+    expect(s.inSolid()).toBe(false);
+    expect(s.ps.velocity.x).toBeCloseTo(1000, 6);
+    // a slow move that stays inside is trapped (allsolid), exactly like Source
+    const t = new Sim(w, 0.01, v3(51, 0, 100));
+    t.ps.velocity = v3(100, 0, 0);
+    t.step();
+    expect(t.ps.velocity.x).toBe(0);
   });
 
   it('allsolid traces zero the velocity (trapped)', () => {

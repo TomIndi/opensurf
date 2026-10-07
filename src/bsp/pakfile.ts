@@ -148,7 +148,7 @@ export class PakFile {
     // plausible one (archives with trailing padding).
     let fallback = -1;
     for (let p = last; p >= first; p--) {
-      if (zip[p] !== 0x50 || zip[p + 1] !== 0x4b || zip[p + 2] !== 0x05 || zip[p + 3] !== 0x06) continue;
+      if (zip[p] !== 0x50 || this.dv.getUint32(p, true) !== SIG_EOCD) continue;
       const commentLen = this.dv.getUint16(p + 20, true);
       if (p + EOCD_SIZE + commentLen === zip.length) return p;
       if (fallback < 0 && p + EOCD_SIZE + commentLen <= zip.length) fallback = p;

@@ -44,6 +44,22 @@ export interface DecodedImage {
   /** RGBA8, sRGB-encoded color, straight alpha. Level 0 only; the renderer generates mips. */
   data: Uint8Array;
   hasAlpha: boolean;
+  /**
+   * Optional (materials built with `compressedTextures`): the texture's original DXT mip chain, for renderers
+   * with S3TC support (WEBGL_compressed_texture_s3tc[_srgb]). When present, `data`/`width`/`height` may be a
+   * reduced-size RGBA fallback of the same texture.
+   */
+  compressed?: CompressedImage;
+}
+
+/** Block-compressed texture data as stored in the VTF (sRGB colour). */
+export interface CompressedImage {
+  /** 'dxt1' = BC1 (decode as RGBA: 3-colour blocks punch through like Direct3D), 'dxt3' = BC2, 'dxt5' = BC3. */
+  format: 'dxt1' | 'dxt3' | 'dxt5';
+  width: number;
+  height: number;
+  /** Mip levels, largest first, as stored (the chain may stop before 1x1). */
+  mips: { width: number; height: number; data: Uint8Array }[];
 }
 
 export interface MaterialDef {
