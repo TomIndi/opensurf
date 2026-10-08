@@ -22,15 +22,16 @@
   pointer-events: none;
 }
 
-/* shared text legibility over bright maps */
+/* shared text legibility over bright maps (white floors, sunny skies): CS:GO HUD text always carries a tight
+   dark shadow, so it reads on any background without looking heavy */
 .surf-ui .hud-timer,
-.surf-ui .hud-speedo,
 .surf-ui .hud-side,
 .surf-ui .hud-keys,
 .surf-ui .chat {
   text-shadow:
-    0 1px 2px rgba(0, 0, 0, 0.85),
-    0 0 1px rgba(0, 0, 0, 0.9);
+    0 0 1px #000,
+    0 1px 1px rgba(0, 0, 0, 0.95),
+    0 0 3px rgba(0, 0, 0, 0.6);
 }
 
 /* ------------------------------------------------------------ speedometer */
@@ -41,10 +42,16 @@
   top: calc(50% + 5.6 * var(--u));
   transform: translateX(-50%);
   font: 700 calc(2.15 * var(--u)) / 1 var(--font);
-  letter-spacing: 0.02em;
+  letter-spacing: 0.03em;
   color: #fff;
   transition: color 0.18s;
-  -webkit-text-stroke: calc(0.03 * var(--u)) rgba(0, 0, 0, 0.6);
+  /* crisp dark outline (stroke painted under the fill, so the glyphs keep their weight) + a soft drop shadow:
+     readable on surf_lt_omnific's white floor and on dark maps alike */
+  -webkit-text-stroke: calc(0.17 * var(--u)) rgba(0, 0, 0, 0.92);
+  paint-order: stroke fill;
+  text-shadow:
+    0 calc(0.06 * var(--u)) calc(0.12 * var(--u)) rgba(0, 0, 0, 0.75),
+    0 0 calc(0.45 * var(--u)) rgba(0, 0, 0, 0.35);
 }
 
 .surf-ui .hud-speedo.trend-gain {
@@ -81,9 +88,11 @@
   width: calc(1.9 * var(--u));
   height: calc(1.9 * var(--u));
   border-radius: calc(0.2 * var(--u));
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  background: rgba(0, 0, 0, 0.32);
-  color: rgba(255, 255, 255, 0.4);
+  /* dark translucent cap with a light rim: visible on white floors and on the sky */
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(6, 9, 14, 0.55);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+  color: rgba(255, 255, 255, 0.5);
   font: 700 calc(0.85 * var(--u)) / 1 var(--font);
   letter-spacing: 0.04em;
   transition:
@@ -99,8 +108,10 @@
 }
 
 .surf-ui .hud-keys .k.on {
-  background: rgba(255, 255, 255, 0.88);
+  background: rgba(255, 255, 255, 0.92);
   border-color: #fff;
+  /* dark rim keeps a pressed (white) key visible on a white floor */
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.7);
   color: #0b0f14;
   text-shadow: none;
 }
@@ -109,7 +120,7 @@
   width: calc(1.4 * var(--u));
   text-align: center;
   font-size: calc(0.8 * var(--u));
-  color: rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.2);
   transition: color 0.05s;
 }
 
@@ -302,6 +313,13 @@
   background: rgba(0, 0, 0, 0.45);
 }
 
+.surf-ui .ht-split-label:not(:empty) {
+  margin-right: 0.5em;
+  font-size: 0.82em;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.88);
+}
+
 .surf-ui .ht-split.faster {
   color: #5dff6e;
 }
@@ -353,10 +371,10 @@
   min-width: calc(12.5 * var(--u));
   padding: calc(0.55 * var(--u)) calc(0.8 * var(--u)) calc(0.6 * var(--u));
   border-radius: calc(0.3 * var(--u));
-  background: rgba(8, 12, 18, 0.42);
+  background: rgba(8, 12, 18, 0.55);
   border-left: 2px solid var(--hud-color);
   font: 500 calc(0.82 * var(--u)) / 1.45 var(--font);
-  color: rgba(255, 255, 255, 0.65);
+  color: rgba(222, 230, 238, 0.82);
 }
 
 .surf-ui .hs-title {
@@ -385,15 +403,15 @@
 }
 
 .surf-ui .hs-row.none b {
-  color: rgba(255, 255, 255, 0.45);
+  color: rgba(255, 255, 255, 0.55);
   font-weight: 500;
 }
 
 /* ------------------------------------------------------------ cl_showfps / cl_showpos (Source style) */
 
-.surf-ui .hud-topleft {
+.surf-ui .hud-topleft,
+.surf-ui .hud-topright {
   position: absolute;
-  left: 0.35rem;
   top: 0.3rem;
   font: 600 0.82rem/1.25 var(--font-mono);
   color: #fff;
@@ -401,6 +419,18 @@
     1px 1px 0 #000,
     0 0 2px #000;
   white-space: pre;
+}
+
+.surf-ui .hud-topleft {
+  left: 0.35rem;
+}
+
+/* cl_showpos sits in the top-right corner like CS:GO: a left-aligned column wide enough for map-sized
+   coordinates, so the lines don't shift sideways as the numbers change length */
+.surf-ui .hud-topright {
+  right: 0.6rem;
+  min-width: 36ch;
+  text-align: left;
 }
 
 .surf-ui .hud-fps.fps-good {
@@ -413,10 +443,6 @@
 
 .surf-ui .hud-fps.fps-bad {
   color: #ff6060;
-}
-
-.surf-ui .hud-pos {
-  margin-top: 0.15rem;
 }
 
 .surf-ui .hud-netgraph {
@@ -564,6 +590,12 @@
 
 .surf-ui .chat-msg {
   padding: 0.02em 0;
+  /* SurfTimer colors stay as they are; a slightly heavier outline keeps dark ones ({darkred} "!r", {grey}) and
+     light ones ({lime} deltas) readable over bright skies and orange ramps */
+  text-shadow:
+    0 0 1px #000,
+    1px 1px 1px #000,
+    0 0 3px rgba(0, 0, 0, 0.75);
   overflow-wrap: anywhere;
   transition: opacity 1s;
   animation: chat-in 0.18s var(--ease);

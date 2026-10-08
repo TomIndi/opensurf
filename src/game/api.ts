@@ -59,6 +59,11 @@ export interface TimerHud {
   /** Last checkpoint/stage comparison vs PB in seconds (negative = faster), shown briefly. */
   lastSplitDelta: number | null;
   lastSplitTime: number;
+  /**
+   * Optional: what the last split compares, for the split flash: "Stage 2 00:12.345" (a completed stage: the delta
+   * is vs your best time of that stage), "Stage 3" (run split vs the PB), "CP 2", "Finish".
+   */
+  lastSplitLabel?: string;
 }
 
 export interface KeysHud {
@@ -120,6 +125,18 @@ export interface LoadProgress {
   /** Bytes or items done / total, when known. */
   loaded?: number;
   total?: number;
+  /**
+   * Optional (game 'loadprogress' events and UiApi.setLoading): id of the load this report belongs to. It grows
+   * with every load the game starts, so a new id means a new load (refresh the loading screen's header).
+   */
+  loadId?: number;
+  /** Optional: the map being loaded (catalog / built-in / file name as far as known). */
+  mapName?: string;
+  /**
+   * Optional, on phase 'error': the load failed but the map that was being played before it is back (the game
+   * returns to 'playing' / 'paused'), so show the error briefly instead of an error screen.
+   */
+  recovered?: boolean;
 }
 
 export type GameState = 'menu' | 'loading' | 'playing' | 'paused';
@@ -149,6 +166,17 @@ export interface GameApi {
   getScoreboard(): ScoreboardData;
   getZones(): ZoneDef[];
   on(event: GameEvent, cb: (data?: unknown) => void): () => void;
+  /**
+   * Optional: whether the mouse is captured with raw input (pointer lock with unadjustedMovement: no OS pointer
+   * acceleration). null until the mouse was first captured; false when the browser only gave a plain pointer lock
+   * (or m_rawinput is 0).
+   */
+  readonly rawInputActive?: boolean | null;
+  /**
+   * Optional: true while the pause menu is open over a ranked run in progress. Like CS:GO's ESC menu the world
+   * keeps running then (keys released, the run still counts), so the menu shouldn't say "Game paused".
+   */
+  readonly simulatingWhilePaused?: boolean;
 }
 
 /** What the game can ask the UI to do. Implemented by ui/ui.ts. */
@@ -241,6 +269,8 @@ export interface RenderSettings {
   renderScale: number;
   fogEnabled: boolean;
   drawSky3D: boolean;
+  /** Optional: how zones are drawn when drawZones is on: outline on the zone's floor (default) or the full box. */
+  zoneStyle?: 'floor' | 'box';
 }
 
 export interface RendererApi {
@@ -258,4 +288,31 @@ export interface RendererApi {
   /** Debug lines/boxes (zone editor, triggers), cleared each frame by the caller. */
   setDebugBoxes(boxes: { mins: Vec3; maxs: Vec3; color: [number, number, number] }[]): void;
   stats(): { drawCalls: number; triangles: number; textures: number };
+  /**
+   * Optional: replaces the map's world fog at runtime (map logic `SetFogController`); null restores the map's
+   * own fog. Reset by loadMap/unloadMap.
+   */
+  setFog?(fog: import('../map/types').FogDef | null): void;
+  /** Optional: what the device supports, so the loader can prepare matching data (DXT textures with S3TC). */
+  capabilities?(): RendererCapabilities;
+  /**
+   * Optional: places brush model `model` (a moving brush entity: func_door, func_rotating, trains, anything
+   * parented to them) at its entity's current absolute `origin` + Source `angles`. The map's geometry was built
+   * at the entity's spawn placement (bspcollision brushEntityPlacement); the renderer draws it moved by
+   * placement * spawnPlacement^-1. The game sends render-interpolated placements every frame a mover moves.
+   * Reset by loadMap/unloadMap.
+   */
+  setModelTransform?(model: number, origin: Vec3, angles: QAngle): void;
+  /**
+   * Optional: like setModelTransform for a model entity (prop_dynamic... parented to a mover): `entity` is its
+   * index in LoadedMap.entities (RenderProp.entity), `origin`/`angles` its current absolute placement; its props
+   * are drawn moved by placement * (the entity's spawn origin/angles)^-1.
+   */
+  setEntityTransform?(entity: number, origin: Vec3, angles: QAngle): void;
+}
+
+export interface RendererCapabilities {
+  /** S3TC (DXT1/3/5, incl. sRGB) uploads: the loader may keep the VTFs' compressed mip chains. */
+  compressedTextures: boolean;
+  maxTextureSize: number;
 }

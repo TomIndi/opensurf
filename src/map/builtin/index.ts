@@ -4,41 +4,14 @@
 // with !b 1) and validated by autopilot runs with the real movement code (tests/builtin.test.ts).
 import type { LoadedMap } from '../types';
 import type { BuiltCourse } from './course';
+import { BUILTIN_MAPS } from './list';
 import { buildNeon } from './neon';
 import { buildSkyline } from './skyline';
 import { buildTutorial } from './tutorial';
 
-export interface BuiltinMapInfo {
-  id: string;
-  name: string;
-  description: string;
-  tier: number;
-  type: 'linear' | 'staged';
-}
-
-export const BUILTIN_MAPS: BuiltinMapInfo[] = [
-  {
-    id: 'surf_tutorial',
-    name: 'surf_tutorial',
-    description: 'Learn to surf: a long, wide first ramp, then straight follow-ups, a zigzag, a transfer and growing gaps. 3 checkpoints, 1 bonus.',
-    tier: 1,
-    type: 'linear',
-  },
-  {
-    id: 'surf_neon',
-    name: 'surf_neon',
-    description: 'Glowing ramps in the dark: 4 stages with a long warm-up, an up-ramp into a booster, a 180 degree curve and a booster launch. 1 bonus.',
-    tier: 2,
-    type: 'staged',
-  },
-  {
-    id: 'surf_skyline',
-    name: 'surf_skyline',
-    description: 'Long flowing ramps over a misty void at dusk: sweeping curves and big gaps. Linear, 3 checkpoints, 1 bonus.',
-    tier: 3,
-    type: 'linear',
-  },
-];
+// The list itself lives in list.ts (no geometry code) so the menu can show it without pulling the builders
+// into the main bundle; buildBuiltinMap() is loaded on demand (dynamic import from the game).
+export { BUILTIN_MAPS, type BuiltinMapInfo } from './list';
 
 const BUILDERS: Record<string, () => BuiltCourse> = {
   surf_tutorial: buildTutorial,

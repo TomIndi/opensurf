@@ -19,11 +19,16 @@ import {
   UnsignedByteType,
   Vector3,
 } from 'three';
-import { angleVectors } from '../core/angles';
+import { angleVectors, type QAngle } from '../core/angles';
 import type { Vec3 } from '../core/vec3';
+import { brushEntityPlacement } from '../bsp/bspcollision';
+import { movableEntitySets } from '../game/movers';
+import { anglesToMatrix } from '../physics/collision';
 import { SURF_SKY, SURF_SKY2D } from '../bsp/types';
 import type { CubemapDef, LoadedMap, MaterialDef, RenderBatch, RenderProp } from '../map/types';
+import { CONTENTS_SOLID } from '../physics/types';
 import { TextureCache } from './textures';
+import { TranslucentSorter } from './translucency';
 import {
   ModelUniforms,
   SharedUniforms,
@@ -38,6 +43,7 @@ import {
   setUvTransform,
   srgbToLinear,
 } from './worldmaterials';
+import { rebaseUvs, uvRebaseStep } from './uvrebase';
 
 /** Opaque draw order groups (three.js sorts by renderOrder, then material, then depth). */
 export const ORDER_SKY_MASK = -10;
@@ -80,6 +86,8 @@ export interface MapSceneStats {
   decals: number;
   waterMeshes: number;
   materials: number;
+  /** Translucent meshes with several planes, kept in back-to-front order per frame. */
+  sortedTranslucent: number;
 }
 
 export interface MapSceneOptions {
@@ -101,6 +109,11 @@ export interface MapSceneOptions {
   mergeWorld?: boolean;
   /** Largest merged surface cluster in triangles (default 16384). */
   clusterTriangles?: number;
+  /**
+   * Draw BSP surfaces (world, brush entities, overlays) without back-face culling: true / false, or 'auto'
+   * (default) = only when auditFaceOrientation finds faces the loader emitted inside-out.
+   */
+  doubleSided?: boolean | 'auto';
 }
 
 interface Animated {
@@ -200,7 +213,145 @@ interface PropGroup {
   idx: number;
 }
 
-/** Merges static props into world-space geometry with per-vertex lighting (one group per material/cell). */
+/** Result of auditFaceOrientation. */
+export interface FaceOrientationAudit {
+  /** Triangles probed. */
+  sampled: number;
+  /** Front (by winding) in solid, back in open space: drawn inside-out. */
+  inverted: number;
+  /** Front in open space, back in solid. */
+  correct: number;
+  /** Open or solid on both sides (water, glass, thin or non-solid brushes): no verdict. */
+  ambiguous: number;
+  /** Surface area (units²) of the inverted / correct samples: big walls weigh more than slivers. */
+  invertedArea: number;
+  correctArea: number;
+}
+
+/**
+ * Share of the decided sample area that must be inverted before BSP surfaces are drawn double-sided. Measured
+ * on 8 KSF maps: 0-0.2% when faces are wound right (overlapping detail brushes, slivers), 16-50% when a
+ * loader emits every dface_t.side = 1 face back to front.
+ */
+export const INVERTED_FACE_THRESHOLD = 0.05;
+
+/**
+ * Checks that the map's opaque brush surfaces face open space: for a spread-out sample of world triangles,
+ * the solid contents just in front of and just behind each triangle (by its winding, which is what culling
+ * uses). A Source BSP face always has the solid brush behind it and open space in front, so a loader that
+ * emits some faces back to front (e.g. by misreading dface_t.side) shows up as a large "inverted" share -
+ * with back-face culling those walls would simply vanish. Costs ~1 µs per sample.
+ */
+export function auditFaceOrientation(map: LoadedMap, maxSamples = 4096): FaceOrientationAudit {
+  const out: FaceOrientationAudit = { sampled: 0, inverted: 0, correct: 0, ambiguous: 0, invertedArea: 0, correctArea: 0 };
+  const world = map.collision as { pointContents?: (p: Vec3, mask?: number) => number } | null | undefined;
+  const r = map.render;
+  if (!world || typeof world.pointContents !== 'function' || !r?.batches) return out;
+  const eligible = (b: RenderBatch): boolean => {
+    if (!b || b.model !== 0 || b.isDisplacement || b.decal || (b.surfFlags & (SURF_SKY | SURF_SKY2D)) !== 0) return false;
+    const d = r.materials.get(b.material);
+    return !!d && !d.isTool && !d.isSky && !d.isWater && !d.translucent && !d.additive && !d.noCull;
+  };
+  let total = 0;
+  for (const b of r.batches) if (eligible(b) && b.indices && b.positions) total += Math.floor(b.indices.length / 3);
+  if (!total) return out;
+  const stride = Math.max(1, Math.floor(total / Math.max(1, maxSamples)));
+  const p: Vec3 = { x: 0, y: 0, z: 0 };
+  const SOLID = CONTENTS_SOLID;
+  const probe = (x: number, y: number, z: number): boolean => {
+    p.x = x;
+    p.y = y;
+    p.z = z;
+    try {
+      return (world.pointContents!(p, SOLID) & SOLID) !== 0;
+    } catch {
+      return false;
+    }
+  };
+  let k = 0;
+  for (const b of r.batches) {
+    if (!eligible(b) || !b.indices || !b.positions) continue;
+    const P = b.positions;
+    const I = b.indices;
+    const nv = Math.floor(P.length / 3);
+    for (let t = 0; t + 2 < I.length; t += 3, k++) {
+      if (k % stride !== 0) continue;
+      const a = I[t];
+      const c1 = I[t + 1];
+      const c2 = I[t + 2];
+      if (a >= nv || c1 >= nv || c2 >= nv) continue;
+      const ax = P[a * 3];
+      const ay = P[a * 3 + 1];
+      const az = P[a * 3 + 2];
+      const e1x = P[c1 * 3] - ax;
+      const e1y = P[c1 * 3 + 1] - ay;
+      const e1z = P[c1 * 3 + 2] - az;
+      const e2x = P[c2 * 3] - ax;
+      const e2y = P[c2 * 3 + 1] - ay;
+      const e2z = P[c2 * 3 + 2] - az;
+      let nx = e1y * e2z - e1z * e2y;
+      let ny = e1z * e2x - e1x * e2z;
+      let nz = e1x * e2y - e1y * e2x;
+      const len = Math.hypot(nx, ny, nz);
+      if (!(len > 2)) continue; // slivers (area < 1 unit²) say nothing
+      nx /= len;
+      ny /= len;
+      nz /= len;
+      const cx = ax + (e1x + e2x) / 3;
+      const cy = ay + (e1y + e2y) / 3;
+      const cz = az + (e1z + e2z) / 3;
+      const d = 1;
+      const front = probe(cx + nx * d, cy + ny * d, cz + nz * d);
+      const back = probe(cx - nx * d, cy - ny * d, cz - nz * d);
+      out.sampled++;
+      if (front && !back) {
+        out.inverted++;
+        out.invertedArea += len / 2;
+      } else if (!front && back) {
+        out.correct++;
+        out.correctArea += len / 2;
+      } else out.ambiguous++;
+    }
+  }
+  return out;
+}
+
+/** True when an audit says that many brush faces are drawn inside-out (by surface area of the decided samples). */
+export function auditSaysInverted(a: FaceOrientationAudit): boolean {
+  return a.inverted >= 16 && a.invertedArea > INVERTED_FACE_THRESHOLD * (a.invertedArea + a.correctArea);
+}
+
+/**
+ * Water batches that have a coplanar partner facing the other way (vbsp's top face + $bottommaterial face of
+ * the same water surface): those are drawn one-sided so each side shows its own material. Lone water
+ * surfaces are drawn from both sides.
+ */
+export function pairedWaterBatches(batches: readonly RenderBatch[], materials: Map<string, MaterialDef>): Set<RenderBatch> {
+  const water = batches.filter((b) => b && b.normals && b.normals.length >= 3 && validBox(b.mins, b.maxs) && materials.get(b.material)?.isWater);
+  const out = new Set<RenderBatch>();
+  // boxes overlap (1 unit tolerance): the two faces cover the same part of the same surface
+  const overlap = (a: RenderBatch, b: RenderBatch) =>
+    a.mins.x <= b.maxs.x + 1 &&
+    b.mins.x <= a.maxs.x + 1 &&
+    a.mins.y <= b.maxs.y + 1 &&
+    b.mins.y <= a.maxs.y + 1 &&
+    a.mins.z <= b.maxs.z + 1 &&
+    b.mins.z <= a.maxs.z + 1;
+  for (let i = 0; i < water.length; i++) {
+    const a = water[i];
+    for (let j = i + 1; j < water.length; j++) {
+      const b = water[j];
+      if (a.model !== b.model || !overlap(a, b)) continue;
+      const dot = a.normals[0] * b.normals[0] + a.normals[1] * b.normals[1] + a.normals[2] * b.normals[2];
+      if (dot < -0.9) {
+        out.add(a);
+        out.add(b);
+      }
+    }
+  }
+  return out;
+}
+
 /** True when a light cube carries no light at all (the loader found no lighting at the prop's origin). */
 export function isEmptyCube(cube: readonly (readonly number[])[] | undefined | null): boolean {
   if (!cube || cube.length < 6) return true;
@@ -292,6 +443,10 @@ export function kdClusters<T>(
   return out;
 }
 
+/**
+ * Merges props into world-space geometry with per-vertex lighting (light cube x tint): one family per material,
+ * alpha and pass, split into spatial clusters.
+ */
 export function mergeProps(
   props: readonly RenderProp[],
   opts: {
@@ -449,6 +604,7 @@ export class MapScene {
     decals: 0,
     waterMeshes: 0,
     materials: 0,
+    sortedTranslucent: 0,
   };
   private readonly animated: Animated[] = [];
   private readonly geometries: BufferGeometry[] = [];
@@ -463,6 +619,21 @@ export class MapScene {
   private modelState: DataTexture | null = null;
   private modelStateWidth = 1;
   readonly mergedGroups: MergedGroup[] = [];
+  /** Face orientation audit of the map's brush surfaces (null when not run). */
+  faceAudit: FaceOrientationAudit | null = null;
+  /** BSP surfaces are drawn double-sided (see MapSceneOptions.doubleSided). */
+  doubleSided = false;
+  /** Water batches drawn one-sided (top + bottom face pairs). */
+  private pairedWater: Set<RenderBatch> = new Set();
+  /** Back-to-front plane order inside translucent meshes (see translucency.ts). */
+  readonly sorter = new TranslucentSorter();
+  /**
+   * Brush models that can move (doors, rotators, trains and what is parented to them): kept out of the merged
+   * brush-entity groups so setModelTransform can place their meshes.
+   */
+  private readonly movingModels: Set<number>;
+  /** Spawn placement of each brush model's entity (what its geometry was built at), as a matrix. */
+  private readonly baseInverse = new Map<number, Matrix4>();
 
   constructor(
     readonly map: LoadedMap,
@@ -470,6 +641,13 @@ export class MapScene {
   ) {
     this.world.name = 'world';
     this.sky3d.name = 'sky3d';
+    let moving = new Set<number>();
+    try {
+      moving = movableEntitySets(map.entities ?? []).models;
+    } catch {
+      /* malformed entities: nothing moves */
+    }
+    this.movingModels = moving;
     this.world.matrixAutoUpdate = false;
     this.sky3d.matrixAutoUpdate = false;
     const s3 = map.render?.sky3d ?? null;
@@ -486,6 +664,12 @@ export class MapScene {
     const r = this.map.render;
     if (!r) return;
     const batches = (r.batches ?? []).filter((b) => !!b);
+    const ds = this.opts.doubleSided ?? 'auto';
+    if (ds === 'auto') {
+      this.faceAudit = auditFaceOrientation(this.map);
+      this.doubleSided = auditSaysInverted(this.faceAudit);
+    } else this.doubleSided = ds;
+    this.pairedWater = pairedWaterBatches(batches, r.materials);
     if (r.lightmap && r.lightmap.width > 0 && r.lightmap.height > 0 && r.lightmap.data && r.lightmap.data.length >= 4) {
       this.lightmapTex = this.opts.textures.lightmap(r.lightmap);
     }
@@ -511,6 +695,8 @@ export class MapScene {
     if (onStep) await onStep(done, total);
     this.world.updateMatrixWorld(true);
     this.sky3d.updateMatrixWorld(true);
+    for (const m of this.meshes()) if ((m.material as ShaderMaterial).transparent) this.sorter.add(m);
+    this.stats.sortedTranslucent = this.sorter.count;
     this.stats.materials = this.opts.materials.materials.length;
   }
 
@@ -620,7 +806,10 @@ export class MapScene {
     } else {
       const d = def!;
       g.setAttribute('normal', new BufferAttribute(b.normals && b.normals.length >= nv * 3 ? b.normals : defaultNormals(nv), 3));
-      g.setAttribute('uv', new BufferAttribute(b.uvs && b.uvs.length >= nv * 2 ? b.uvs : new Float32Array(nv * 2), 2));
+      // a copy: the batch's own coordinates stay untouched (the map can be loaded again)
+      const uvs = b.uvs && b.uvs.length >= nv * 2 ? b.uvs.slice(0, nv * 2) : new Float32Array(nv * 2);
+      rebaseUvs(uvs, b.indices, nv, uvRebaseStep(d));
+      g.setAttribute('uv', new BufferAttribute(uvs, 2));
       const lit = !!(this.lightmapTex && b.lightmapUVs && b.lightmapUVs.length >= nv * 2 && !d.unlit);
       if (lit) g.setAttribute('lmuv', new BufferAttribute(b.lightmapUVs!, 2));
       const blend = !!(b.alphas && b.alphas.length >= nv && (d.image2 || d.fallbackColor2));
@@ -638,9 +827,10 @@ export class MapScene {
         decal: !!b.decal,
         envCube: this.envTexture(envKey),
         pass,
+        doubleSided: this.doubleSided || (d.isWater && !this.pairedWater.has(b)),
       };
       const key = [b.material, lit ? 'L' : 'U', blend ? 'B' : '', pass, envKey].join('|');
-      if (b.model > 0 && this.modelState && !d.isWater && !b.decal) {
+      if (b.model > 0 && this.modelState && !d.isWater && !b.decal && !this.movingModels.has(b.model)) {
         // brush entity: merged with the other models' batches of this material (see flushMerged)
         g.dispose();
         this.modelEntry(b.model);
@@ -819,6 +1009,8 @@ export class MapScene {
       vb += n;
       ib += b.indices.length;
     }
+    // texture coordinates near zero (float precision across big faces, see uvrebase.ts)
+    if (uvs && q.def) rebaseUvs(uvs, indices, nv, uvRebaseStep(q.def));
     const g = new BufferGeometry();
     g.setAttribute('position', new BufferAttribute(positions, 3));
     if (normals) g.setAttribute('normal', new BufferAttribute(normals, 3));
@@ -899,6 +1091,7 @@ export class MapScene {
         decal: false,
         envCube: this.envTexture(mg.group.envKey),
         pass,
+        doubleSided: false,
       };
       let mu: ModelUniforms | null = null;
       let key = 'prop';
@@ -953,6 +1146,38 @@ export class MapScene {
     this.writeModelState(e);
   }
 
+  /**
+   * Draws brush model `model` at its entity's current placement: its meshes move by placement * spawn^-1 (the
+   * geometry was built at the entity's spawn placement, bspcollision brushEntityPlacement).
+   */
+  setModelTransform(model: number, origin: Vec3, angles: QAngle): void {
+    const e = this.models.get(model);
+    if (!e || !e.meshes.length) return;
+    const inv = this.baseInverseOf(model);
+    const m = anglesToMatrix(angles, _rot);
+    _place.set(m[0], m[1], m[2], origin.x, m[3], m[4], m[5], origin.y, m[6], m[7], m[8], origin.z, 0, 0, 0, 1);
+    _place.multiply(inv);
+    for (const mesh of e.meshes) {
+      mesh.matrix.copy(_place);
+      mesh.matrixWorldNeedsUpdate = true;
+    }
+  }
+
+  private baseInverseOf(model: number): Matrix4 {
+    let inv = this.baseInverse.get(model);
+    if (!inv) {
+      inv = new Matrix4();
+      const ent = (this.map.entities ?? []).find((x) => x.model === model);
+      if (ent) {
+        const p = brushEntityPlacement(ent);
+        const m = anglesToMatrix(p.angles, _rot);
+        inv.set(m[0], m[1], m[2], p.origin.x, m[3], m[4], m[5], p.origin.y, m[6], m[7], m[8], p.origin.z, 0, 0, 0, 1).invert();
+      }
+      this.baseInverse.set(model, inv);
+    }
+    return inv;
+  }
+
   /** Per-frame material animation (texture scroll, animated textures). */
   update(time: number): void {
     for (const a of this.animated) {
@@ -964,6 +1189,11 @@ export class MapScene {
         (a.material.uniforms.map as U<Texture>).value = info.frames[f < 0 ? f + n : f];
       }
     }
+  }
+
+  /** Orders translucent geometry back to front for an eye position (call every frame). */
+  sortTranslucent(eye: Vector3): void {
+    this.sorter.update(eye);
   }
 
   /** All meshes (both passes). */
@@ -988,8 +1218,12 @@ export class MapScene {
     this.modelState = null;
     this.mergedGroups.length = 0;
     this.mergeQueue.clear();
+    this.sorter.clear();
   }
 }
+
+const _rot = new Float64Array(9);
+const _place = new Matrix4();
 
 function defaultNormals(n: number): Float32Array {
   const a = new Float32Array(n * 3);

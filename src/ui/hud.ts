@@ -101,6 +101,7 @@ export class Hud {
   private readonly tWr: TextSlot;
   private readonly tTags: TextSlot;
   private readonly splitEl: HTMLElement;
+  private readonly splitLabel: TextSlot;
   private readonly splitText: TextSlot;
   private readonly speedoEl: HTMLElement;
   private readonly speedo: TextSlot;
@@ -161,8 +162,12 @@ export class Hud {
     this.tWr = new TextSlot(tWrEl);
     const tTagsEl = h('span.ht-tags');
     this.tTags = new TextSlot(tTagsEl);
-    this.splitEl = h('div.ht-split.tnum');
-    this.splitText = new TextSlot(this.splitEl);
+    // split flash: what it compares ("Stage 2 00:12.345", "CP 3") and the delta vs PB
+    const splitLabelEl = h('span.ht-split-label');
+    this.splitLabel = new TextSlot(splitLabelEl);
+    const splitDeltaEl = h('span.ht-split-delta');
+    this.splitText = new TextSlot(splitDeltaEl);
+    this.splitEl = h('div.ht-split.tnum', null, splitLabelEl, splitDeltaEl);
     this.timerEl = h(
       'div.hud-timer',
       null,
@@ -223,7 +228,7 @@ export class Hud {
       this.sideEl.appendChild(row);
     }
 
-    // ---- showpos / fps
+    // ---- showfps (top left) / showpos (top right)
     this.fpsEl = h('div.hud-fps.tnum');
     this.fpsText = new TextSlot(this.fpsEl);
     this.fpsColor = new ClassSwitch(this.fpsEl);
@@ -251,7 +256,9 @@ export class Hud {
       this.keysEl,
       this.timerEl,
       this.sideEl,
-      h('div.hud-topleft', null, this.fpsEl, this.posEl),
+      // cl_showfps top-left, cl_showpos top-right like CS:GO
+      h('div.hud-topleft', null, this.fpsEl),
+      h('div.hud-topright', null, this.posEl),
       this.netEl,
       this.specEl,
       this.hintEl,
@@ -328,7 +335,7 @@ export class Hud {
       this.tTags.set(hud.noclip ? 'NOCLIP' : '');
       // split flash: detect a new split by its (time, delta) pair, independent of the clock it uses
       const t = hud.timer;
-      const key = t.lastSplitDelta === null ? '' : `${t.lastSplitTime}|${t.lastSplitDelta}`;
+      const key = t.lastSplitDelta === null ? '' : `${t.lastSplitTime}|${t.lastSplitDelta}|${t.lastSplitLabel ?? ''}`;
       if (hud.mapName !== this.splitMap) {
         // new map: remember the current split without flashing a stale one
         this.splitMap = hud.mapName;
@@ -337,6 +344,7 @@ export class Hud {
         this.lastSplitKey = key;
         const sv = splitView(t.lastSplitDelta);
         if (sv) {
+          this.splitLabel.set(t.lastSplitLabel ?? '');
           this.splitText.set(sv.text);
           this.splitEl.className = `ht-split tnum show ${sv.cls}`;
           // restart the CSS animation

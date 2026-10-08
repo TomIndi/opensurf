@@ -107,6 +107,16 @@ export class LoadingScreen {
     return this.mapName !== '';
   }
 
+  /** The map name in the header ('' if none). */
+  get currentMap(): string {
+    return this.mapName;
+  }
+
+  /** The phase of the last progress report (null before the first one). */
+  get currentPhaseName(): Phase | null {
+    return this.currentPhase;
+  }
+
   /** Sets the header (map name, tier, type). Call before/at the first progress report. */
   setMap(name: string, tier: number | null, type: string | null = null, hasZones = false): void {
     if (name === this.mapName && this.visible) {
@@ -130,22 +140,40 @@ export class LoadingScreen {
   show(): void {
     if (this.visible) return;
     this.visible = true;
+    this.resetProgress();
+    this.nextTip(true);
+    this.tipTimer = setInterval(() => this.nextTip(false), 7000);
+    this.loop();
+  }
+
+  /**
+   * A new load starts while the screen is already up (after a failed one, or superseding one in progress):
+   * clears the error state, the steps and the bar. The header is set separately (setMap).
+   */
+  restart(): void {
+    if (!this.visible) {
+      this.show();
+      return;
+    }
+    this.resetProgress();
+  }
+
+  private resetProgress(): void {
     this.failed = false;
     this.el.classList.remove('hidden', 'error');
     this.retryBtn.classList.add('hidden');
+    this.cancelBtn.lastChild!.textContent = 'Cancel';
     this.target = 0;
     this.shown = 0;
     this.firstStart = -1;
     this.currentPhase = null;
     this.currentSpan = null;
+    this.hasFraction = false;
     this.fill.style.transform = 'scaleX(0)';
-    for (const s of this.stepEls.values()) s.classList.remove('done', 'active');
+    for (const s of this.stepEls.values()) s.classList.remove('done', 'active', 'skipped');
     this.phase.set('Preparing…');
     this.detail.set('');
     this.pct.set('0%');
-    this.nextTip(true);
-    this.tipTimer = setInterval(() => this.nextTip(false), 7000);
-    this.loop();
   }
 
   hide(): void {

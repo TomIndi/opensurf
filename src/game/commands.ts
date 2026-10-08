@@ -1,9 +1,14 @@
 // Console commands (Source names: map, disconnect, retry, noclip, kill, setpos, setang, getpos, alias, toggle,
 // incrementvar, cvarlist, find, help, echo, clear, status, say ...) and the SourceMod/SurfTimer chat commands
-// (!r, !s, !b, !back, !stop, !saveloc, !tele, !prac, !noclip, !pb, !top, !wrb, !stages, !bonuses, !mi, !replay,
-// !ghost, !hide, !showkeys, !speed, !zones, !end, !help, !fov, !sens), with SurfTimer's aliases (!start = !r,
-// !teleport / !stuck = !back, !btop = !wrb). Chat commands are also console commands as sm_<name>, like
-// SourceMod registers them.
+// (!r, !s, !b, !back, !stop, !saveloc, !tele, !prac, !noclip, !pb, !top, !wrb, !stages, !rank, !bonuses, !mi,
+// !replay, !ghost, !hide, !showkeys, !speed, !zones, !end, !help, !fov, !sens), with SurfTimer's aliases (!start =
+// !r, !teleport / !stuck = !back, !btop = !wrb, !wrcp / !cpr / !srcp / !stagetop = !stages, !mrank / !prank =
+// !rank). Chat commands are also console commands as sm_<name>, like SourceMod registers them. An unknown
+// command gets a "Did you mean" only for a near miss (one typo in short names, two in longer ones).
+//
+// `exec <name>` runs a stored cfg (game/cfgstore.ts; cfg_save / cfg_list / cfg_delete manage them), and common
+// CS:GO client commands without an effect here (snd_setmixer, slot1, buy ...) are silent no-ops so a pasted
+// autoexec doesn't print "Unknown command" for them (their cvars are in convars.ts COMPAT_CVAR_DEFS).
 //
 // Chat semantics follow SourceMod: "!cmd" is shown in chat and runs the command, "/cmd" runs it silently; a
 // '!' or '/' word that is not a command is ordinary chat. Replies carry a SurfTimer-style "[Surf]" prefix.
@@ -32,6 +37,7 @@ import {
 import type { ChatColor, ChatSegment, GameState, SoundApi, TimerState, UiApi } from './api';
 import { addConfigProvider, loadSavedConfig, scheduleConfigSave } from './binds';
 import type { IEntitySystem, IReplaySystem, ISurfTimer, RunRecord } from './contracts';
+import { deleteCfg, execCfg, listCfgs, normalizeCfgName, readCfg, writeCfg } from './cfgstore';
 import { currentTickrate, getCompletions, getStageBest, tickLabel } from './records';
 import { formatRunTime } from './timer';
 import { getZoneReport } from './zoneresolve';
@@ -51,6 +57,8 @@ export interface TimerExtras {
   invalidateRecords(): void;
   /** !stop (SurfTimer sm_stop). False when no run was in progress. */
   stopTimer(): boolean;
+  /** The game stopped simulating mid-run: a ranked run goes on as practice. False when none was running. */
+  interruptRun(): boolean;
   /** Ticks per second the records/replays of this session belong to. */
   tickrate(): number;
 }
@@ -169,6 +177,17 @@ export const ZONE_SOURCE_NAMES: Readonly<Record<ZoneSource, string>> = {
   none: 'none',
 };
 
+/** Short zone source for the welcome line, like a KSF/SurfTimer server would say it. */
+export const ZONE_SOURCE_SHORT: Readonly<Record<ZoneSource, string>> = {
+  user: 'custom',
+  preset: 'SurfTimer',
+  momentum: 'map',
+  builtin: 'map',
+  heuristic: 'none',
+  map: 'map',
+  none: 'none',
+};
+
 /** Where the zones came from, in detail when resolveZones() reported on this map ("SurfTimer preset + map timer triggers (bonus 1-2)"). */
 export function zoneSourceText(map: LoadedMap, source: ZoneSource): string {
   const r = getZoneReport(map.name);
@@ -192,15 +211,22 @@ export function zoneSummary(zones: readonly ZoneDef[]): { stages: number; checkp
   return { stages, checkpoints: cps.size, bonuses: [...bonuses].sort((a, b) => a - b), hasEnd };
 }
 
-/** "Tier 3 | Staged (6 stages) | 2 bonuses | Zones: SurfTimer" */
-export function mapInfoSegments(map: LoadedMap, tier: number | null, zones: readonly ZoneDef[], source: ZoneSource): ChatSegment[] {
+/**
+ * "Tier 3 | Staged (6 stages) | 2 bonuses | Zones: SurfTimer preset (surf_x) + ..." (verbose: !mi), or with the
+ * short zone source ("Zones: SurfTimer" / "Zones: map" / "Zones: none – type !zones") for the welcome line.
+ */
+export function mapInfoSegments(map: LoadedMap, tier: number | null, zones: readonly ZoneDef[], source: ZoneSource, verbose = true): ChatSegment[] {
   const sum = zoneSummary(zones);
   const out: ChatSegment[] = [seg(map.name, 'lightblue')];
   out.push(seg(' | ', 'grey'), seg(tier ? `Tier ${tier}` : 'Tier ?', tierColor(tier)));
   if (sum.stages > 0) out.push(seg(' | ', 'grey'), seg(`Staged (${sum.stages} stages)`));
   else out.push(seg(' | ', 'grey'), seg(sum.checkpoints ? `Linear (${sum.checkpoints} checkpoints)` : 'Linear'));
   if (sum.bonuses.length) out.push(seg(' | ', 'grey'), seg(sum.bonuses.length === 1 ? '1 bonus' : `${sum.bonuses.length} bonuses`));
-  out.push(seg(' | ', 'grey'), seg('Zones: ', 'grey'), seg(zoneSourceText(map, source), source === 'none' ? 'lightred' : 'default'));
+  out.push(seg(' | ', 'grey'), seg('Zones: ', 'grey'));
+  if (verbose) out.push(seg(zoneSourceText(map, source), source === 'none' ? 'lightred' : 'default'));
+  // (an automatic start zone around the spawn is no zoning: the timer only starts)
+  else if (source === 'none' || source === 'heuristic' || !zones.length) out.push(seg('none', 'lightred'), seg(' – type ', 'grey'), seg('!zones', 'gold'));
+  else out.push(seg(ZONE_SOURCE_SHORT[source] ?? source));
   return out;
 }
 
@@ -213,16 +239,23 @@ function tierColor(tier: number | null): ChatColor {
   return 'lightred';
 }
 
-/** Levenshtein distance (small strings: chat command suggestions). */
+/**
+ * Edit distance with adjacent transpositions (optimal string alignment: "bakc" -> "back" is one typo), for
+ * chat command suggestions (small strings).
+ */
 export function editDistance(a: string, b: string): number {
   const m = a.length;
   const n = b.length;
+  let prev2: number[] = [];
   let prev = Array.from({ length: n + 1 }, (_, j) => j);
   for (let i = 1; i <= m; i++) {
     const cur = [i];
     for (let j = 1; j <= n; j++) {
-      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      let d = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) d = Math.min(d, prev2[j - 2] + 1);
+      cur[j] = d;
     }
+    prev2 = prev;
     prev = cur;
   }
   return prev[n];
@@ -415,25 +448,64 @@ function showBonusTop(ctx: CommandContext, s: CommandSession, arg: string | unde
   showTop(ctx, s, group);
 }
 
-/** !stages: the stages of the course (and your best stage times at this tickrate). */
+/**
+ * !stages / !wrcp / !cpr / !srcp / !stagetop: the stages of the course and your best time of each (stage records,
+ * at this tickrate); on linear maps the checkpoint splits of your PB.
+ */
 function showStages(ctx: CommandContext, s: CommandSession): void {
   const group = currentGroup(s.timer);
   let n = 0;
   for (const z of s.timer.getZones()) if (z.type === 'stage' && z.group === group && z.index > n) n = z.index;
   const where = group > 0 ? `${s.map.name} Bonus ${group}` : s.map.name;
+  const tick = sessionTickrate(s);
   if (n < 2) {
-    reply(ctx, seg(where, 'gold'), seg(' is linear (no stages).'));
+    const cps = new Set(s.timer.getZones().filter((z) => z.type === 'checkpoint' && z.group === group).map((z) => z.index)).size;
+    reply(ctx, seg(where, 'gold'), seg(cps ? ` is linear (${cps} checkpoints, no stages).` : ' is linear (no stages).'));
+    const pb = s.timer.getRecords(group)[0];
+    const segs: ChatSegment[] = [];
+    pb?.checkpointSplits.forEach((t, i) => {
+      if (i < 1 || !(t >= 0)) return;
+      segs.push(seg(segs.length ? ' · ' : '', 'grey'), seg(`CP${i} `, 'lightblue'), seg(formatRunTime(t), 'lime'));
+    });
+    if (segs.length) reply(ctx, seg(`Your PB's checkpoints (${tickLabel(tick)} tick): `), ...segs);
     return;
   }
   reply(ctx, seg(where, 'gold'), seg(` has ${n} stages: `), seg(`!s 1 - !s ${n}`, 'lightblue'), seg('.'));
-  const tick = sessionTickrate(s);
   const segs: ChatSegment[] = [];
   for (let i = 1; i <= n; i++) {
     const b = getStageBest(s.map.name, group, i, tick);
     if (!b) continue;
     segs.push(seg(segs.length ? ' · ' : '', 'grey'), seg(`S${i} `, 'lightblue'), seg(formatRunTime(b.time), 'lime'));
   }
-  if (segs.length) reply(ctx, seg(`Stage bests (${tickLabel(tick)} tick): `), ...segs);
+  if (segs.length) reply(ctx, seg(`Stage records (${tickLabel(tick)} tick): `), ...segs);
+  else reply(ctx, seg('No stage times yet: complete stages in a run, or practice one with ', 'grey'), seg('!s <n>', 'lightblue'), seg('.', 'grey'));
+}
+
+/**
+ * !rank / !mrank / !prank: your rank on the course. SurfTimer ranks the players who finished a map; on a local
+ * server that is you alone, so a finished course is "Rank 1/1" (with your PB and completions).
+ */
+function showRank(ctx: CommandContext, s: CommandSession, group: number): void {
+  const where = group > 0 ? `${s.map.name} Bonus ${group}` : s.map.name;
+  const tick = sessionTickrate(s);
+  const recs = s.timer.getRecords(group);
+  if (!recs.length) {
+    reply(ctx, seg('You are not ranked on '), seg(where, 'gold'), seg(` (${tickLabel(tick)} tick) yet: finish it to get a rank.`));
+    return;
+  }
+  const total = Math.max(getCompletions(s.map.name, group, tick), recs.length);
+  reply(
+    ctx,
+    seg(playerName(), 'lime'),
+    seg(' is ranked '),
+    seg('1/1', 'gold'),
+    seg(' on '),
+    seg(where, 'gold'),
+    seg(` (${tickLabel(tick)} tick)`, 'grey'),
+    seg(' | PB '),
+    seg(formatRunTime(recs[0].time), 'lime'),
+    seg(` | ${total} ${total === 1 ? 'completion' : 'completions'}`, 'grey'),
+  );
 }
 
 /** !bonuses: the map's bonus courses. */
@@ -463,7 +535,7 @@ function setCvarFromChat(ctx: CommandContext, name: string, label: string, arg: 
 const HELP_LINES: ReadonlyArray<ReadonlyArray<[string, string]>> = [
   [['!r', 'restart'], ['!s <n>', 'stage'], ['!b <n>', 'bonus'], ['!back', 'stage start'], ['!stop', 'stop timer'], ['!end', 'end zone']],
   [['!saveloc', 'save'], ['!tele [n]', 'saveloc teleport'], ['!prac', 'practice'], ['!noclip', 'noclip']],
-  [['!pb', 'personal best'], ['!top', 'top times'], ['!wrb <n>', 'bonus top'], ['!stages', ''], ['!bonuses', ''], ['!mi', 'map info'], ['!replay', 'watch PB']],
+  [['!pb', 'personal best'], ['!top', 'top times'], ['!rank', ''], ['!wrb <n>', 'bonus top'], ['!wrcp', 'stage times'], ['!bonuses', ''], ['!mi', 'map info'], ['!replay', 'watch PB']],
   [['!ghost', ''], ['!hide', ''], ['!showkeys', ''], ['!speed', ''], ['!fov <n>', ''], ['!sens <n>', ''], ['!zones', '']],
 ];
 
@@ -651,11 +723,21 @@ export const CHAT_COMMANDS: readonly ChatCommand[] = [
     run: (ctx, args, s) => showBonusTop(ctx, s!, args[0]),
   },
   {
-    names: ['stages'],
-    usage: '!stages',
-    help: 'List the stages of the course and your best stage times.',
+    names: ['stages', 'wrcp', 'cpr', 'srcp', 'stagetop'],
+    usage: '!wrcp',
+    help: 'List the stages of the course and your best stage times (checkpoints of your PB on linear maps).',
     map: true,
     run: (ctx, _a, s) => showStages(ctx, s!),
+  },
+  {
+    names: ['rank', 'mrank', 'prank'],
+    usage: '!rank',
+    help: 'Your rank, PB and completions on this course.',
+    map: true,
+    run: (ctx, args, s) => {
+      const g = args[0] !== undefined ? parseIntArg(args[0]) : null;
+      showRank(ctx, s!, g !== null && g >= 0 ? g : currentGroup(s!.timer));
+    },
   },
   {
     names: ['bonuses'],
@@ -765,17 +847,25 @@ export function chatCommandNames(): string[] {
   return [...CHAT_BY_NAME.keys()];
 }
 
-function suggest(name: string): string | null {
+/**
+ * A command one typo away (two for names of 5+ letters), else null: "!fob" -> "!fov", "!bakc" -> "!back", but no
+ * far-off guesses ("!rank" was "Did you mean !back?"). Too short to guess for one- or two-letter names.
+ */
+export function suggestChatCommand(name: string): string | null {
+  const q = name.toLowerCase();
+  if (q.length < 3) return null;
+  const maxD = q.length <= 4 ? 1 : 2;
   let best: string | null = null;
-  let bestD = 3;
+  let bestD = maxD + 1;
   for (const n of CHAT_BY_NAME.keys()) {
-    const d = editDistance(name, n);
+    if (n.length < 2 || Math.abs(n.length - q.length) > maxD) continue;
+    const d = editDistance(q, n);
     if (d < bestD || (d === bestD && best !== null && n.length < best.length)) {
       best = n;
       bestD = d;
     }
   }
-  return bestD <= 2 ? best : null;
+  return bestD <= maxD ? best : null;
 }
 
 /** Runs chat command `name` (without prefix). Returns false if there is no such command. */
@@ -815,7 +905,7 @@ export function handleSay(ctx: CommandContext, raw: string, team = false): void 
     }
     echoChat(ctx, text, team);
     if (/^[a-z][a-z0-9_]*$/.test(name)) {
-      const hint = suggest(name);
+      const hint = suggestChatCommand(name);
       const segs: ChatSegment[] = [seg('Unknown command ', 'lightred'), seg(`${prefix}${name}`, 'red'), seg('.', 'lightred')];
       if (hint) segs.push(seg(' Did you mean ', 'lightred'), seg(`${prefix}${hint}`, 'gold'), seg('?', 'lightred'));
       segs.push(seg(' Type ', 'default'), seg('!help', 'lightblue'), seg('.', 'default'));
@@ -1017,6 +1107,10 @@ const NOOP_COMMANDS = [
   'radio3', '+lookatweapon', '-lookatweapon', '+voicerecord', '-voicerecord', '+spray_menu', '-spray_menu',
   '+radialradio', '-radialradio', '+radialradio2', '-radialradio2', '+radialradio3', '-radialradio3', 'impulse',
   'snd_restart', 'r_cleardecals', 'clear_debug_overlays', 'cl_clearhinthistory', 'joy_advancedupdate', 'showbriefing',
+  // autoexec staples: sound mixer groups, buy binds, team equipment overlay, demo/sound playback
+  'snd_setmixer', 'snd_setmixlayer', 'buy', 'play', 'playvol', 'playgamesound', '+cl_show_team_equipment',
+  '-cl_show_team_equipment', '+use_weapon', 'cl_minimal_rendering_hud', 'cl_reload_hud', 'hud_reloadscheme',
+  'cl_avatar_convert_rgb', 'cl_find_ent', 'demoui', 'mat_setvideomode', 'cl_soundscape_flush', 'snd_updateaudiocache',
 ];
 
 // ------------------------------------------------------------------------------------------ registration
@@ -1233,13 +1327,69 @@ export function registerGameCommands(ctx: CommandContext): void {
     }
     setAlias(args[0], '');
   });
-  reg('exec', 'exec <config> : run a saved config ("config").', (args) => {
-    const name = (args[0] ?? '').toLowerCase().replace(/\.cfg$/, '');
-    if (name === 'config' || name === 'config_default') {
-      if (!loadSavedConfig()) conPrint('exec: no saved config yet (host_writeconfig saves one).', 'warn');
+  const cfgComplete = (partial: string): string[] => {
+    const p = partial.replace(/"/g, '').toLowerCase();
+    return listCfgs().filter((n) => n.startsWith(p));
+  };
+  reg(
+    'exec',
+    'exec <name> : run a config file (autoexec, a cfg saved with cfg_save or added in the settings; "config" = your saved settings).',
+    (args) => {
+      if (!args.length) {
+        conPrint('exec <filename>: execute a script file');
+        return;
+      }
+      const name = normalizeCfgName(args[0]);
+      if (name === 'config' || name === 'config_default') {
+        if (!loadSavedConfig()) conPrint('exec: no saved config yet (host_writeconfig saves one).', 'warn');
+        return;
+      }
+      execCfg(args[0]);
+    },
+    { complete: cfgComplete },
+  );
+  reg('cfg_list', 'List the stored config files (exec <name> runs one).', () => {
+    const names = listCfgs();
+    for (const n of names) {
+      // lines that run something (not blank, not just a // comment)
+      const k = (readCfg(n) ?? '').split(/\r?\n|\r/).filter((l) => l.replace(/\/\/.*$/, '').trim()).length;
+      conPrint(`${n}.cfg (${k} ${k === 1 ? 'line' : 'lines'})`);
+    }
+    conPrint(
+      names.length ? `${names.length} config ${names.length === 1 ? 'file' : 'files'}` : 'No config files stored. cfg_save <name> "<commands>" or Settings stores one.',
+      'info',
+    );
+  });
+  reg(
+    'cfg_delete',
+    'cfg_delete <name> : delete a stored config file.',
+    (args) => {
+      if (!args.length) {
+        conPrint('Usage:  cfg_delete <name>');
+        return;
+      }
+      if (deleteCfg(args[0])) conPrint(`Deleted ${normalizeCfgName(args[0])}.cfg`);
+      else conPrint(`cfg_delete: no config file named ${args[0]}`, 'warn');
+    },
+    { complete: cfgComplete },
+  );
+  reg('cfg_save', 'cfg_save <name> <commands...> : store a config file (quote it to keep ";": cfg_save prac "sv_cheats 1; noclip").', (args) => {
+    if (args.length < 2) {
+      conPrint('Usage:  cfg_save <name> <commands...>   (e.g. cfg_save autoexec "sensitivity 2; fov_desired 100")');
       return;
     }
-    conPrint(`exec: couldn't exec ${args[0] ?? ''}`, 'warn');
+    const name = normalizeCfgName(args[0]);
+    if (!name) {
+      conPrint(`cfg_save: "${args[0]}" is not a valid config name`, 'warn');
+      return;
+    }
+    // one quoted argument is the cfg text as typed; several are joined back into one command line
+    const text = args.length === 2 ? args[1] : args.slice(1).map((a) => (/[\s;]/.test(a) || a === '' ? `"${a}"` : a)).join(' ');
+    if (!writeCfg(name, text)) {
+      conPrint(`cfg_save: couldn't store ${name}.cfg (storage unavailable or too large)`, 'error');
+      return;
+    }
+    conPrint(`Saved ${name}.cfg: exec ${name} runs it${name === 'autoexec' ? ' (and it runs at every start)' : ''}.`);
   });
 
   // ---- UI
@@ -1269,14 +1419,19 @@ export function registerGameCommands(ctx: CommandContext): void {
   for (const n of NOOP_COMMANDS) if (!console_.hasCommand(n)) reg(n, 'No effect in surf.', () => undefined, { flags: FCVAR_HIDDEN });
 }
 
-/** The SurfTimer-style welcome lines shown when a map finishes loading. */
+/**
+ * The SurfTimer-style welcome lines shown when a map finishes loading: tier / type / bonuses and a short zone
+ * source ("Zones: SurfTimer", "Zones: map", "Zones: none – type !zones"). Where the zones came from in detail
+ * (preset key, skipped zones, curated fixes, notes) is in the console (resolveZones and the map-loaded line) and
+ * in !mi.
+ */
 export function welcomeMessage(ctx: CommandContext, s: CommandSession): void {
   const zones = s.timer.getZones();
   reply(ctx, seg('Welcome to '), seg(s.map.name, 'lightblue'), seg('! Type '), seg('!help', 'gold'), seg(' for the commands.'));
-  reply(ctx, ...mapInfoSegments(s.map, s.tier, zones, s.timer.zoneSource));
-  for (const n of zoneNotes(s)) reply(ctx, seg(n, 'orange'));
+  reply(ctx, ...mapInfoSegments(s.map, s.tier, zones, s.timer.zoneSource, false));
   const sum = zoneSummary(zones);
-  if (!zones.length) reply(ctx, seg('This map has no timer zones: ', 'lightred'), seg('!zones', 'gold'), seg(' to create them.'));
-  else if (!sum.hasEnd) reply(ctx, seg('No end zone found for this map: the timer only starts. ', 'orange'), seg('!zones', 'gold'), seg(' to add one.'));
+  if (zones.length && !sum.hasEnd && s.timer.zoneSource !== 'heuristic') {
+    reply(ctx, seg('No end zone found for this map: the timer only starts. ', 'orange'), seg('!zones', 'gold'), seg(' to add one.'));
+  }
 }
 

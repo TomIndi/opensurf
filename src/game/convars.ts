@@ -6,11 +6,16 @@
 // Flags follow Source: FCVAR_ARCHIVE = saved in the user's config (client preferences, crosshair, video, HUD),
 // FCVAR_REPLICATED = server/physics variable (sv_*, tickrate: changing one mid-run puts the run in practice),
 // FCVAR_CHEAT = needs sv_cheats 1.
+//
+// COMPAT_CVAR_DEFS are CS:GO client settings with no effect here (viewmodel, bob, radar, HUD extras, netcode,
+// sound mixer ...): registered hidden so a pasted autoexec stores them silently instead of printing "Unknown
+// command" (client preferences are archived, like in CS:GO, so they survive a reload).
 import {
   console_,
   Cvar,
   FCVAR_ARCHIVE,
   FCVAR_CHEAT,
+  FCVAR_HIDDEN,
   FCVAR_NONE,
   FCVAR_REPLICATED,
   registerCvar,
@@ -114,7 +119,7 @@ export const CVAR_DEFS: readonly CvarDef[] = [
 
   // ---- video
   { name: 'mat_fullbright', def: '0', flags: A, min: 0, max: 1, help: 'Ignore lightmaps (fully lit world).' },
-  { name: 'r_drawzones', def: '1', flags: A, min: 0, max: 1, help: 'Draw the timer zones.' },
+  { name: 'r_drawzones', def: '1', flags: A, min: 0, max: 2, help: 'Draw the timer zones: 0 off, 1 floor outline (like server zone beams), 2 full box.' },
   { name: 'r_drawtriggers', def: '0', flags: FCVAR_NONE, min: 0, max: 1, help: 'Draw trigger volumes (debug).' },
   { name: 'r_drawclips', def: '0', flags: FCVAR_NONE, min: 0, max: 1, help: 'Draw player clip brushes (debug).' },
   { name: 'mat_wireframe', def: '0', flags: C, min: 0, max: 1, help: 'Wireframe rendering (cheat).' },
@@ -133,6 +138,146 @@ export const CVAR_DEFS: readonly CvarDef[] = [
   { name: 'surf_hide', def: '0', flags: A, min: 0, max: 1, help: 'Hide other players and replay bots (!hide).' },
   { name: 'surf_speedometer_color', def: '1', flags: A, min: 0, max: 1, help: 'Color the speedometer by acceleration.' },
   { name: 'surf_chat_sounds', def: '1', flags: A, min: 0, max: 1, help: 'Play a sound for chat messages.' },
+];
+
+const H = FCVAR_HIDDEN;
+const HA = FCVAR_HIDDEN | FCVAR_ARCHIVE;
+
+/**
+ * CS:GO client cvars that have no effect in surf (no viewmodel, radar, buy menu, netcode or sound mixer here),
+ * with CS:GO's defaults. Hidden (not in cvarlist / completion / the settings), but they store what an autoexec sets.
+ */
+export const COMPAT_CVAR_DEFS: readonly CvarDef[] = [
+  // viewmodel + bob
+  { name: 'viewmodel_fov', def: '60', flags: HA, min: 54, max: 68, help: 'Viewmodel FOV (no viewmodel in surf).' },
+  { name: 'viewmodel_offset_x', def: '1', flags: HA, min: -2, max: 2.5, help: 'Viewmodel offset (no effect).' },
+  { name: 'viewmodel_offset_y', def: '1', flags: HA, min: -2, max: 2, help: 'Viewmodel offset (no effect).' },
+  { name: 'viewmodel_offset_z', def: '-1', flags: HA, min: -2, max: 2, help: 'Viewmodel offset (no effect).' },
+  { name: 'viewmodel_presetpos', def: '1', flags: HA, min: 0, max: 3, help: 'Viewmodel preset (no effect).' },
+  { name: 'viewmodel_recoil', def: '1', flags: HA, min: 0, max: 1, help: 'Viewmodel recoil (no effect).' },
+  { name: 'cl_viewmodel_shift_left_amt', def: '1.5', flags: HA, help: 'Viewmodel shift (no effect).' },
+  { name: 'cl_viewmodel_shift_right_amt', def: '0.75', flags: HA, help: 'Viewmodel shift (no effect).' },
+  { name: 'cl_bob_lower_amt', def: '21', flags: HA, help: 'Viewmodel bob (no effect).' },
+  { name: 'cl_bobamt_lat', def: '0.4', flags: HA, help: 'Viewmodel bob (no effect).' },
+  { name: 'cl_bobamt_vert', def: '0.25', flags: HA, help: 'Viewmodel bob (no effect).' },
+  { name: 'cl_bobcycle', def: '0.98', flags: HA, help: 'Viewmodel bob (no effect).' },
+  { name: 'cl_bob_version', def: '0', flags: H, help: 'Viewmodel bob (no effect).' },
+  { name: 'r_drawviewmodel', def: '1', flags: H, min: 0, max: 1, help: 'Draw the viewmodel (no viewmodel in surf).' },
+  // HUD / radar / scoreboard extras
+  { name: 'cl_draw_only_deathnotices', def: '0', flags: HA, min: 0, max: 1, help: 'CS:GO HUD option (no effect).' },
+  { name: 'cl_radar_always_centered', def: '1', flags: HA, help: 'Radar option (no radar in surf).' },
+  { name: 'cl_radar_rotate', def: '1', flags: HA, help: 'Radar option (no radar in surf).' },
+  { name: 'cl_radar_scale', def: '0.7', flags: HA, help: 'Radar option (no radar in surf).' },
+  { name: 'cl_radar_icon_scale_min', def: '0.6', flags: HA, help: 'Radar option (no radar in surf).' },
+  { name: 'cl_radar_square_with_scoreboard', def: '1', flags: HA, help: 'Radar option (no radar in surf).' },
+  { name: 'cl_hud_radar_scale', def: '1', flags: HA, help: 'Radar option (no radar in surf).' },
+  { name: 'cl_hud_bomb_under_radar', def: '1', flags: HA, help: 'HUD option (no effect).' },
+  { name: 'cl_hud_background_alpha', def: '0.5', flags: HA, help: 'HUD option (no effect).' },
+  { name: 'cl_hud_healthammo_style', def: '0', flags: HA, help: 'HUD option (no effect).' },
+  { name: 'cl_hud_playercount_pos', def: '0', flags: HA, help: 'HUD option (no effect).' },
+  { name: 'cl_hud_playercount_showcount', def: '0', flags: HA, help: 'HUD option (no effect).' },
+  { name: 'cl_teamid_overhead_always', def: '0', flags: HA, help: 'Teammate overhead id (no effect).' },
+  { name: 'cl_teamid_overhead_mode', def: '1', flags: HA, help: 'Teammate overhead id (no effect).' },
+  { name: 'cl_teamid_overhead_name_alpha', def: '240', flags: HA, help: 'Teammate overhead id (no effect).' },
+  { name: 'cl_teamid_overhead_name_fadetime', def: '1', flags: HA, help: 'Teammate overhead id (no effect).' },
+  { name: 'cl_teamid_overhead_maxdist', def: '0', flags: HA, help: 'Teammate overhead id (no effect).' },
+  { name: 'cl_teamid_overhead_maxdist_spec', def: '0', flags: HA, help: 'Teammate overhead id (no effect).' },
+  { name: 'cl_showloadout', def: '1', flags: HA, help: 'Weapon loadout display (no effect).' },
+  { name: 'cl_showhelp', def: '1', flags: HA, help: 'Help hints (no effect).' },
+  { name: 'cl_autohelp', def: '1', flags: HA, help: 'Help hints (no effect).' },
+  { name: 'cl_loadout_colorweaponnames', def: '0', flags: HA, help: 'Weapon names (no effect).' },
+  { name: 'hud_showtargetid', def: '1', flags: HA, help: 'Target id (no effect).' },
+  { name: 'hud_takesshots', def: '0', flags: HA, help: 'Scoreboard screenshots (no effect).' },
+  { name: 'safezonex', def: '1', flags: HA, help: 'HUD safe zone (no effect).' },
+  { name: 'safezoney', def: '1', flags: HA, help: 'HUD safe zone (no effect).' },
+  { name: 'gameinstructor_enable', def: '0', flags: HA, help: 'Game instructor hints (no effect).' },
+  // weapons / gameplay client options
+  { name: 'cl_autowepswitch', def: '1', flags: HA, help: 'Auto weapon switch (no effect).' },
+  { name: 'cl_use_opens_buy_menu', def: '1', flags: HA, help: 'Buy menu option (no effect).' },
+  { name: 'cl_disablefreezecam', def: '0', flags: HA, help: 'Freeze cam (no effect).' },
+  { name: 'cl_disablehtmlmotd', def: '0', flags: HA, help: 'Server MOTD (no effect).' },
+  { name: 'cl_mute_enemy_team', def: '0', flags: HA, help: 'Voice option (no effect).' },
+  { name: 'cl_mute_all_but_friends_and_party', def: '0', flags: HA, help: 'Voice option (no effect).' },
+  { name: 'cl_join_advertise', def: '1', flags: HA, help: 'Steam rich presence (no effect).' },
+  { name: 'cl_timeout', def: '30', flags: HA, help: 'Network timeout (no effect).' },
+  { name: 'joystick', def: '0', flags: HA, help: 'Joystick input (no effect).' },
+  { name: 'm_mouseaccel1', def: '0', flags: HA, help: 'Windows mouse acceleration (no effect: use m_rawinput).' },
+  { name: 'm_mouseaccel2', def: '0', flags: HA, help: 'Windows mouse acceleration (no effect: use m_rawinput).' },
+  { name: 'm_mousespeed', def: '1', flags: HA, help: 'Windows mouse acceleration (no effect: use m_rawinput).' },
+  { name: 'm_forward', def: '1', flags: HA, help: 'Mouse forward factor (no effect).' },
+  { name: 'm_side', def: '0.8', flags: HA, help: 'Mouse side factor (no effect).' },
+  // netcode (a local server has no network)
+  { name: 'rate', def: '196608', flags: HA, help: 'Network rate (no effect).' },
+  { name: 'cl_updaterate', def: '64', flags: HA, help: 'Network update rate (no effect: the game runs at the tickrate).' },
+  { name: 'cl_cmdrate', def: '64', flags: HA, help: 'Network command rate (no effect: the game runs at the tickrate).' },
+  { name: 'cl_interp', def: '0.03125', flags: HA, help: 'Interpolation delay (no effect: rendering interpolates the last tick).' },
+  { name: 'cl_interp_ratio', def: '2', flags: HA, help: 'Interpolation ratio (no effect).' },
+  { name: 'cl_interpolate', def: '1', flags: H, help: 'Interpolation (always on).' },
+  { name: 'cl_lagcompensation', def: '1', flags: HA, help: 'Lag compensation (no effect).' },
+  { name: 'cl_predict', def: '1', flags: H, help: 'Client prediction (no effect).' },
+  { name: 'cl_predictweapons', def: '1', flags: H, help: 'Weapon prediction (no effect).' },
+  { name: 'mm_dedicated_search_maxping', def: '150', flags: HA, help: 'Matchmaking (no effect).' },
+  { name: 'net_graphheight', def: '64', flags: HA, help: 'net_graph position (no effect).' },
+  { name: 'net_graphpos', def: '1', flags: HA, help: 'net_graph position (no effect).' },
+  { name: 'net_graphproportionalfont', def: '1', flags: HA, help: 'net_graph font (no effect).' },
+  { name: 'net_graphsolid', def: '1', flags: HA, help: 'net_graph option (no effect).' },
+  { name: 'net_graphtext', def: '1', flags: HA, help: 'net_graph option (no effect).' },
+  { name: 'net_graphmsecs', def: '400', flags: HA, help: 'net_graph option (no effect).' },
+  { name: 'net_graphshowinterp', def: '1', flags: HA, help: 'net_graph option (no effect).' },
+  { name: 'net_graphshowlatency', def: '1', flags: HA, help: 'net_graph option (no effect).' },
+  // sound
+  { name: 'snd_mixahead', def: '0.025', flags: HA, help: 'Sound buffer (no effect).' },
+  { name: 'snd_headphone_pan_exponent', def: '2', flags: HA, help: 'Headphone panning (no effect).' },
+  { name: 'snd_headphone_pan_radial_weight', def: '1', flags: HA, help: 'Headphone panning (no effect).' },
+  { name: 'snd_front_headphone_position', def: '90', flags: HA, help: 'Headphone panning (no effect).' },
+  { name: 'snd_rear_headphone_position', def: '90', flags: HA, help: 'Headphone panning (no effect).' },
+  { name: 'snd_use_hrtf', def: '0', flags: HA, help: 'HRTF (no effect).' },
+  { name: 'snd_legacy_surround', def: '0', flags: HA, help: 'Surround mode (no effect).' },
+  { name: 'snd_musicvolume', def: '0.5', flags: HA, help: 'Music volume (no music in surf).' },
+  { name: 'snd_menumusic_volume', def: '0.5', flags: HA, help: 'Music volume (no music in surf).' },
+  { name: 'snd_roundstart_volume', def: '0.5', flags: HA, help: 'Music volume (no music in surf).' },
+  { name: 'snd_roundend_volume', def: '0.5', flags: HA, help: 'Music volume (no music in surf).' },
+  { name: 'snd_tensecondwarning_volume', def: '0.5', flags: HA, help: 'Music volume (no music in surf).' },
+  { name: 'snd_mapobjective_volume', def: '0.5', flags: HA, help: 'Music volume (no music in surf).' },
+  { name: 'snd_deathcamera_volume', def: '0.5', flags: HA, help: 'Music volume (no music in surf).' },
+  { name: 'snd_mvp_volume', def: '0.5', flags: HA, help: 'Music volume (no music in surf).' },
+  { name: 'snd_dzmusic_volume', def: '0.5', flags: HA, help: 'Music volume (no music in surf).' },
+  { name: 'snd_mute_mvp_music_live_players', def: '0', flags: HA, help: 'Music option (no effect).' },
+  { name: 'snd_hwcompat', def: '0', flags: HA, help: 'Sound option (no effect).' },
+  { name: 'windows_speaker_config', def: '1', flags: HA, help: 'Speaker configuration (no effect).' },
+  { name: 'voice_enable', def: '1', flags: HA, help: 'Voice chat (no effect).' },
+  { name: 'voice_scale', def: '1', flags: HA, help: 'Voice chat volume (no effect).' },
+  { name: 'voice_mixer_volume', def: '1', flags: HA, help: 'Voice chat volume (no effect).' },
+  // video / engine
+  { name: 'mat_queue_mode', def: '-1', flags: HA, help: 'Multicore rendering (no effect).' },
+  { name: 'mat_monitorgamma', def: '2.2', flags: HA, help: 'Monitor gamma (no effect: use r_brightness).' },
+  { name: 'mat_monitorgamma_tv_enabled', def: '0', flags: HA, help: 'TV gamma (no effect).' },
+  { name: 'mat_powersavingsmode', def: '0', flags: HA, help: 'Power saving (no effect).' },
+  { name: 'r_dynamic', def: '1', flags: HA, help: 'Dynamic lights (no effect).' },
+  { name: 'r_drawtracers_firstperson', def: '1', flags: HA, help: 'Tracers (no effect).' },
+  { name: 'r_eyegloss', def: '1', flags: H, help: 'Eye gloss (no effect).' },
+  { name: 'fps_max_menu', def: '120', flags: HA, help: 'Frame rate limit in menus (no effect: fps_max applies everywhere).' },
+  { name: 'engine_no_focus_sleep', def: '50', flags: HA, help: 'Sleep when unfocused (no effect).' },
+  { name: 'con_enable', def: '1', flags: HA, help: 'Console enabled (always on).' },
+  { name: 'con_filter_enable', def: '0', flags: H, help: 'Console filter (no effect).' },
+  { name: 'con_filter_text', def: '', flags: H, help: 'Console filter (no effect).' },
+  { name: 'cl_forcepreload', def: '0', flags: HA, help: 'Preloading (no effect).' },
+  { name: 'cl_downloadfilter', def: 'all', flags: HA, help: 'Downloads (no effect).' },
+  { name: 'cl_allowdownload', def: '1', flags: HA, help: 'Downloads (no effect).' },
+  { name: 'tv_nochat', def: '0', flags: HA, help: 'GOTV chat (no effect).' },
+  { name: 'option_duck_method', def: '0', flags: HA, help: 'Duck toggle (no effect: +duck is hold).' },
+  { name: 'option_speed_method', def: '0', flags: HA, help: 'Walk toggle (no effect: +speed is hold).' },
+  { name: 'closeonbuy', def: '0', flags: HA, help: 'Buy menu (no effect).' },
+  // crosshair extras of the CS:GO console (the drawn crosshair uses the cl_crosshair* cvars above)
+  { name: 'cl_crosshair_dynamic_splitdist', def: '7', flags: HA, help: 'Dynamic crosshair (no effect).' },
+  { name: 'cl_crosshair_dynamic_splitalpha_innermod', def: '1', flags: HA, help: 'Dynamic crosshair (no effect).' },
+  { name: 'cl_crosshair_dynamic_splitalpha_outermod', def: '0.5', flags: HA, help: 'Dynamic crosshair (no effect).' },
+  { name: 'cl_crosshair_dynamic_maxdist_splitratio', def: '0.35', flags: HA, help: 'Dynamic crosshair (no effect).' },
+  { name: 'cl_crosshairgap_useweaponvalue', def: '0', flags: HA, help: 'Weapon crosshair gap (no effect).' },
+  { name: 'cl_crosshair_sniper_width', def: '1', flags: HA, help: 'Sniper scope (no effect).' },
+  { name: 'cl_crosshair_recoil', def: '0', flags: HA, help: 'Crosshair recoil (no effect).' },
+  { name: 'cl_crosshairscale', def: '0', flags: HA, help: 'Legacy crosshair scale (no effect).' },
+  { name: 'cl_fixedcrosshairgap', def: '3', flags: HA, help: 'Legacy crosshair gap (no effect).' },
 ];
 
 const PHYSICS_NAMES: ReadonlySet<string> = new Set(PHYSICS_CVAR_DEFS.map((d) => d.name));
@@ -275,6 +420,10 @@ export function registerConvars(): void {
   if (registered) return;
   registered = true;
   for (const d of CVAR_DEFS) {
+    registerCvar({ name: d.name, default: d.def, flags: d.flags, min: d.min, max: d.max, help: d.help });
+  }
+  // after the documented ones: a name in both keeps its documented definition (first wins)
+  for (const d of COMPAT_CVAR_DEFS) {
     registerCvar({ name: d.name, default: d.def, flags: d.flags, min: d.min, max: d.max, help: d.help });
   }
   const tick = console_.cvar('tickrate');

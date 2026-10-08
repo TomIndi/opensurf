@@ -297,7 +297,7 @@ describe.skipIf(!has('surf_kitsune'))('surf_kitsune: !s stage practice', () => {
     w.ents.onPlayerTeleported();
     w.host.setPos(center(s4).x, center(s4).y, center(s4).z);
     w.tick();
-    expect(w.host.chatText().at(-1)).toBe('[Surf] Stage 3 | 00:02.500 (first time)');
+    expect(w.host.chatText().at(-1)).toBe('[Surf] Player finished Stage 3 in 00:02.500 (first time)');
     expect(getStageBest('surf_kitsune', 0, 3, 100)?.time).toBeCloseTo(2.5, 6);
     expect(w.timer.getHud()).toMatchObject({ state: 'practice', stage: 4, time: 0 });
   });

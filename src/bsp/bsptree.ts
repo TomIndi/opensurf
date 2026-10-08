@@ -175,7 +175,7 @@ export function faceProbePoint(bsp: BspFile, f: number, offset = 2): Vec3 | null
       z += oz / n;
     }
   }
-  const s = face.side ? -offset : offset;
+  const s = offset; // planes[planeNum] already faces the front (vbsp: side = planeNum & 1)
   return { x: x + plane.normal.x * s, y: y + plane.normal.y * s, z: z + plane.normal.z * s };
 }
 

@@ -2,9 +2,13 @@
 // synthetic fixture map (sky face orientation, 3D skybox, lightmaps, brush entity state, fog), the depth/extension
 // fallbacks, built-in maps, resource leaks over repeated loads and, with $SURF_TEST_MAPS, real KSF maps.
 // Skipped without a Chromium build (CI) or with SURF_RENDER_BROWSER=0.
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+
+/** Private Vite dependency cache of this file's dev server (removed afterwards). */
+let viteCache = '';
 
 function findChromium(): string | null {
   if (process.env.SURF_RENDER_BROWSER === '0') return null;
@@ -41,9 +45,20 @@ interface Harness {
   };
   setView: (pos: number[] | null, ang: number[] | null, fov?: number) => void;
   readPixel: (x: number, y: number) => number[];
+  cullingDiff: () => number;
   renderNow: () => { drawCalls: number; triangles: number; textures: number };
   reload: (n: number) => Promise<{ textures: number; geometries: number; programs: number }>;
-  info: () => { depth: string; samples: number; textures: number; geometries: number; programs: number; scene: Record<string, number> | null; targetSize: number[]; sky: { procedural: boolean; sky3d: boolean } };
+  info: () => {
+    depth: string;
+    samples: number;
+    textures: number;
+    geometries: number;
+    programs: number;
+    scene: Record<string, number> | null;
+    targetSize: number[];
+    sky: { procedural: boolean; sky3d: boolean };
+    faces: { audit: { inverted: number; correct: number; invertedArea: number; correctArea: number } | null; doubleSided: boolean } | null;
+  };
 }
 
 declare const window: { __renderHarness: Harness };
@@ -57,6 +72,8 @@ describe.skipIf(!chromiumPath)('renderer in a real browser', () => {
     const { createServer } = await import('vite');
     const s = await createServer({
       configFile: join(ROOT, 'vite.render-harness.config.ts'),
+      // own dependency cache (see ui_browser.test.ts): parallel dev servers must not re-optimize it under the page
+      cacheDir: (viteCache = mkdtempSync(join(tmpdir(), 'surf-vite-render-'))),
       root: ROOT,
       logLevel: 'error',
       // no HMR / file watching: other work in the tree must not reload the page under the test
@@ -73,6 +90,7 @@ describe.skipIf(!chromiumPath)('renderer in a real browser', () => {
   afterAll(async () => {
     await browser?.close();
     await server?.close();
+    if (viteCache) rmSync(viteCache, { recursive: true, force: true });
   });
 
   async function open(query: string, w = 640, h = 360): Promise<{ page: Page; errors: string[] }> {
@@ -284,6 +302,29 @@ describe.skipIf(!chromiumPath)('renderer in a real browser', () => {
         const info = await page.evaluate(() => window.__renderHarness.info());
         expect(info.scene!.meshes).toBeGreaterThan(10);
         expect(info.scene!.triangles).toBeGreaterThan(10000);
+        // no wall may vanish to back-face culling: the spawn view (and three more directions) look the same with
+        // culling switched off for every surface (the face orientation audit picks double-sided drawing when
+        // the loader emits faces inside-out)
+        expect(info.faces).toBeTruthy();
+        // the loader winds brush faces toward their front side now: single-sided culling, like the engine
+        const audit = info.faces!.audit!;
+        expect(audit.invertedArea / (audit.invertedArea + audit.correctArea)).toBeLessThan(0.05);
+        expect(info.faces!.doubleSided).toBe(false);
+        for (const turn of [0, 90, 180, 270]) {
+          const diff = await page.evaluate((turn) => {
+            const h = window.__renderHarness;
+            if (turn) h.setView(null, [10, turn]);
+            return h.cullingDiff();
+          }, turn);
+          expect(diff, `pixels lost to culling, view ${turn}`).toBeLessThan(0.02);
+        }
+        if (name === 'surf_kitsune') {
+          // the red stage start: a floor of 4 stacked translucent grids (black, thin red lines), seen from a
+          // spawn position whose eye plane contains floor vertices. Mostly dark - not the solid red of layers
+          // drawn front to back or of triangles smeared from w = 0 vertices
+          const px = await pixelAt(page, [-15360, -15088, 880], [0, 90], 0.3, 0.9);
+          expect(px[0], `floor pixel ${px}`).toBeLessThan(120);
+        }
         const first = await page.evaluate(() => window.__renderHarness.reload(1));
         const again = await page.evaluate(() => window.__renderHarness.reload(2));
         expect(again.textures).toBe(first.textures);

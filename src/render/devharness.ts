@@ -7,8 +7,10 @@
 //   spawn=N                  use spawn point N
 //   time=T                   fixed animation time (deterministic screenshots)
 //   fullbright=1 fog=0 sky3d=0 wire=1 scale=0.5 aniso=N brightness=B zones=0 clips=1   settings
+//   zonestyle=floor|box      zone beams: floor outline (default) or the full box
 //   demo=1                   demo zones + a ghost (with trail) in front of the camera
 //   noext=EXT_a,EXT_b        pretend extensions are missing (fallback paths)
+//   ds=auto|0|1              back-face culling of BSP surfaces (default auto: see auditFaceOrientation)
 //   hud=0                    hide the info overlay
 //   fly=1                    WASD + mouse (click to lock) fly camera; shift = fast
 // window.__renderHarness exposes the renderer and helpers for automated tests.
@@ -17,7 +19,7 @@ import { angleVectors } from '../core/angles';
 import type { Vec3 } from '../core/vec3';
 import type { GhostState, LoadProgress, ViewState } from '../game/api';
 import type { LoadedMap, ZoneDef } from '../map/types';
-import { Mesh, Raycaster, Triangle, Vector2, Vector3 } from 'three';
+import { DoubleSide, Material, Mesh, Raycaster, Triangle, Vector2, Vector3 } from 'three';
 import { Renderer } from './renderer';
 
 interface HarnessState {
@@ -51,7 +53,12 @@ if (!flag('hud', true)) hud.classList.add('hidden');
 
 const state: HarnessState = { ready: false, error: null, loadMs: 0, progress: [] };
 const noext = (params.get('noext') ?? '').split(',').filter(Boolean);
-const renderer = new Renderer(canvas, { disableExtensions: noext, preserveDrawingBuffer: flag('preserve', false) });
+const ds = params.get('ds');
+const renderer = new Renderer(canvas, {
+  disableExtensions: noext,
+  preserveDrawingBuffer: flag('preserve', false),
+  doubleSided: ds === null || ds === 'auto' ? 'auto' : ds !== '0' && ds !== 'false',
+});
 renderer.resize(window.innerWidth, window.innerHeight, window.devicePixelRatio || 1);
 window.addEventListener('resize', () => renderer.resize(window.innerWidth, window.innerHeight, window.devicePixelRatio || 1));
 renderer.setSettings({
@@ -64,6 +71,7 @@ renderer.setSettings({
   brightness: num('brightness', 1),
   drawZones: flag('zones', true),
   drawClips: flag('clips', false),
+  zoneStyle: params.get('zonestyle') === 'box' ? 'box' : 'floor',
 });
 
 const view: ViewState = { origin: { x: 0, y: 0, z: 64 }, angles: { pitch: 0, yaw: 0, roll: 0 }, fov: num('fov', 90), time: 0 };
@@ -210,6 +218,7 @@ declare global {
       info: () => ReturnType<Renderer['debugInfo']>;
       demo: () => void;
       readPixel: (fx: number, fy: number) => number[];
+      cullingDiff: () => number;
       pick: (x: number, y: number) => { lm: number[] | null; name: string; model: unknown; point: number[]; distance: number; transparent: boolean }[];
     };
   }
@@ -250,6 +259,37 @@ window.__renderHarness = {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
     return Array.from(px);
+  },
+  cullingDiff: () => {
+    // fraction of pixels that change when back-face culling is switched off for every opaque map surface: ~0
+    // when all faces are wound toward the viewer (or the renderer already draws them double-sided). Translucent
+    // surfaces are left alone: a glass brush seen from below correctly shows only its downward face (like
+    // Source); drawing its upward face from behind too adds a second glass layer, which isn't a lost wall.
+    const gl = renderer.gl;
+    const grab = (): Uint8Array => {
+      renderer.render(view);
+      const px = new Uint8Array(gl.drawingBufferWidth * gl.drawingBufferHeight * 4);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.readPixels(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      return px;
+    };
+    const a = grab();
+    const meshes = (renderer.scene?.meshes() ?? []).filter((m) => !(m.material as Material).transparent);
+    const saved = meshes.map((m) => (m.material as Material).side);
+    for (const m of meshes) {
+      (m.material as Material).side = DoubleSide;
+      (m.material as Material).needsUpdate = true;
+    }
+    const b = grab();
+    meshes.forEach((m, i) => {
+      (m.material as Material).side = saved[i];
+      (m.material as Material).needsUpdate = true;
+    });
+    let diff = 0;
+    for (let i = 0; i < a.length; i += 4) {
+      if (Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]) > 24) diff++;
+    }
+    return diff / (a.length / 4);
   },
   pick: (x: number, y: number) => {
     const rc = new Raycaster();

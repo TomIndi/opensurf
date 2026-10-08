@@ -143,7 +143,7 @@ describe('SurfTimer run flow', () => {
     expect(l2).toContain('[Surf] Stage 2 | 00:00.500 (-0.500)');
     const split = w.host.chats.find((c) => c.some((s) => s.text === '-0.500'))!;
     expect(split.find((s) => s.text === '-0.500')?.color).toBe('lightgreen');
-    expect(l2).toContain('[Surf] Player finished surf_test in 00:02.500 (-0.500) | Rank 1/2');
+    expect(l2).toContain('[Surf] Player finished surf_test in 00:02.500 (-0.500) | Rank 1/1');
     expect(w.timer.getHud().lastSplitDelta).toBeCloseTo(-0.5, 9);
 
     // slower run: red, no PB
@@ -151,11 +151,29 @@ describe('SurfTimer run flow', () => {
     run(w, [100, 100, 100]);
     const l3 = w.host.chatText();
     expect(l3).toContain('[Surf] Stage 2 | 00:01.000 (+0.500)');
-    // equal times: the older run stays ahead
-    expect(l3.at(-1)).toBe('[Surf] Player finished surf_test in 00:03.000 (+0.500) | Rank 3/3');
+    // SurfTimer's rank is among players (one on a local server), not among your own runs
+    expect(l3.at(-1)).toBe('[Surf] Player finished surf_test in 00:03.000 (+0.500) | Rank 1/1');
     expect(w.host.sound.played.at(-1)).toBe('finish');
     expect(getRecords('surf_test', 0).map((r) => r.time)).toEqual([2.5, 3, 3].map((t) => expect.closeTo(t, 9)));
     expect(w.timer.getRecords(0)).toHaveLength(3);
+  });
+
+  it('the run clock is simulated time: a tickrate change mid-run does not rescale the time already run', () => {
+    const w = world(STAGED);
+    w.at(0);
+    w.at(300); // run starts (time 0)
+    w.at(500, 100); // 100 ticks at 100 tick = 1 s
+    expect(w.timer.getHud().time).toBeCloseTo(1, 9);
+    w.host.tickInterval = 1 / 64;
+    expect(w.timer.getHud().time).toBeCloseTo(1, 9); // no jump to 100 / 64 s
+    w.at(500, 64); // + 1 s at 64 tick
+    expect(w.timer.getHud().time).toBeCloseTo(2, 9);
+    w.at(1100); // stage 2 at 2 s + 1/64
+    expect(w.host.chatText().at(-1)).toBe('[Surf] Stage 2 | 00:02.015');
+    w.host.tickInterval = 0.01;
+    w.at(1500, 50); // the stage clock starts on the tick that leaves the stage zone
+    expect(w.timer.getHud().stageTime).toBeCloseTo(0.49, 9);
+    expect(w.timer.getHud().time).toBeCloseTo(2 + 1 / 64 + 0.5, 9);
   });
 
   it('a finished run stays frozen in the start zone until the next run starts', () => {

@@ -8,9 +8,14 @@
 //      scaled about the sky_camera (p' = (p - origin) * scale, seen from the main eye == the engine's sky
 //      camera at origin + eye / scale), with the sky_camera fog; then the depth is cleared
 //   3. the main view: (2D sky cube when there is no 3D sky), sky faces as depth-only masks, opaque world
-//      sorted by shader/material, brush entities, props, decals, then translucent surfaces back to front,
-//      zones, ghosts, debug geometry
+//      sorted by shader/material, brush entities, props, decals, then translucent surfaces back to front
+//      (meshes by three.js, the planes inside each translucent mesh by translucency.ts), zones, ghosts, debug
+//      geometry
 //   4. resolve + blit to the canvas (render scale, sRGB output)
+//
+// At load, auditFaceOrientation (mapscene.ts) probes the collision world on both sides of sampled brush faces;
+// if a large share face into solid (a loader emitting faces back to front), BSP surfaces are drawn without
+// back-face culling so no wall disappears.
 import {
   BufferAttribute,
   BufferGeometry,
@@ -32,13 +37,14 @@ import {
   WebGLRenderer,
 } from 'three';
 import type { Vec3 } from '../core/vec3';
-import type { GhostState, LoadProgress, RenderSettings, RendererApi, ViewState } from '../game/api';
+import type { QAngle } from '../core/angles';
+import type { GhostState, LoadProgress, RenderSettings, RendererApi, RendererCapabilities, ViewState } from '../game/api';
 import type { FogDef, LoadedMap, ZoneDef } from '../map/types';
 import { CONTENTS_SLIME, CONTENTS_WATER } from '../physics/types';
-import { applySourceView, createSourceCamera, sourceVerticalFov } from './camera';
+import { EYE_PULLBACK, applySourceView, createSourceCamera, sourceVerticalFov } from './camera';
 import { ClipBrushes, DebugBoxes } from './debugdraw';
 import { Ghosts } from './ghosts';
-import { MapScene } from './mapscene';
+import { type FaceOrientationAudit, MapScene } from './mapscene';
 import { SkyBox } from './sky';
 import { BLIT_FRAGMENT, BLIT_VERTEX } from './shaders';
 import { TextureCache } from './textures';
@@ -54,6 +60,8 @@ export interface RendererOptions {
   preserveDrawingBuffer?: boolean;
   /** Near plane (default 3). */
   near?: number;
+  /** Back-face culling of BSP surfaces: 'auto' (default, see auditFaceOrientation), or forced on/off (debugging). */
+  doubleSided?: boolean | 'auto';
 }
 
 export const DEFAULT_SETTINGS: RenderSettings = {
@@ -67,6 +75,7 @@ export const DEFAULT_SETTINGS: RenderSettings = {
   renderScale: 1,
   fogEnabled: true,
   drawSky3D: true,
+  zoneStyle: 'floor',
 };
 
 const FAR = 1 << 20;
@@ -102,6 +111,8 @@ export interface RendererDebugInfo {
   sky: { procedural: boolean; name: string; sky3d: boolean };
   maxAnisotropy: number;
   s3tc: boolean;
+  /** Brush face orientation audit (see auditFaceOrientation) and whether BSP surfaces are drawn double-sided. */
+  faces: { audit: FaceOrientationAudit | null; doubleSided: boolean } | null;
 }
 
 export class Renderer implements RendererApi {
@@ -136,6 +147,7 @@ export class Renderer implements RendererApi {
   private height = 1;
   private pixelRatio = 1;
   private contextLost = false;
+  private readonly doubleSidedOption: boolean | 'auto';
   private lastStats = { drawCalls: 0, triangles: 0, textures: 0 };
   private sky3dActive = false;
   /** Water surfaces (bounds + fog) for the underwater view, and the one the eye is under (null = not underwater). */
@@ -143,6 +155,8 @@ export class Renderer implements RendererApi {
   private underwater: WaterSurface | null = null;
   private readonly tmpVec = new Vector3();
   private readonly clearColor = new Vector3(0, 0, 0);
+  /** Runtime world fog (SetFogController) replacing the map's own; null = the map's fog. */
+  private fogOverride: FogDef | null = null;
 
   constructor(canvas: HTMLCanvasElement, opts: RendererOptions = {}) {
     const gl = canvas.getContext('webgl2', {
@@ -186,6 +200,7 @@ export class Renderer implements RendererApi {
     };
 
     this.camera = createSourceCamera(opts.near ?? 3, FAR);
+    this.doubleSidedOption = opts.doubleSided ?? 'auto';
     this.shared = createSharedUniforms();
     this.sky = new SkyBox(this.shared);
     this.zones = new ZoneBeams(this.shared.uTime, this.pixelScale);
@@ -299,9 +314,14 @@ export class Renderer implements RendererApi {
     report('Building the scene', 0, 1);
     const textures = new TextureCache(this.caps);
     textures.setAnisotropy(this.settings.maxAnisotropy);
-    const materials = new SurfaceMaterials({ textures, shared: this.shared, alphaToCoverage: this.samples > 0 });
+    const materials = new SurfaceMaterials({
+      textures,
+      shared: this.shared,
+      alphaToCoverage: this.samples > 0,
+      reversedDepth: this.depthMode === 'reversed-float',
+    });
     materials.setWireframe(this.settings.wireframe);
-    const scene = new MapScene(map, { textures, materials, shared: this.shared });
+    const scene = new MapScene(map, { textures, materials, shared: this.shared, doubleSided: this.doubleSidedOption });
     const cleanup = () => {
       scene.dispose();
       materials.dispose();
@@ -318,6 +338,13 @@ export class Renderer implements RendererApi {
         if (aborted()) throw new LoadAbortedError();
       });
       if (aborted()) throw new LoadAbortedError();
+      const audit = scene.faceAudit;
+      if (scene.doubleSided && audit && typeof console !== 'undefined') {
+        console.warn(
+          `[renderer] ${map.name}: ${audit.inverted} of ${audit.inverted + audit.correct} sampled brush faces are wound inside-out ` +
+            `(the loader got their facing wrong); drawing BSP surfaces double-sided`,
+        );
+      }
       this.sky.setMap(map, textures);
       // install
       this.map = map;
@@ -328,6 +355,7 @@ export class Renderer implements RendererApi {
       this.skyScene.add(scene.sky3d);
       this.waterSurfaces = waterSurfaces(map);
       this.underwater = null;
+      this.fogOverride = null;
       this.arrangeScenes();
       this.applyFog();
       this.clips.reset();
@@ -384,10 +412,24 @@ export class Renderer implements RendererApi {
     this.map = null;
     this.waterSurfaces = [];
     this.underwater = null;
+    this.fogOverride = null;
     this.clips.reset();
     this.clips.setVisible(false, () => []);
     this.arrangeScenes();
     this.applyFog();
+  }
+
+  /** Map logic switched the player's fog (env_fog_controller via SetFogController); null = the map's own fog. */
+  setFog(fog: FogDef | null): void {
+    this.fogOverride = fog
+      ? { enabled: !!fog.enabled, color: [fog.color[0], fog.color[1], fog.color[2]], start: fog.start, end: fog.end, maxDensity: fog.maxDensity }
+      : null;
+    this.applyFog();
+  }
+
+  /** Device capabilities the loader can prepare data for. */
+  capabilities(): RendererCapabilities {
+    return { compressedTextures: this.caps.s3tc, maxTextureSize: this.caps.maxTextureSize };
   }
 
   setModelVisible(model: number, visible: boolean): void {
@@ -403,6 +445,11 @@ export class Renderer implements RendererApi {
   setModelColor(model: number, rgb: [number, number, number]): void {
     if (!(model > 0)) return;
     this.mapScene?.setModelColor(model, rgb);
+  }
+
+  setModelTransform(model: number, origin: Vec3, angles: QAngle): void {
+    if (!(model > 0)) return;
+    this.mapScene?.setModelTransform(model, origin, angles);
   }
 
   setZones(zones: ZoneDef[], activeGroup: number): void {
@@ -424,12 +471,15 @@ export class Renderer implements RendererApi {
     for (const k of Object.keys(s) as (keyof RenderSettings)[]) {
       const v = s[k];
       if (v === undefined || v === null) continue;
-      if (typeof DEFAULT_SETTINGS[k] === 'boolean') (this.settings as unknown as Record<string, boolean>)[k] = !!v;
+      if (k === 'zoneStyle') {
+        if (v === 'floor' || v === 'box') this.settings.zoneStyle = v;
+      } else if (typeof DEFAULT_SETTINGS[k] === 'boolean') (this.settings as unknown as Record<string, boolean>)[k] = !!v;
       else if (typeof v === 'number' && Number.isFinite(v)) (this.settings as unknown as Record<string, number>)[k] = v;
     }
     const st = this.settings;
     this.shared.uFullbright.value = st.fullbright ? 1 : 0;
     this.shared.uBrightness.value = Math.max(0.05, Math.min(4, st.brightness));
+    this.zones.setStyle(st.zoneStyle);
     this.zones.setEnabled(st.drawZones);
     if (st.wireframe !== prev.wireframe) this.materials?.setWireframe(st.wireframe);
     if (st.maxAnisotropy !== prev.maxAnisotropy) this.textures?.setAnisotropy(st.maxAnisotropy);
@@ -484,12 +534,12 @@ export class Renderer implements RendererApi {
       srgbToLinearVec(w.color, this.tmpVec);
       this.sky.setOverlayFog(this.tmpVec, 1);
     } else {
-      this.setFogUniforms(this.shared.world, r?.fog ?? null, 1);
+      this.setFogUniforms(this.shared.world, this.fogOverride ?? r?.fog ?? null, 1);
       this.sky.setOverlayFog(null, 0);
       const s3 = r?.sky3d ?? null;
       this.setFogUniforms(this.shared.sky3d, s3?.fog ?? null, s3 && s3.scale > 0 ? 1 / s3.scale : 1 / 16);
     }
-    this.sky.setFog(r?.fog ?? null, this.settings.fogEnabled);
+    this.sky.setFog(this.fogOverride ?? r?.fog ?? null, this.settings.fogEnabled);
   }
 
   // ------------------------------------------------------------------------------ frame
@@ -499,10 +549,13 @@ export class Renderer implements RendererApi {
     const t = Number.isFinite(view.time) ? view.time : 0;
     this.shared.uTime.value = t;
     const aspect = this.width / this.height;
-    applySourceView(this.camera, view.origin, view.angles, view.fov, aspect);
+    applySourceView(this.camera, view.origin, view.angles, view.fov, aspect, EYE_PULLBACK);
     const vfov = (sourceVerticalFov(view.fov) * Math.PI) / 180;
     this.pixelScale.value = (2 * Math.tan(vfov / 2)) / Math.max(1, this.targetH);
-    this.mapScene?.update(t);
+    if (this.mapScene) {
+      this.mapScene.update(t);
+      this.mapScene.sortTranslucent(this.camera.position);
+    }
     this.updateUnderwater(view.origin);
     this.ghosts.update(t, this.tmpVec.copy(this.camera.position), this.pixelScale.value);
 
@@ -571,6 +624,7 @@ export class Renderer implements RendererApi {
       sky: { procedural: this.sky.procedural, name: this.sky.name, sky3d: this.sky3dActive },
       maxAnisotropy: this.caps.maxAnisotropy,
       s3tc: this.caps.s3tc,
+      faces: this.mapScene ? { audit: this.mapScene.faceAudit ? { ...this.mapScene.faceAudit } : null, doubleSided: this.mapScene.doubleSided } : null,
     };
   }
 

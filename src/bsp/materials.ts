@@ -21,8 +21,10 @@
 //
 // Procedural fallbacks: a tileable image whose average colour equals the material's average colour (from the
 // texdata reflectivity that vbsp stored, converted from linear to sRGB) with a pattern chosen from the material
-// name (concrete speckle, brushed metal, wood planks, brick bond, tiles, glass, grass/dirt/rock noise, dev
-// grids...). Everything is deterministic (seeded by the name).
+// name (concrete formwork panels / floor slabs / ceiling tiles, brushed metal, wood planks, brick bond, tiles,
+// glass, grass/dirt/rock, dev grids...). The detail is fine-grained and low in contrast, with no large
+// low-frequency blotches: tiled over a big surf wall those read as fog or dirt rather than a surface. Everything is
+// deterministic (seeded by the name).
 import type { Vec3 } from '../core/vec3';
 import type { CubemapDef, DecodedImage, MaterialDef, MaterialEnvmap, SkyDef } from '../map/types';
 import { PakFile, normalizePakPath } from './pakfile';
@@ -540,32 +542,64 @@ function gridDist(t: number, n: number, size: number): number {
 
 function metalFields(nf: NoiseFields): (i: number) => number {
   const streak = nf.fbm(2, 4, 0, 24);
-  const blotch = nf.fbm(3, 3, 5);
+  const blotch = nf.fbm(8, 2, 5);
   const w = nf.white(3);
-  return (i) => 1 + 0.25 * (streak[i] - 0.5) + 0.18 * (blotch[i] - 0.5) + 0.04 * (w[i] - 0.5);
+  return (i) => 1 + 0.2 * (streak[i] - 0.5) + 0.06 * (blotch[i] - 0.5) + 0.04 * (w[i] - 0.5);
+}
+
+/**
+ * Fine surface grain shared by the plain families: pores/aggregate (white noise), fine mottling and a faint
+ * mid-frequency variation. Deliberately no low-frequency blotches: tiled over a big wall they read as fog or
+ * dirt, while fine grain mips down to the flat average colour at a distance like real stock textures.
+ */
+function grainFields(nf: NoiseFields, amount = 1): (i: number) => number {
+  const w = nf.white(3);
+  const fine = nf.fbm(48, 2, 1);
+  const mid = nf.fbm(12, 2, 2);
+  return (i) => 1 + amount * (0.07 * (w[i] - 0.5) + 0.08 * (fine[i] - 0.5) + 0.05 * (mid[i] - 0.5));
 }
 
 const SHADERS: Record<MaterialFamily, ShaderFactory> = {
-  concrete(nf) {
-    const n1 = nf.fbm(4, 5, 0);
-    const n2 = nf.fbm(32, 2, 7);
-    const w = nf.white(3);
+  concrete(nf, name) {
+    const { W, H, seed } = nf;
+    const grain = grainFields(nf);
     const pits = nf.white(11);
-    const stain = nf.fbm(2, 3, 21);
+    const base = name.slice(name.lastIndexOf('/') + 1);
+    const ceiling = /ceiling/.test(base);
+    const floor = !ceiling && /floor|ground|road|pavement|sidewalk|asphalt|curb/.test(base);
+    const wall = !ceiling && !floor && /wall|pillar|column/.test(base);
+    // Walls: 2x2 formwork panels with 3x3 tie holes and faint rain streaks; floors: 2x2 saw-cut slabs;
+    // ceilings: 4x4 acoustic tiles; anything else: faint 2x2 panel seams.
+    const P = ceiling ? 4 : 2;
+    const streak = wall ? nf.noise(32, 2, 21) : null;
+    const lw = Math.max(0.8, W / 320);
+    const holeR = Math.max(1.1, W / 160);
+    const seamDark = ceiling ? 0.72 : floor ? 0.8 : wall ? 0.84 : 0.9;
     return (i, u, v, x, y, p) => {
-      let m = 1 + 0.3 * (n1[i] - 0.5) + 0.16 * (n2[i] - 0.5) + 0.07 * (w[i] - 0.5);
-      if (pits[i] < 0.015) m *= 0.8;
-      const st = stain[i];
-      if (st > 0.6) m *= 1 - (st - 0.6) * 0.3;
+      let m = grain(i);
+      const pt = pits[i];
+      if (pt < 0.012) m *= 0.8; // air pockets
+      else if (pt > 0.993) m *= 1.07; // aggregate
+      if (streak) m *= 1 + 0.05 * (streak[i] - 0.5);
+      m *= 1 + 0.04 * (rnd(Math.floor(u * P), Math.floor(v * P), seed + 5) - 0.5);
+      const e = Math.min(gridDist(u, P, W), gridDist(v, P, H));
+      if (e < lw) m *= seamDark;
+      else if (e < lw + 1) m *= 1.03;
+      else if (wall) {
+        const cu = (frac(u * P * 3) - 0.5) * (W / (P * 3));
+        const cv = (frac(v * P * 3) - 0.5) * (H / (P * 3));
+        const d2 = cu * cu + cv * cv;
+        if (d2 < holeR * holeR) m *= cv < 0 ? 0.62 : 0.75;
+        else if (d2 < (holeR + 1) * (holeR + 1)) m *= 1.04;
+      }
       p.m = m;
     };
   },
   plaster(nf) {
-    const n1 = nf.fbm(3, 4, 0);
-    const n2 = nf.fbm(24, 2, 4);
-    const w = nf.white(3);
+    const grain = grainFields(nf, 0.8);
+    const trowel = nf.noise(10, 40, 4);
     return (i, u, v, x, y, p) => {
-      p.m = 1 + 0.2 * (n1[i] - 0.5) + 0.06 * (n2[i] - 0.5) + 0.05 * (w[i] - 0.5);
+      p.m = grain(i) * (1 + 0.035 * (trowel[i] - 0.5));
     };
   },
   metal(nf, name) {
@@ -697,20 +731,20 @@ const SHADERS: Record<MaterialFamily, ShaderFactory> = {
   },
   stone(nf) {
     const { W, seed } = nf;
-    const n = nf.fbm(3, 6, 0);
-    const fine = nf.fbm(16, 3, 9);
+    const n = nf.fbm(6, 4, 0);
+    const fine = nf.fbm(32, 2, 9);
     const w = nf.white(2);
     const c = nf.worley(5, 11);
     const cell = W / 5;
     return (i, u, v, x, y, p) => {
       const id = c.id[i];
       // Angular rock faces: per-cell tone and a tilt that brightens one side of each facet.
-      const tone = 1 + 0.16 * (rnd(id, 0, seed + 3) - 0.5);
+      const tone = 1 + 0.09 * (rnd(id, 0, seed + 3) - 0.5);
       const edge = (c.f2[i] - c.f1[i]) * cell;
       const facet = 1 + 0.1 * (rnd(id, 1, seed + 3) - 0.5) * Math.min(1, edge / (cell * 0.3));
-      let m = tone * facet * (1 + 0.4 * (n[i] - 0.5) + 0.12 * (fine[i] - 0.5) + 0.06 * (w[i] - 0.5));
-      m *= 1 + 0.07 * Math.sin(2 * Math.PI * (v * 4 + 0.8 * n[i]));
-      if (edge < 1.2 && rnd(id, 2, seed + 3) < 0.6) m *= 0.72;
+      let m = tone * facet * (1 + 0.12 * (n[i] - 0.5) + 0.12 * (fine[i] - 0.5) + 0.08 * (w[i] - 0.5));
+      m *= 1 + 0.04 * Math.sin(2 * Math.PI * (v * 8 + 0.8 * n[i]));
+      if (edge < 1.2 && rnd(id, 2, seed + 3) < 0.6) m *= 0.74;
       p.m = m;
     };
   },
@@ -737,41 +771,42 @@ const SHADERS: Record<MaterialFamily, ShaderFactory> = {
     };
   },
   grass(nf) {
-    const n = nf.fbm(6, 4, 0);
-    const blades = nf.noise(96, 24, 9);
+    const n = nf.fbm(8, 3, 0);
+    const blades = nf.noise(128, 24, 9);
+    const blades2 = nf.noise(96, 16, 19);
     const w = nf.white(3);
     const clump = nf.white(13);
-    const yel = nf.fbm(3, 3, 17);
+    const yel = nf.fbm(8, 2, 17);
     return (i, u, v, x, y, p) => {
-      let m = 1 + 0.4 * (n[i] - 0.5) + 0.3 * (blades[i] - 0.5) + 0.2 * (w[i] - 0.5);
-      if (clump[i] < 0.03) m *= 0.75;
+      let m = 1 + 0.12 * (n[i] - 0.5) + 0.22 * (blades[i] - 0.5) + 0.14 * (blades2[i] - 0.5) + 0.16 * (w[i] - 0.5);
+      if (clump[i] < 0.03) m *= 0.8;
       p.m = m;
-      p.r = 1 + 0.25 * (yel[i] - 0.5);
-      p.b = 1 - 0.15 * (yel[i] - 0.5);
+      p.r = 1 + 0.16 * (yel[i] - 0.5);
+      p.b = 1 - 0.1 * (yel[i] - 0.5);
     };
   },
   dirt(nf) {
     const { seed } = nf;
-    const n = nf.fbm(5, 5, 0);
-    const n2 = nf.fbm(20, 2, 4);
-    const w = nf.white(3);
-    const c = nf.worley(16, 7);
+    const grain = grainFields(nf, 1.3);
+    const n = nf.fbm(8, 2, 0);
+    const c = nf.worley(24, 7);
     return (i, u, v, x, y, p) => {
-      let m = 1 + 0.45 * (n[i] - 0.5) + 0.12 * (w[i] - 0.5) + 0.1 * (n2[i] - 0.5);
+      let m = grain(i) * (1 + 0.1 * (n[i] - 0.5));
+      // pebbles: a lit top and a shaded bottom
       const f1 = c.f1[i];
-      if (f1 < 0.22 && rnd(c.id[i], 0, seed + 8) < 0.5) {
-        const shade = rnd(c.id[i], 1, seed + 8) > 0.5 ? 1.2 : 0.8;
-        m *= 1 + (shade - 1) * (1 - f1 / 0.22);
+      if (f1 < 0.26 && rnd(c.id[i], 0, seed + 8) < 0.45) {
+        const k = 1 - f1 / 0.26;
+        m *= 1 + (rnd(c.id[i], 1, seed + 8) > 0.5 ? 0.16 : -0.14) * k;
       }
       p.m = m;
     };
   },
   sand(nf) {
-    const n = nf.fbm(3, 4, 0);
-    const r = nf.fbm(2, 2, 3);
+    const n = nf.fbm(8, 3, 0);
+    const r = nf.fbm(4, 2, 3);
     const w = nf.white(3);
     return (i, u, v, x, y, p) => {
-      p.m = 1 + 0.18 * (n[i] - 0.5) + 0.14 * (w[i] - 0.5) + 0.06 * Math.sin(2 * Math.PI * (v * 6 + u + 1.5 * r[i]));
+      p.m = 1 + 0.07 * (n[i] - 0.5) + 0.14 * (w[i] - 0.5) + 0.05 * Math.sin(2 * Math.PI * (v * 8 + u + 0.8 * r[i]));
     };
   },
   marble(nf, name) {
@@ -896,11 +931,15 @@ const SHADERS: Record<MaterialFamily, ShaderFactory> = {
     };
   },
   generic(nf) {
-    const n = nf.fbm(4, 5, 0);
-    const n2 = nf.fbm(16, 2, 5);
-    const w = nf.white(3);
+    const { W, H, seed } = nf;
+    const grain = grainFields(nf);
+    const lw = Math.max(0.8, W / 320);
     return (i, u, v, x, y, p) => {
-      p.m = 1 + 0.22 * (n[i] - 0.5) + 0.08 * (n2[i] - 0.5) + 0.06 * (w[i] - 0.5);
+      // Fine grain on faint 2x2 panels: reads as a surface (and gives a sense of scale and speed) without
+      // detail that could contradict the real texture.
+      let m = grain(i) * (1 + 0.035 * (rnd(Math.floor(u * 2), Math.floor(v * 2), seed + 5) - 0.5));
+      if (Math.min(gridDist(u, 2, W), gridDist(v, 2, H)) < lw) m *= 0.9;
+      p.m = m;
     };
   },
   grid(nf) {
@@ -2280,95 +2319,208 @@ export function loadCubemaps(bsp: BspFile, pak: PakFile | null, opts: LoadCubema
 
 // ======================================================================== optional game content prefetch
 
-/** Texture/material paths referenced by a parsed VMT (base textures, detail, includes). */
-function vmtDependencies(info: VmtInfo): string[] {
+export interface PrefetchOptions {
+  /** worldspawn "skyname": its six faces (LDR, and HDR only for faces without an LDR texture). */
+  skyName?: string;
+  /** More material names to resolve besides the texdata names (e.g. model materials). */
+  materials?: string[];
+  /** Fetch $detail textures (default true; match BuildMaterialsOptions.detailTextures). */
+  detailTextures?: boolean;
+  /** Reads in flight at once (default 16). */
+  concurrency?: number;
+  /** Called after every file read with the number of files read and the number queued so far. */
+  onProgress?: (done: number, total: number) => void;
+  /** Stops queueing new reads (the files read so far are returned). */
+  signal?: AbortSignal;
+}
+
+/**
+ * Texture/material paths a parsed VMT needs, mirroring what buildMaterial reads: base textures (root and
+ * fallback-block), the blend texture, detail, the envmap mask (or the normal map whose alpha is the mask), and
+ * the HDR sky textures when `hdr`.
+ */
+function vmtDependencies(info: VmtInfo, detail: boolean, hdr: boolean): string[] {
   const out: string[] = [];
   const P = info.params;
-  for (const k of ['$basetexture', '$basetexture2', '$detail', '$hdrbasetexture', '$hdrcompressedtexture']) {
-    if (P[k]) out.push(vtfPath(P[k]));
-  }
+  const add = (t: string | undefined) => {
+    if (t && t.trim()) out.push(vtfPath(t));
+  };
+  add(P['$basetexture']);
   const root = info.body?.['$basetexture'];
-  if (typeof root === 'string') out.push(vtfPath(root));
+  if (typeof root === 'string') add(root);
+  add(P['$basetexture2']);
+  if (detail) add(P['$detail']);
+  const env = (P['$envmap'] ?? '').trim();
+  if (env && env !== '0') {
+    if (P['$envmapmask']) add(P['$envmapmask']);
+    else if (!vmtBool(P['$basealphaenvmapmask']) && vmtBool(P['$normalmapalphaenvmapmask'])) add(P['$bumpmap'] || P['$normalmap']);
+  }
+  if (hdr) {
+    add(P['$hdrbasetexture']);
+    add(P['$hdrcompressedtexture']);
+  }
   return out;
+}
+
+/** Normalized "materials/<x>.vmt" path of a patch include as written ("concrete/foo", "materials/Concrete/Foo.vmt"). */
+function includeVmtPath(inc: string): string {
+  let p = normalizePakPath(inc);
+  if (!p.endsWith('.vmt')) p += '.vmt';
+  if (!p.startsWith('materials/')) p = `materials/${p}`;
+  return p;
+}
+
+/** True when buildMaterial never loads textures for this material (tools, sky, %compile tool keys). */
+function texturelessMaterial(name: string, info: VmtInfo | null): boolean {
+  if (isSkyName(name) || (isToolName(name) && name !== 'tools/toolsblack')) return true;
+  if (!info) return false;
+  const P = info.params;
+  return vmtBool(P['%compilesky']) || vmtBool(P['%compile2dsky']) || TOOL_COMPILE_KEYS.some((k) => vmtBool(P[k]));
 }
 
 /**
  * Fetches, from `content` (e.g. the player's linked CS:S/CS:GO VPKs), every file buildMaterials/loadSky would
- * need that the pakfile doesn't have: VMTs, patch includes, base/blend/detail textures and sky faces.
- * Pass the result as `extraSources: [mapFileSource(result)]`.
+ * need that the pakfile doesn't have: VMTs, patch includes (iteratively: an include may live in the content and
+ * include another), base/blend/detail textures, envmap masks and the sky faces (HDR ones only when a face has no
+ * LDR texture). Pass the result as `extraSources: [mapFileSource(result)]` — the pakfile stays first, so files
+ * packed in the map always win. Never throws for unreadable files (they are left out).
+ * The 4th argument may be the sky name alone (older signature).
  */
 export async function prefetchMaterialFiles(
   bsp: BspFile,
   pak: PakFile | null,
   content: AsyncMaterialFileSource,
-  skyName?: string,
+  opts: PrefetchOptions | string = {},
 ): Promise<Map<string, Uint8Array>> {
+  const o: PrefetchOptions = typeof opts === 'string' ? { skyName: opts } : opts;
+  const detail = o.detailTextures ?? true;
+  const concurrency = Math.max(1, o.concurrency ?? 16);
   const got = new Map<string, Uint8Array>();
-  const pakHas = (p: string) => !!pak && pak.has(p);
+  const has = (p: string) => (!!pak && pak.has(p)) || got.has(p);
   const sync: MaterialFileSource = {
     read: (p) => (pak ? pak.read(p) : null) ?? got.get(normalizePakPath(p)) ?? null,
   };
-  const files = () => new Files([sync]);
-  let pending = new Set<string>();
-  const want = (p: string) => {
+  const requested = new Set<string>();
+  let pending: string[] = [];
+  let pendingSet = new Set<string>();
+  /**
+   * Queues `p` when the content has it and nothing earlier in the search order does. 'have': already available;
+   * 'queued': being fetched (this round); 'none': not available anywhere (or unreadable).
+   */
+  const want = (p: string): 'have' | 'queued' | 'none' => {
     const k = normalizePakPath(p);
-    if (!pakHas(k) && !got.has(k) && content.has(k)) pending.add(k);
-  };
-  const vmtPaths: string[] = [];
-  for (const raw of bsp.texdataNames ?? []) {
-    const n = normalizeMaterialName(raw);
-    if (n) vmtPaths.push(`materials/${n}.vmt`);
-  }
-  const sky = skyName ? normalizePakPath(skyName).replace(/^skybox\//, '') : '';
-  if (sky) {
-    const base = sky.endsWith('_hdr') ? sky.slice(0, -4) : sky;
-    for (const b of [base, `${base}_hdr`]) {
-      for (const s of SKY_SUFFIXES) {
-        vmtPaths.push(`materials/skybox/${b}${s}.vmt`);
-        want(`materials/skybox/${b}${s}.vtf`);
-      }
+    if (has(k)) return 'have';
+    if (pendingSet.has(k)) return 'queued';
+    if (requested.has(k)) return 'none';
+    let available = false;
+    try {
+      available = content.has(k);
+    } catch {
+      available = false;
     }
-  }
-  for (const p of vmtPaths) want(p);
-  const seenVmts = new Set<string>();
-  for (let round = 0; round < 6; round++) {
-    // Fetch everything pending.
-    const list = [...pending];
-    pending = new Set();
-    await Promise.all(
-      list.map(async (p) => {
+    if (!available) return 'none';
+    requested.add(k);
+    pending.push(k);
+    pendingSet.add(k);
+    return 'queued';
+  };
+
+  let done = 0;
+  const report = () => {
+    try {
+      o.onProgress?.(done, requested.size);
+    } catch {
+      // progress callbacks must not break loading
+    }
+  };
+  const fetchPending = async () => {
+    const list = pending;
+    pending = [];
+    pendingSet = new Set();
+    if (!list.length) return;
+    report();
+    let i = 0;
+    const worker = async () => {
+      while (i < list.length && !o.signal?.aborted) {
+        const p = list[i++];
         try {
           const d = await content.read(p);
           if (d) got.set(p, d);
         } catch {
-          // ignore unreadable files
+          // unreadable file: left out (procedural stand-in)
         }
-      }),
-    );
-    // Parse every reachable VMT and queue its dependencies.
-    const f = files();
-    for (const p of [...vmtPaths, ...[...got.keys()].filter((k) => k.endsWith('.vmt'))]) {
-      const key = normalizePakPath(p);
-      const text = f.readText(key);
-      if (text == null || seenVmts.has(key)) continue;
-      const missing: string[] = [];
-      const info = parseVmt(text, (inc) => {
-        const t = f.readText(inc);
-        if (t == null) missing.push(inc);
-        return t;
-      });
-      if (info.includeMissing) {
-        // Try the include again next round once fetched.
-        let inc = normalizePakPath(info.includeMissing);
-        if (!inc.endsWith('.vmt')) inc += '.vmt';
-        if (!inc.startsWith('materials/')) inc = `materials/${inc}`;
-        want(inc);
+        done++;
+        report();
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(concurrency, list.length) }, worker));
+  };
+
+  // ---- the material VMTs (texdata names + extra names) and the sky faces' VMTs
+  const materialVmts = new Map<string, string>(); // vmt path -> material name
+  for (const raw of [...(bsp.texdataNames ?? []), ...(o.materials ?? [])]) {
+    const n = normalizeMaterialName(raw ?? '');
+    if (n) materialVmts.set(`materials/${n}.vmt`, n);
+  }
+  const sky = o.skyName ? normalizePakPath(o.skyName).replace(/^materials\//, '').replace(/^skybox\//, '').replace(/\.vmt$/, '') : '';
+  const skyBase = sky.endsWith('_hdr') ? sky.slice(0, -4) : sky;
+  const skyBases = sky ? [skyBase, `${skyBase}_hdr`] : [];
+  const skyVmts: string[] = [];
+  for (const b of skyBases) for (const s of SKY_SUFFIXES) skyVmts.push(`materials/skybox/${b}${s}.vmt`);
+  for (const p of [...materialVmts.keys(), ...skyVmts]) want(p);
+
+  let files = new Files([sync]);
+  const settled = new Set<string>();
+  /** The parsed VMT; null while it (or an include) is still being fetched; 'missing' when it doesn't exist. */
+  const resolveVmt = (vmtPath: string): VmtInfo | null | 'missing' => {
+    if (pendingSet.has(normalizePakPath(vmtPath))) return null;
+    const text = files.readText(vmtPath);
+    if (text == null) return 'missing';
+    const info = parseVmt(text, (inc) => files.readText(inc));
+    // An include that lives in the content: fetch it and parse again next round.
+    if (info.includeMissing && want(includeVmtPath(info.includeMissing)) === 'queued') return null;
+    return info;
+  };
+
+  for (let round = 0; round < 10 && !o.signal?.aborted; round++) {
+    await fetchPending();
+    files = new Files([sync]); // fresh text cache: files fetched this round must be visible
+    for (const [vmtPath, name] of materialVmts) {
+      if (settled.has(vmtPath)) continue;
+      const info = resolveVmt(vmtPath);
+      if (info === null) continue;
+      settled.add(vmtPath);
+      if (info === 'missing' || texturelessMaterial(name, info)) continue;
+      for (const dep of vmtDependencies(info, detail, false)) want(dep);
+    }
+    let skyReady = true;
+    for (const vmtPath of skyVmts) {
+      if (settled.has(vmtPath)) continue;
+      const info = resolveVmt(vmtPath);
+      if (info === null) {
+        skyReady = false;
         continue;
       }
-      seenVmts.add(key);
-      for (const dep of vmtDependencies(info)) want(dep);
+      settled.add(vmtPath);
     }
-    if (!pending.size) break;
+    if (sky && skyReady) {
+      // Sky faces, in loadSky's order: the first LDR texture of each face ($basetexture, else "skybox/<sky><face>",
+      // under both names), else the first HDR one ($hdrbasetexture, $hdrcompressedtexture).
+      for (const s of SKY_SUFFIXES) {
+        const ldr: string[] = [];
+        const hdr: string[] = [];
+        for (const b of skyBases) {
+          const text = files.readText(`materials/skybox/${b}${s}.vmt`);
+          const info = text != null ? parseVmt(text, (inc) => files.readText(inc)) : null;
+          const P = info?.params ?? {};
+          if (P['$basetexture']) ldr.push(vtfPath(P['$basetexture']));
+          ldr.push(vtfPath(`skybox/${b}${s}`));
+          for (const t of [P['$hdrbasetexture'], P['$hdrcompressedtexture']]) if (t) hdr.push(vtfPath(t));
+        }
+        for (const p of [...ldr, ...hdr]) if (want(p) !== 'none') break;
+      }
+    }
+    if (!pending.length) break;
   }
   return got;
 }

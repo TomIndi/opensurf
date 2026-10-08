@@ -68,3 +68,10 @@ export function queryBinds(keys: string[]): Map<string, string> {
   }
   return out;
 }
+
+/** True if `key` is bound to exactly `command` (e.g. a non-default key bound to toggleconsole). */
+export function keyBoundTo(key: string, command: string): boolean {
+  if (!console_.hasCommand('bind')) return false;
+  const got = queryBinds([key]).get(key.toLowerCase());
+  return got !== undefined && got.replace(/"/g, '').trim().toLowerCase() === command.toLowerCase();
+}

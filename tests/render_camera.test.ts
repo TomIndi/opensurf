@@ -1,7 +1,7 @@
 import { Matrix4, Vector3 } from 'three';
 import { describe, expect, it } from 'vitest';
 import { angleVectors } from '../src/core/angles';
-import { applySourceView, createSourceCamera, horizontalFovAt, rigidInverse, sourceVerticalFov, viewMatrixWorld } from '../src/render/camera';
+import { EYE_PULLBACK, applySourceView, createSourceCamera, horizontalFovAt, rigidInverse, sourceVerticalFov, viewMatrixWorld } from '../src/render/camera';
 
 describe('Source fov', () => {
   it('fov 90 at 4:3 is 73.74 deg vertical (CS:GO)', () => {
@@ -130,5 +130,22 @@ describe('applySourceView', () => {
     // a point 45 deg to the right of forward lies on the right screen edge (NDC x = 1)
     const p = new Vector3(100, -100, 0).applyMatrix4(cam.matrixWorldInverse).applyMatrix4(cam.projectionMatrix);
     expect(p.x).toBeCloseTo(1, 6);
+  });
+
+  it('pullBack moves the eye back along the view direction only', () => {
+    const cam = createSourceCamera(3, 1 << 20);
+    applySourceView(cam, { x: 10, y: 20, z: 30 }, { pitch: 0, yaw: 90, roll: 0 }, 90, 16 / 9, EYE_PULLBACK);
+    expect(cam.position.x).toBeCloseTo(10, 9);
+    expect(cam.position.y).toBeCloseTo(20 - EYE_PULLBACK, 9);
+    expect(cam.position.z).toBeCloseTo(30, 9);
+    // vertices on the 1/32 grid never lie in the eye's plane (clip w = 0) for an axis-aligned view
+    for (let k = -64; k <= 64; k++) {
+      const v = new Vector3(0, 20 + k / 32, 0).applyMatrix4(cam.matrixWorldInverse);
+      expect(Math.abs(v.z)).toBeGreaterThan(0.01);
+    }
+    // orientation unchanged
+    const p = new Vector3(10, 520, 30).applyMatrix4(cam.matrixWorldInverse).applyMatrix4(cam.projectionMatrix);
+    expect(p.x).toBeCloseTo(0, 6);
+    expect(p.y).toBeCloseTo(0, 6);
   });
 });

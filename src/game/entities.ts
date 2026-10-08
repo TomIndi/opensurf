@@ -12,17 +12,30 @@
 //
 // Outputs are queued even with delay 0 (like Source), so a filter evaluated during a touch sees the player's
 // targetname as it was before this tick's AddOutputs. Teleports, pushes and gravity apply immediately.
-import { QAngle, angleVectors, qa, qaClone } from '../core/angles';
+import { QAngle, angleVectors, qa, qaClone, vectorAngles } from '../core/angles';
 import { Cvar, registerCvar } from '../core/cvars';
 import { Vec3, v3, v3clone, v3parse } from '../core/vec3';
-import { isSolidBrushEntity } from '../bsp/bspcollision';
+import { brushEntityPlacement, isSolidBrushEntity } from '../bsp/bspcollision';
 import { parseOutputValue } from '../bsp/entities';
 import { EntityOutput, MapEntity } from '../map/types';
-import { boxIntersectsBrush } from '../physics/collision';
+import { RigidBrush, boxIntersectsBrush, placementDelta } from '../physics/collision';
 import { playerHull } from '../physics/movement';
 import { FL_BASEVELOCITY, FL_ONGROUND, MOVETYPE_NOCLIP, MOVETYPE_OBSERVER } from '../physics/playertypes';
-import { Brush, MASK_SOLID } from '../physics/types';
+import { Brush, MASK_PLAYERSOLID, MASK_SOLID } from '../physics/types';
 import { IEntitySystem, WorldHost } from './contracts';
+import {
+  MOVER_CLASSES,
+  Pose,
+  anglemod,
+  approach,
+  composePose,
+  doorTravel,
+  lerpPose,
+  moveDirFromAngles,
+  movableEntitySets,
+  pushPlayer,
+  relativePose,
+} from './movers';
 
 // ------------------------------------------------------------------------------------------ constants
 
@@ -96,8 +109,8 @@ const HIDDEN_BRUSH_CLASSES = new Set([
 ]);
 
 /**
- * Inputs that are understood but have no gameplay effect here (sounds, particles, props, cameras, moving
- * brushes, vscript...). They are never reported as unknown.
+ * Inputs that are understood but have no gameplay effect here (sounds, particles, props, cameras, vscript...),
+ * or that classes simulated here handle themselves. They are never reported as unknown.
  */
 const SILENT_INPUTS = new Set([
   'playsound', 'stopsound', 'fadein', 'fadeout', 'volume', 'pitch', 'togglesound', 'enablesound', 'disablesound',
@@ -136,17 +149,11 @@ const PLAYER_COSMETIC_KEYS = new Set([
 ]);
 
 /**
- * Classes that can affect gameplay but are not simulated (moving/breakable brushes stay where the map put
- * them; physics pushers do nothing). Reported in diagnostics() and, with `developer 1`, at spawn.
+ * Classes that can affect gameplay but are not simulated (breakable brushes stay where the map put them;
+ * physics pushers do nothing). Reported in diagnostics() and, with `developer 1`, at spawn. Moving brushes
+ * (func_door, func_rotating, trains... see movers.ts MOVER_CLASSES) are simulated.
  */
 const UNSIMULATED_GAMEPLAY_CLASSES = new Set([
-  'func_door',
-  'func_door_rotating',
-  'func_movelinear',
-  'func_rotating',
-  'func_tracktrain',
-  'func_tanktrain',
-  'func_train',
   'func_plat',
   'func_platrot',
   'func_physbox',
@@ -155,8 +162,6 @@ const UNSIMULATED_GAMEPLAY_CLASSES = new Set([
   'func_breakable_surf',
   'func_conveyor',
   'func_pushable',
-  'func_water_analog',
-  'momentary_rot_button',
   'trigger_catapult',
   'trigger_wind',
   'trigger_playermovement',
@@ -387,6 +392,30 @@ export interface MapTeleportEvent {
 
 // ------------------------------------------------------------------------------------------ entities
 
+/**
+ * Placement record of an entity that moves or can be moved by a parent (movers, everything parented to them):
+ * the entity hierarchy of parentname / SetParent. Ent.origin / Ent.angles mirror `abs`.
+ */
+interface Hier {
+  parent: Ent | null;
+  readonly children: Ent[];
+  /** Placement relative to the parent (the world for a root). */
+  readonly local: Pose;
+  /** World placement. */
+  readonly abs: Pose;
+  /** Where the loaded map built the entity's geometry (base of the collision / renderer transforms). */
+  readonly base: Pose;
+  /** World placement at the start of the current tick (render interpolation, ground velocity). */
+  readonly prevAbs: Pose;
+  /** World placement before the push being resolved. */
+  readonly pushFrom: Pose;
+  /** Last placement sent to the renderer (null: send again). */
+  sent: Pose | null;
+  /** Trigger brushes moving with the entity. */
+  rigid: RigidBrush[] | null;
+  depth: number;
+}
+
 class Ent {
   readonly sys: EntitySystem;
   readonly index: number;
@@ -400,6 +429,8 @@ class Ent {
   readonly model: number;
   spawnflags: number;
   killed = false;
+  /** Hierarchy / motion record (movers, entities parented to them), null for entities that never move. */
+  hier: Hier | null = null;
   /** Classes implemented here: their unknown inputs are worth reporting. */
   get modeled(): boolean {
     return false;
@@ -461,11 +492,13 @@ class Ent {
         this.classname = value;
         break;
       case 'origin':
-        this.origin = v3parse(value);
+        if (this.hier) this.sys.teleportEnt(this, v3parse(value), null);
+        else this.origin = v3parse(value);
         break;
       case 'angles': {
         const a = v3parse(value);
-        this.angles = qa(a.x, a.y, a.z);
+        if (this.hier) this.sys.teleportEnt(this, null, qa(a.x, a.y, a.z));
+        else this.angles = qa(a.x, a.y, a.z);
         break;
       }
       case 'spawnflags':
@@ -577,7 +610,9 @@ class FilterMulti extends FilterEnt {
 // ---------------------------------------------------------------- triggers
 
 class BaseTrigger extends Ent {
-  readonly brushes: Brush[];
+  /** World-space brushes (moving copies when the trigger is parented to a mover). */
+  brushes: Brush[];
+  /** World-space bounds (updated in place when the trigger moves). */
   readonly mins: Vec3;
   readonly maxs: Vec3;
   enabled = true;
@@ -1371,7 +1406,8 @@ class PointTeleport extends PointEnt {
         origin: v3clone(this.origin),
         seamless: false,
       });
-    } else if (t) {
+    } else if (t?.hier) this.sys.teleportEnt(t, this.origin, this.angles);
+    else if (t) {
       t.origin = v3clone(this.origin);
       t.angles = qaClone(this.angles);
     }
@@ -1605,6 +1641,924 @@ class FuncButton extends BrushEnt {
   }
 }
 
+// ---------------------------------------------------------------- moving brushes (see movers.ts)
+
+// func_rotating spawnflags
+const SF_ROTATING_START_ON = 0x01;
+const SF_ROTATING_BACKWARDS = 0x02;
+const SF_ROTATING_X_AXIS = 0x04;
+const SF_ROTATING_Y_AXIS = 0x08;
+const SF_ROTATING_ACC_DCC = 0x10;
+// func_door / func_door_rotating spawnflags
+const SF_DOOR_START_OPEN = 0x01;
+const SF_DOOR_ROTATE_BACKWARDS = 0x02;
+/** Shown as "Toggle" in Hammer: the door stays open until told to close. */
+const SF_DOOR_NO_AUTO_RETURN = 0x20;
+const SF_DOOR_ROTATE_ROLL = 0x40;
+const SF_DOOR_ROTATE_PITCH = 0x80;
+const SF_DOOR_USE_OPENS = 0x100;
+const SF_DOOR_TOUCH_OPENS = 0x400;
+const SF_DOOR_LOCKED = 0x800;
+// momentary_rot_button spawnflags (axis flags as func_door_rotating)
+const SF_MOMENTARY_LOCKED = 0x800;
+// func_tracktrain / func_tanktrain spawnflags
+const SF_TRACKTRAIN_NO_PITCH = 0x01;
+const SF_TRACKTRAIN_FIXED_ORIENTATION = 0x10;
+const SF_TRACKTRAIN_UNBLOCKABLE_BY_PLAYER = 0x200;
+// path_track spawnflags
+const SF_PATH_DISABLED = 0x01;
+const SF_PATH_FIRE_ONCE = 0x02;
+const SF_PATH_ALT_REVERSE = 0x04;
+const SF_PATH_TELEPORT = 0x10;
+/** Source's DMG_CRUSH (damage filters see crushing movers as this type). */
+const DMG_CRUSH = 1;
+
+/** Euler component a rotation axis turns: 0 pitch (Y axis), 1 yaw (Z axis), 2 roll (X axis). */
+type EulerAxis = 0 | 1 | 2;
+
+const _ang = qa();
+const _vec = v3();
+const _dir = v3();
+
+/** out = base with `deg` added to one Euler component. */
+function addAxisAngle(out: QAngle, base: QAngle, axis: EulerAxis, deg: number): QAngle {
+  out.pitch = base.pitch + (axis === 0 ? deg : 0);
+  out.yaw = base.yaw + (axis === 1 ? deg : 0);
+  out.roll = base.roll + (axis === 2 ? deg : 0);
+  return out;
+}
+
+function parseAngles(s: string | undefined): QAngle {
+  const a = v3parse(s);
+  return qa(a.x, a.y, a.z);
+}
+
+/**
+ * A brush entity that moves by itself (Source MOVETYPE_PUSH). Every tick moverThink() advances its motion and
+ * sets its placement relative to its parent (hier.local); the entity system then moves its hierarchy, pushes or
+ * carries the player, and undoes the move (restoreMotion, then blocked()) when the player can't be placed.
+ * Motion is driven by the tick interval only (deterministic).
+ */
+abstract class MoverEnt extends BrushEnt {
+  /** Damage per blocked tick to a player in the way ("dmg"). */
+  dmg = 0;
+  override get modeled(): boolean {
+    return true;
+  }
+  /** True when the player can't block this mover (it crushes instead). */
+  get unblockable(): boolean {
+    return false;
+  }
+  /** Placement relative to the parent (written by moverThink). */
+  get local(): Pose {
+    return this.hier!.local;
+  }
+  override spawn(): void {
+    if (!this.hier) this.sys.adoptMover(this);
+    super.spawn();
+  }
+  /** Advances the motion by `dt` seconds. */
+  abstract moverThink(dt: number): void;
+  /** Snapshot / restore of the motion state, so a blocked push can be undone. */
+  abstract saveMotion(): void;
+  abstract restoreMotion(): void;
+  /** The player blocked this tick's move (already undone). */
+  blocked(): void {
+    if (this.dmg > 0) this.sys.damagePlayer(this.dmg, `${this.classname} ${this.targetname}`.trim());
+  }
+  /** The placement changed outside moverThink (inputs that snap): move the hierarchy now, without a push. */
+  protected snapped(): void {
+    this.sys.syncHierarchy(this, true);
+  }
+}
+
+/**
+ * func_rotating: spins about its Z axis (or X / Y with spawnflags 4 / 8; 2 reverses) at `maxspeed` deg/s when on.
+ * With Acc/Dcc (16) the speed ramps by maxspeed * fanfriction% every tenth of a second (fanfriction 0 = 100%).
+ * Inputs Start/Stop/Toggle/Reverse/StartForward/StartBackward/SetSpeed (ratio of maxspeed)/StopAtStartPos
+ * (stops when it next passes its start angle)/SnapToStartPos/SetMaxSpeed.
+ */
+class FuncRotating extends MoverEnt {
+  maxSpeed = 100;
+  /** Signed speed (deg/s) along the spawn direction, and the speed it ramps towards. */
+  speed = 0;
+  targetSpeed = 0;
+  /** deg/s^2; Infinity = no Acc/Dcc (instant). */
+  accel = Infinity;
+  axis: EulerAxis = 1;
+  /** Rotation since the start angles, along the spawn direction (deg, [0, 360)). */
+  angle = 0;
+  private dirSign = 1;
+  private friction = 1;
+  private reversed = false;
+  private stopAtStart = false;
+  private savedAngle = 0;
+  private readonly start = qa();
+
+  override spawn(): void {
+    super.spawn();
+    this.maxSpeed = this.kv.maxspeed !== undefined ? Math.abs(kvNum(this.kv.maxspeed, 100)) : 100;
+    const ff = kvNum(this.kv.fanfriction, 20);
+    this.friction = ff > 0 ? Math.min(ff, 100) / 100 : 1;
+    this.updateAccel();
+    this.axis = this.hasFlag(SF_ROTATING_X_AXIS) ? 2 : this.hasFlag(SF_ROTATING_Y_AXIS) ? 0 : 1;
+    this.dirSign = this.hasFlag(SF_ROTATING_BACKWARDS) ? -1 : 1;
+    this.dmg = kvNum(this.kv.dmg, 0);
+    const a = this.local.angles;
+    this.start.pitch = a.pitch;
+    this.start.yaw = a.yaw;
+    this.start.roll = a.roll;
+    if (this.hasFlag(SF_ROTATING_START_ON)) this.setTarget(this.maxSpeed);
+  }
+
+  private updateAccel(): void {
+    this.accel = this.hasFlag(SF_ROTATING_ACC_DCC) ? 10 * this.maxSpeed * this.friction : Infinity;
+  }
+
+  private setTarget(v: number): void {
+    this.targetSpeed = v;
+    if (this.accel === Infinity) this.speed = v;
+  }
+
+  private applyAngle(): void {
+    const l = this.local;
+    l.set(l.origin, addAxisAngle(_ang, this.start, this.axis, this.angle * this.dirSign));
+  }
+
+  moverThink(dt: number): void {
+    const v0 = this.speed;
+    if (v0 !== this.targetSpeed) this.speed = this.accel === Infinity ? this.targetSpeed : approach(v0, this.targetSpeed, this.accel * dt);
+    const step = (v0 + this.speed) * 0.5 * dt;
+    if (step === 0) return;
+    if (this.stopAtStart) {
+      const cur = anglemod(this.angle);
+      const toStart = step > 0 ? 360 - cur : cur === 0 ? 360 : cur;
+      if (Math.abs(step) >= toStart - 1e-9) {
+        this.angle = 0;
+        this.speed = 0;
+        this.targetSpeed = 0;
+        this.stopAtStart = false;
+        this.applyAngle();
+        return;
+      }
+    }
+    this.angle = anglemod(this.angle + step);
+    this.applyAngle();
+  }
+
+  saveMotion(): void {
+    this.savedAngle = this.angle;
+  }
+
+  restoreMotion(): void {
+    this.angle = this.savedAngle;
+    this.applyAngle();
+  }
+
+  override input(name: string, param: string, activator: Activator, caller: Ent | null): boolean {
+    const dir = this.reversed ? -1 : 1;
+    switch (name) {
+      case 'start':
+      case 'turnon':
+        this.setTarget(dir * this.maxSpeed);
+        return true;
+      case 'stop':
+      case 'turnoff':
+        this.setTarget(0);
+        return true;
+      case 'toggle':
+        this.setTarget(this.targetSpeed !== 0 ? 0 : dir * this.maxSpeed);
+        return true;
+      case 'reverse':
+        this.reversed = !this.reversed;
+        if (this.targetSpeed !== 0) this.setTarget(-this.targetSpeed);
+        return true;
+      case 'startforward':
+        this.reversed = false;
+        this.setTarget(this.maxSpeed);
+        return true;
+      case 'startbackward':
+        this.reversed = true;
+        this.setTarget(-this.maxSpeed);
+        return true;
+      case 'setspeed': {
+        const r = parseFloat(param);
+        if (Number.isFinite(r)) this.setTarget(dir * this.maxSpeed * Math.max(0, Math.min(1, r)));
+        return true;
+      }
+      case 'setmaxspeed': {
+        const v = parseFloat(param);
+        if (Number.isFinite(v)) {
+          const ratio = this.maxSpeed > 0 ? this.targetSpeed / this.maxSpeed : 0;
+          this.maxSpeed = Math.abs(v);
+          this.updateAccel();
+          if (this.targetSpeed !== 0) this.setTarget(ratio * this.maxSpeed);
+        }
+        return true;
+      }
+      case 'stopatstartpos':
+        this.stopAtStart = true;
+        return true;
+      case 'snaptostartpos':
+        this.angle = 0;
+        this.applyAngle();
+        this.snapped();
+        return true;
+    }
+    return super.input(name, param, activator, caller);
+  }
+}
+
+type DoorState = 'closed' | 'opening' | 'open' | 'closing';
+
+/**
+ * func_door (slides along movedir by its size along that direction - 2 - lip) and func_door_rotating (turns
+ * `distance` degrees about Z, or X / Y with spawnflags 64 / 128; 2 reverses). Opens on Open/Toggle, +use (256)
+ * or touch (1024) unless locked (2048); returns after `wait` seconds (-1 or "Toggle" 32 = stays open). Starts open
+ * with spawnpos 1; the old "starts open" flag (1) swaps its positions. Blocked: `dmg` to the player, then it
+ * reverses (unless wait is -1 or it is forced closed). Outputs OnOpen, OnClose, OnFullyOpen, OnFullyClosed,
+ * OnBlockedOpening, OnBlockedClosing, OnLockedUse.
+ */
+class FuncDoor extends MoverEnt {
+  rotating = false;
+  speed = 100;
+  wait = 4;
+  /** Units (sliding) or degrees (rotating) between closed and open. */
+  travel = 0;
+  /** Progress from the closed placement (0 .. travel). */
+  pos = 0;
+  state: DoorState = 'closed';
+  locked = false;
+  forceClosed = false;
+  /** Touch-opening contact state. */
+  touching = false;
+  private readonly dir = v3();
+  private axis: EulerAxis = 1;
+  private sign = 1;
+  private closeAt = Infinity;
+  private savedPos = 0;
+  private readonly closedPose = new Pose();
+
+  override spawn(): void {
+    super.spawn();
+    this.rotating = this.classname.toLowerCase() === 'func_door_rotating';
+    this.speed = Math.abs(kvNum(this.kv.speed, 100)) || 100;
+    this.wait = kvNum(this.kv.wait, 4);
+    this.dmg = kvNum(this.kv.dmg, 0);
+    this.forceClosed = kvBool(this.kv.forceclosed);
+    this.locked = this.hasFlag(SF_DOOR_LOCKED);
+    const lip = kvNum(this.kv.lip, 0);
+    this.closedPose.copy(this.local);
+    if (this.rotating) {
+      this.travel = Math.abs(kvNum(this.kv.distance, 90));
+      this.axis = this.hasFlag(SF_DOOR_ROTATE_ROLL) ? 2 : this.hasFlag(SF_DOOR_ROTATE_PITCH) ? 0 : 1;
+      this.sign = (this.hasFlag(SF_DOOR_ROTATE_BACKWARDS) ? -1 : 1) * (kvNum(this.kv.distance, 90) < 0 ? -1 : 1);
+    } else {
+      const d = moveDirFromAngles(parseAngles(this.kv.movedir ?? this.kv.angles));
+      this.dir.x = d.x;
+      this.dir.y = d.y;
+      this.dir.z = d.z;
+      const info = this.sys.host.map.models[this.model];
+      const size = info ? v3(info.maxs.x - info.mins.x, info.maxs.y - info.mins.y, info.maxs.z - info.mins.z) : v3();
+      this.travel = Math.max(0, doorTravel(this.dir, size, lip));
+    }
+    if (this.hasFlag(SF_DOOR_START_OPEN)) {
+      // obsolete "starts open": the door sits at its open position, which becomes its closed one
+      this.pos = this.travel;
+      this.applyPos();
+      this.closedPose.copy(this.local);
+      if (this.rotating) this.sign = -this.sign;
+      else {
+        this.dir.x = -this.dir.x;
+        this.dir.y = -this.dir.y;
+        this.dir.z = -this.dir.z;
+      }
+      this.pos = 0;
+      this.snapped();
+    } else if (kvInt(this.kv.spawnpos) === 1) {
+      this.pos = this.travel;
+      this.state = 'open';
+      this.applyPos();
+      this.snapped();
+    }
+  }
+
+  private applyPos(): void {
+    const c = this.closedPose;
+    if (this.rotating) {
+      this.local.set(c.origin, addAxisAngle(_ang, c.angles, this.axis, this.sign * this.pos));
+    } else {
+      _vec.x = c.origin.x + this.dir.x * this.pos;
+      _vec.y = c.origin.y + this.dir.y * this.pos;
+      _vec.z = c.origin.z + this.dir.z * this.pos;
+      this.local.set(_vec, c.angles);
+    }
+  }
+
+  get usable(): boolean {
+    return this.hasFlag(SF_DOOR_USE_OPENS);
+  }
+
+  get touchOpens(): boolean {
+    return this.hasFlag(SF_DOOR_TOUCH_OPENS);
+  }
+
+  open(activator: Activator): void {
+    if (this.state === 'opening' || this.state === 'open') {
+      // already open: an Open restarts the wait before it returns
+      if (this.state === 'open' && this.closeAt !== Infinity && this.wait >= 0) this.closeAt = this.sys.now + this.wait;
+      return;
+    }
+    this.state = 'opening';
+    this.closeAt = Infinity;
+    this.fire('onopen', activator);
+  }
+
+  close(activator: Activator): void {
+    if (this.state === 'closing' || this.state === 'closed') return;
+    this.state = 'closing';
+    this.closeAt = Infinity;
+    this.fire('onclose', activator);
+  }
+
+  /** A player's +use or touch. */
+  activate_(activator: Activator, byUse: boolean): void {
+    if (this.killed) return;
+    if (this.locked) {
+      this.fire('onlockeduse', activator);
+      return;
+    }
+    if (this.state === 'closed' || this.state === 'closing') this.open(activator);
+    else if (byUse && this.hasFlag(SF_DOOR_NO_AUTO_RETURN) && this.state === 'open') this.close(activator);
+  }
+
+  moverThink(dt: number): void {
+    if (this.state === 'open' && this.sys.now >= this.closeAt - TIME_EPS) this.close(this);
+    if (this.state !== 'opening' && this.state !== 'closing') return;
+    const goal = this.state === 'opening' ? this.travel : 0;
+    const step = this.speed * dt;
+    if (Math.abs(goal - this.pos) <= step + 1e-9) {
+      this.pos = goal;
+      this.applyPos();
+      if (this.state === 'opening') {
+        this.state = 'open';
+        if (!this.hasFlag(SF_DOOR_NO_AUTO_RETURN) && this.wait >= 0) this.closeAt = this.sys.now + this.wait;
+        this.fire('onfullyopen', this);
+      } else {
+        this.state = 'closed';
+        this.fire('onfullyclosed', this);
+      }
+      return;
+    }
+    this.pos += goal > this.pos ? step : -step;
+    this.applyPos();
+  }
+
+  saveMotion(): void {
+    this.savedPos = this.pos;
+  }
+
+  restoreMotion(): void {
+    this.pos = this.savedPos;
+    this.applyPos();
+  }
+
+  override blocked(): void {
+    super.blocked();
+    const p = this.sys.player;
+    if (this.state === 'opening') this.fire('onblockedopening', p);
+    else if (this.state === 'closing') this.fire('onblockedclosing', p);
+    // a door that never returns keeps pushing (and crushing); a forced-closed one doesn't give way
+    if (this.wait < 0) return;
+    if (this.forceClosed && this.state === 'closing') return;
+    if (this.state === 'opening') this.close(this);
+    else if (this.state === 'closing') this.open(this);
+  }
+
+  override input(name: string, param: string, activator: Activator, caller: Ent | null): boolean {
+    switch (name) {
+      case 'open':
+        this.open(activator);
+        return true;
+      case 'close':
+        this.close(activator);
+        return true;
+      case 'toggle':
+        if (this.state === 'closed' || this.state === 'closing') this.open(activator);
+        else this.close(activator);
+        return true;
+      case 'lock':
+        this.locked = true;
+        return true;
+      case 'unlock':
+        this.locked = false;
+        return true;
+      case 'setspeed': {
+        const v = parseFloat(param);
+        if (Number.isFinite(v) && v > 0) this.speed = v;
+        return true;
+      }
+    }
+    return super.input(name, param, activator, caller);
+  }
+}
+
+/**
+ * func_movelinear (and func_water_analog): moves along movedir between position 0 and 1, `movedistance` apart
+ * (the map places it at `startposition`), at `speed`. Open = 1, Close = 0, SetPosition <0..1>, SetSpeed.
+ * OnFullyOpen / OnFullyClosed when it reaches 1 / 0. Blocked: `blockdamage` to the player.
+ */
+class FuncMoveLinear extends MoverEnt {
+  speed = 100;
+  distance = 100;
+  position = 0;
+  goal = 0;
+  private readonly dir = v3();
+  private readonly zero = v3();
+  private savedPos = 0;
+
+  override spawn(): void {
+    super.spawn();
+    const d = moveDirFromAngles(parseAngles(this.kv.movedir ?? this.kv.angles));
+    this.dir.x = d.x;
+    this.dir.y = d.y;
+    this.dir.z = d.z;
+    this.distance = kvNum(this.kv.movedistance, 100);
+    this.speed = Math.abs(kvNum(this.kv.speed, 100));
+    this.dmg = kvNum(this.kv.blockdamage, 0);
+    const f = Math.max(0, Math.min(1, kvNum(this.kv.startposition, 0)));
+    const o = this.local.origin;
+    this.zero.x = o.x - d.x * this.distance * f;
+    this.zero.y = o.y - d.y * this.distance * f;
+    this.zero.z = o.z - d.z * this.distance * f;
+    this.position = this.goal = f;
+  }
+
+  private applyPos(): void {
+    const k = this.distance * this.position;
+    _vec.x = this.zero.x + this.dir.x * k;
+    _vec.y = this.zero.y + this.dir.y * k;
+    _vec.z = this.zero.z + this.dir.z * k;
+    const l = this.local;
+    l.set(_vec, l.angles);
+  }
+
+  moverThink(dt: number): void {
+    if (this.position === this.goal) return;
+    const step = this.distance !== 0 ? (this.speed * dt) / Math.abs(this.distance) : 1;
+    this.position = approach(this.position, this.goal, step);
+    this.applyPos();
+    if (this.position === this.goal) {
+      if (this.position >= 1) this.fire('onfullyopen', this);
+      else if (this.position <= 0) this.fire('onfullyclosed', this);
+    }
+  }
+
+  saveMotion(): void {
+    this.savedPos = this.position;
+  }
+
+  restoreMotion(): void {
+    this.position = this.savedPos;
+    this.applyPos();
+  }
+
+  override input(name: string, param: string, activator: Activator, caller: Ent | null): boolean {
+    switch (name) {
+      case 'open':
+        this.goal = 1;
+        return true;
+      case 'close':
+        this.goal = 0;
+        return true;
+      case 'setposition': {
+        const f = parseFloat(param);
+        if (Number.isFinite(f)) this.goal = Math.max(0, Math.min(1, f));
+        return true;
+      }
+      case 'setspeed': {
+        const v = parseFloat(param);
+        if (Number.isFinite(v)) this.speed = Math.abs(v);
+        return true;
+      }
+    }
+    return super.input(name, param, activator, caller);
+  }
+}
+
+/**
+ * momentary_rot_button: turns `distance` degrees about Z (X / Y with spawnflags 64 / 128) between position 0 and
+ * 1 at `speed` deg/s. SetPosition <0..1> moves it there, SetPositionImmediately snaps. Reaching 1 fires
+ * OnFullyClosed and reaching 0 OnFullyOpen - the way maps rely on it (KSF's spinning fans and beacons loop with
+ * "OnFullyClosed: SetPositionImmediately 0, SetPosition 1"). Player use is not simulated.
+ */
+class MomentaryRotButton extends MoverEnt {
+  speed = 50;
+  distance = 90;
+  position = 0;
+  goal = 0;
+  locked = false;
+  private axis: EulerAxis = 1;
+  private readonly zero = qa();
+  private savedPos = 0;
+
+  override spawn(): void {
+    super.spawn();
+    this.distance = kvNum(this.kv.distance, 90);
+    this.speed = Math.abs(kvNum(this.kv.speed, 50));
+    this.axis = this.hasFlag(SF_DOOR_ROTATE_ROLL) ? 2 : this.hasFlag(SF_DOOR_ROTATE_PITCH) ? 0 : 1;
+    this.locked = this.hasFlag(SF_MOMENTARY_LOCKED);
+    const f = Math.max(0, Math.min(1, kvNum(this.kv.startposition, 0)));
+    addAxisAngle(this.zero, this.local.angles, this.axis, -this.distance * f);
+    this.position = this.goal = f;
+  }
+
+  private applyPos(): void {
+    const l = this.local;
+    l.set(l.origin, addAxisAngle(_ang, this.zero, this.axis, this.distance * this.position));
+  }
+
+  private reached(): void {
+    this.fire('onreachedposition', this, String(this.position));
+    if (this.position >= 1) this.fire('onfullyclosed', this);
+    else if (this.position <= 0) this.fire('onfullyopen', this);
+  }
+
+  moverThink(dt: number): void {
+    if (this.position === this.goal) return;
+    const step = this.distance !== 0 ? (this.speed * dt) / Math.abs(this.distance) : 1;
+    this.position = approach(this.position, this.goal, step);
+    this.applyPos();
+    if (this.position === this.goal) this.reached();
+  }
+
+  saveMotion(): void {
+    this.savedPos = this.position;
+  }
+
+  restoreMotion(): void {
+    this.position = this.savedPos;
+    this.applyPos();
+  }
+
+  override input(name: string, param: string, activator: Activator, caller: Ent | null): boolean {
+    switch (name) {
+      case 'setposition': {
+        const f = parseFloat(param);
+        if (Number.isFinite(f)) this.goal = Math.max(0, Math.min(1, f));
+        return true;
+      }
+      case 'setpositionimmediately': {
+        const f = parseFloat(param);
+        if (!Number.isFinite(f)) return true;
+        this.position = this.goal = Math.max(0, Math.min(1, f));
+        this.applyPos();
+        this.snapped();
+        this.reached();
+        return true;
+      }
+      case 'lock':
+        this.locked = true;
+        return true;
+      case 'unlock':
+        this.locked = false;
+        return true;
+      case 'enable':
+      case 'disable':
+        return true;
+    }
+    return super.input(name, param, activator, caller);
+  }
+}
+
+/**
+ * path_track / path_corner: a node of a train path (`target` = next node, `altpath` = alternate). Disabled nodes
+ * (spawnflags 1 / DisablePath) stop trains in front of them; OnPass fires when a train passes (once with
+ * spawnflags 2); a train reaching the node before a "teleport to this path track" node (16) jumps there; `speed`
+ * changes the passing train's speed.
+ */
+class PathTrack extends PointEnt {
+  next: PathTrack | null = null;
+  prev: PathTrack | null = null;
+  alt: PathTrack | null = null;
+  disabled = false;
+  altEnabled = false;
+  private passed = false;
+
+  override spawn(): void {
+    this.disabled = this.hasFlag(SF_PATH_DISABLED);
+  }
+
+  override activate(): void {
+    const n = this.sys.findFirst(this.kv.target ?? '', null, null, null);
+    this.next = n instanceof PathTrack && n !== this ? n : null;
+    const a = this.sys.findFirst(this.kv.altpath ?? '', null, null, null);
+    this.alt = a instanceof PathTrack && a !== this ? a : null;
+  }
+
+  get teleport(): boolean {
+    return this.hasFlag(SF_PATH_TELEPORT);
+  }
+
+  /** The node after this one going forward (alternate when enabled), skipping nothing. */
+  forward(): PathTrack | null {
+    if (this.altEnabled && this.alt && !this.hasFlag(SF_PATH_ALT_REVERSE)) return this.alt;
+    return this.next;
+  }
+
+  backward(): PathTrack | null {
+    if (this.altEnabled && this.alt && this.hasFlag(SF_PATH_ALT_REVERSE)) return this.alt;
+    return this.prev;
+  }
+
+  pass(train: Ent): void {
+    if (this.hasFlag(SF_PATH_FIRE_ONCE) && this.passed) return;
+    this.passed = true;
+    this.fire('onpass', train);
+  }
+
+  override input(name: string, param: string, activator: Activator, caller: Ent | null): boolean {
+    switch (name) {
+      case 'enablepath':
+        this.disabled = false;
+        return true;
+      case 'disablepath':
+        this.disabled = true;
+        return true;
+      case 'togglepath':
+        this.disabled = !this.disabled;
+        return true;
+      case 'enablealternatepath':
+        this.altEnabled = true;
+        return true;
+      case 'disablealternatepath':
+        this.altEnabled = false;
+        return true;
+      case 'togglealternatepath':
+        this.altEnabled = !this.altEnabled;
+        return true;
+      case 'inpass':
+        this.fire('onpass', activator);
+        return true;
+    }
+    return super.input(name, param, activator, caller);
+  }
+}
+
+/**
+ * func_tracktrain / func_tanktrain (and func_train on path_corners): follows its path_track chain from `target`,
+ * placed with its origin on the path (+ `height`), at `speed` (initial) clamped to `startspeed` (max speed). It
+ * faces along the path unless "fixed orientation" (16) / orientationtype 0 ("no pitch" 1 keeps it level). It
+ * stops in front of a disabled node and at the end of the path. Inputs SetSpeed (ratio 0..1 of max speed),
+ * SetSpeedDir (-1..1), SetSpeedReal, Stop, StartForward, StartBackward, Resume, Toggle, Reverse,
+ * TeleportToPathTrack, SetMaxSpeed. Outputs OnStart, OnNext. "Unblockable by player" (512) crushes instead of
+ * stopping.
+ */
+class FuncTrackTrain extends MoverEnt {
+  maxSpeed = 100;
+  speed = 0;
+  height = 0;
+  /** Direction for speed changes while stopped (+1 forward, -1 backward). */
+  private dir = 1;
+  /** The node the train is at or last passed, and the node it heads to. */
+  last: PathTrack | null = null;
+  target: PathTrack | null = null;
+  /** Position on the path (the origin without `height`). */
+  readonly pathPos = v3();
+  private oriented = true;
+  private noPitch = false;
+  private corner = false;
+  /** func_train: waiting at a corner until this time. */
+  private waitUntil = -Infinity;
+  /** Speed before the last Stop (Resume). */
+  private lastSpeed = 0;
+  private savedPos = v3();
+  private savedLast: PathTrack | null = null;
+  private savedTarget: PathTrack | null = null;
+
+  override get unblockable(): boolean {
+    return this.hasFlag(SF_TRACKTRAIN_UNBLOCKABLE_BY_PLAYER);
+  }
+
+  override spawn(): void {
+    super.spawn();
+    this.corner = this.classname.toLowerCase() === 'func_train';
+    this.dmg = kvNum(this.kv.dmg, 0);
+    this.height = kvNum(this.kv.height, 0);
+    if (this.corner) {
+      this.maxSpeed = Math.abs(kvNum(this.kv.speed, 100)) || 100;
+      this.oriented = false;
+      // a train nothing triggers starts moving at once
+      this.speed = this.targetname ? 0 : this.maxSpeed;
+    } else {
+      this.maxSpeed = Math.abs(kvNum(this.kv.startspeed, 100));
+      this.speed = Math.max(-this.maxSpeed, Math.min(this.maxSpeed, kvNum(this.kv.speed, 0)));
+      this.oriented = !this.hasFlag(SF_TRACKTRAIN_FIXED_ORIENTATION) && kvInt(this.kv.orientationtype, 1) !== 0;
+      this.noPitch = this.hasFlag(SF_TRACKTRAIN_NO_PITCH);
+    }
+    if (this.speed < 0) this.dir = -1;
+  }
+
+  override activate(): void {
+    const start = this.sys.findFirst(this.kv.target ?? '', null, null, null);
+    if (start instanceof PathTrack) this.teleportTo(start);
+  }
+
+  /** Puts the train on node `n` (no push, no interpolation) and heads to the next node. */
+  teleportTo(n: PathTrack): void {
+    this.last = n;
+    this.pathPos.x = n.origin.x;
+    this.pathPos.y = n.origin.y;
+    this.pathPos.z = n.origin.z;
+    this.target = this.nextFrom(n);
+    this.applyPos();
+    this.snapped();
+  }
+
+  private nextFrom(n: PathTrack): PathTrack | null {
+    const d = this.speed !== 0 ? Math.sign(this.speed) : this.dir;
+    const p = d >= 0 ? n.forward() : n.backward();
+    return p && !p.disabled && !p.killed ? p : null;
+  }
+
+  private applyPos(): void {
+    _vec.x = this.pathPos.x;
+    _vec.y = this.pathPos.y;
+    _vec.z = this.pathPos.z + this.height;
+    const l = this.local;
+    if (this.oriented && this.last && this.target) {
+      // face along the path (backwards trains still face the path's forward direction)
+      const s = this.speed < 0 || (this.speed === 0 && this.dir < 0) ? -1 : 1;
+      const d = _dir;
+      d.x = (this.target.origin.x - this.last.origin.x) * s;
+      d.y = (this.target.origin.y - this.last.origin.y) * s;
+      d.z = (this.target.origin.z - this.last.origin.z) * s;
+      if (d.x !== 0 || d.y !== 0 || d.z !== 0) {
+        const a = vectorAngles(d, _ang);
+        if (this.noPitch) a.pitch = 0;
+        l.set(_vec, a);
+        return;
+      }
+    }
+    l.set(_vec, l.angles);
+  }
+
+  private setSpeed(v: number, activator: Activator): void {
+    const was = this.speed;
+    const oldDir = this.dir;
+    this.speed = Math.max(-this.maxSpeed, Math.min(this.maxSpeed, v));
+    if (this.speed !== 0) this.dir = Math.sign(this.speed);
+    if (this.dir !== oldDir) this.redirect();
+    else if (!this.target && this.last && this.speed !== 0) this.target = this.nextFrom(this.last);
+    if (was === 0 && this.speed !== 0) this.fire('onstart', activator);
+  }
+
+  /** The travel direction flipped: between nodes head back to the one we came from, on a node pick the next. */
+  private redirect(): void {
+    const l = this.last;
+    if (!l) return;
+    const p = this.pathPos;
+    const onNode = p.x === l.origin.x && p.y === l.origin.y && p.z === l.origin.z;
+    if (this.target && !onNode) {
+      this.last = this.target;
+      this.target = l;
+    } else this.target = this.nextFrom(l);
+  }
+
+  moverThink(dt: number): void {
+    if (this.speed === 0) return;
+    if (this.sys.now < this.waitUntil - TIME_EPS) return;
+    if (!this.target) {
+      if (this.last) this.target = this.nextFrom(this.last);
+      if (!this.target) return;
+    }
+    let dist = Math.abs(this.speed) * dt;
+    const p = this.pathPos;
+    const t = this.target;
+    const dx = t.origin.x - p.x;
+    const dy = t.origin.y - p.y;
+    const dz = t.origin.z - p.z;
+    const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (len > dist) {
+      p.x += (dx / len) * dist;
+      p.y += (dy / len) * dist;
+      p.z += (dz / len) * dist;
+      this.applyPos();
+      return;
+    }
+    // reached the node: stop on it for this tick (like the engine's trains, which arrive exactly)
+    p.x = t.origin.x;
+    p.y = t.origin.y;
+    p.z = t.origin.z;
+    this.arrive(t);
+    this.applyPos();
+  }
+
+  private arrive(n: PathTrack): void {
+    this.last = n;
+    n.pass(this);
+    this.fire('onnext', this);
+    const ns = kvNum(n.kv.speed, 0);
+    if (ns !== 0 && !this.corner) this.speed = Math.sign(this.speed || this.dir) * Math.min(Math.abs(ns), this.maxSpeed);
+    if (this.corner) {
+      const w = kvNum(n.kv.wait, 0);
+      if (w < 0) this.speed = 0;
+      else if (w > 0) this.waitUntil = this.sys.now + w;
+    }
+    let next = this.nextFrom(n);
+    if (next && next.teleport) {
+      // "teleport to this path track": jump there instead of travelling
+      this.last = next;
+      this.pathPos.x = next.origin.x;
+      this.pathPos.y = next.origin.y;
+      this.pathPos.z = next.origin.z;
+      next.pass(this);
+      this.sys.snapNextRender(this);
+      next = this.nextFrom(next);
+    }
+    this.target = next;
+    if (!next) this.speed = 0; // end of the line (or a disabled node ahead)
+  }
+
+  saveMotion(): void {
+    this.savedPos.x = this.pathPos.x;
+    this.savedPos.y = this.pathPos.y;
+    this.savedPos.z = this.pathPos.z;
+    this.savedLast = this.last;
+    this.savedTarget = this.target;
+  }
+
+  restoreMotion(): void {
+    this.pathPos.x = this.savedPos.x;
+    this.pathPos.y = this.savedPos.y;
+    this.pathPos.z = this.savedPos.z;
+    this.last = this.savedLast;
+    this.target = this.savedTarget;
+    this.applyPos();
+  }
+
+  override input(name: string, param: string, activator: Activator, caller: Ent | null): boolean {
+    const v = parseFloat(param);
+    switch (name) {
+      case 'setspeed':
+        if (Number.isFinite(v)) {
+          if (this.corner) this.setSpeed(this.dir * Math.abs(v), activator);
+          else this.setSpeed(this.dir * this.maxSpeed * Math.max(0, Math.min(1, v)), activator);
+        }
+        return true;
+      case 'setspeeddir':
+      case 'setspeeddiraccel':
+        if (Number.isFinite(v)) this.setSpeed(this.maxSpeed * Math.max(-1, Math.min(1, v)), activator);
+        return true;
+      case 'setspeedreal':
+        if (Number.isFinite(v)) this.setSpeed(this.dir * Math.abs(v), activator);
+        return true;
+      case 'setmaxspeed':
+        if (Number.isFinite(v)) {
+          this.maxSpeed = Math.abs(v);
+          this.setSpeed(this.speed, activator);
+        }
+        return true;
+      case 'stop':
+        if (this.speed !== 0) this.lastSpeed = Math.abs(this.speed);
+        this.speed = 0;
+        return true;
+      case 'start':
+        if (this.speed === 0) this.setSpeed(this.dir * this.maxSpeed, activator);
+        return true;
+      case 'resume':
+        if (this.speed === 0) this.setSpeed(this.dir * (this.lastSpeed || this.maxSpeed), activator);
+        return true;
+      case 'startforward':
+        // setSpeed flips dir (and heads back to the node it came from)
+        this.setSpeed(this.maxSpeed, activator);
+        return true;
+      case 'startbackward':
+        this.setSpeed(-this.maxSpeed, activator);
+        return true;
+      case 'toggle':
+        if (this.speed !== 0) {
+          this.lastSpeed = Math.abs(this.speed);
+          this.speed = 0;
+        } else this.setSpeed(this.dir * this.maxSpeed, activator);
+        return true;
+      case 'reverse':
+        if (this.speed !== 0) this.setSpeed(-this.speed, activator);
+        else {
+          this.dir = -this.dir;
+          this.redirect();
+        }
+        return true;
+      case 'teleporttopathtrack': {
+        const n = this.sys.findFirst(param.trim(), this, activator, caller);
+        if (n instanceof PathTrack) this.teleportTo(n);
+        return true;
+      }
+    }
+    return super.input(name, param, activator, caller);
+  }
+}
+
 // ------------------------------------------------------------------------------------------ the system
 
 function isIgnoredTriggerClass(cls: string): boolean {
@@ -1644,6 +2598,24 @@ export class EntitySystem implements IEntitySystem {
   private readonly ents: Ent[] = [];
   private readonly triggers: BaseTrigger[] = [];
   private readonly buttons: FuncButton[] = [];
+  private readonly doors: FuncDoor[] = [];
+  /** Entities with a placement record (movers and what moves with them), parents before children. */
+  private hierList: Ent[] = [];
+  /** Movers in hierarchy order (a parent moves before its children). */
+  private moverList: MoverEnt[] = [];
+  /** Hierarchy members the renderer draws (brush models, model entities). */
+  private renderList: Ent[] = [];
+  /** LoadedMap.entities index of model entities in the hierarchy (RendererApi.setEntityTransform). */
+  private readonly propSlot = new Map<Ent, number>();
+  private readonly snapAfterMove = new Set<Ent>();
+  private readonly walkStack: Ent[] = [];
+  private readonly savedLocal = new Pose();
+  private readonly renderPose = new Pose();
+  private readonly pushSaved = v3();
+  private readonly deltaRot = new Float64Array(9);
+  private readonly deltaT = v3();
+  private readonly groundVel = v3();
+  private readonly zeroVec = v3();
   private readonly thinkers: Ent[] = [];
   private readonly byName = new Map<string, Ent[]>();
   private readonly brushByModel = new Map<number, BrushEnt>();
@@ -1732,7 +2704,10 @@ export class EntitySystem implements IEntitySystem {
       const sf = parseInt(src.kv.spawnflags ?? '0', 10) || 0;
       if (!(sf & SF_TEMPLATE_DONT_REMOVE)) for (const e of list) removed.add(e.index);
     }
-    for (const src of mapEnts) {
+    const movable = movableEntitySets(mapEnts).entities;
+    const moving: Ent[] = [];
+    for (let i = 0; i < mapEnts.length; i++) {
+      const src = mapEnts[i];
       if (removed.has(src.index)) {
         // a template brush entity is not in the world until spawned
         if (src.model > 0) {
@@ -1746,6 +2721,11 @@ export class EntitySystem implements IEntitySystem {
       if (e instanceof PointTemplate) e.templates = templateOf.get(src.index) ?? [];
       this.ents.push(e);
       if (e.targetname) this.indexName(e);
+      if (movable.has(i)) {
+        moving.push(e);
+        // model entities (prop_dynamic...) are drawn from RenderProps tagged with this index
+        if (src.model <= 0 && /\.mdl$/i.test(src.kv.model ?? '')) this.propSlot.set(e, i);
+      }
       const cls = src.classname.toLowerCase();
       if (UNSIMULATED_GAMEPLAY_CLASSES.has(cls)) this.unsimulated.set(cls, (this.unsimulated.get(cls) ?? 0) + 1);
     }
@@ -1753,8 +2733,11 @@ export class EntitySystem implements IEntitySystem {
       const list = [...this.unsimulated].map(([c, n]) => (n > 1 ? `${c} x${n}` : c)).join(', ');
       this.devLog('unsimulated', `not simulated on this map: ${list}`);
     }
+    // the hierarchy of what moves (movers read their placement in spawn(), so it comes first)
+    this.setupHierarchy(moving);
     for (const e of this.ents) e.spawn();
     for (const e of this.ents) e.activate();
+    this.finishHierarchySpawn();
     for (const e of this.ents) {
       if (e instanceof LogicAuto && !e.killed) e.fireSpawn();
       else if (e instanceof LogicRelay && !e.killed) e.fireSpawnOutput();
@@ -1776,6 +2759,343 @@ export class EntitySystem implements IEntitySystem {
       if (!t.killed) t.think(this.now);
     }
     this.serviceQueue();
+  }
+
+  // ---------------------------------------------------------------- moving brushes
+
+  /**
+   * Moves every mover by one tick - call once per tick BEFORE playerMove (the clock already advanced). Parents
+   * move before their children, children follow their parent's rigid transform; the collision world and
+   * parented triggers follow. Source pusher semantics for the player: a rider (standing on a moved model) is
+   * carried with it, a player the model moves into is pushed along, and a move that can't place the player is
+   * undone and the mover told it was blocked (dmg, doors reverse); unblockable trains crush instead.
+   */
+  tickMovers(): void {
+    if (!this.spawned) this.spawn();
+    if (!this.hierList.length) return;
+    this.now = this.host.time;
+    const dt = this.host.tickInterval;
+    for (const e of this.hierList) e.hier!.prevAbs.copy(e.hier!.abs);
+    for (const m of this.moverList) {
+      if (m.killed || !m.hier) continue;
+      const h = m.hier;
+      this.savedLocal.copy(h.local);
+      m.saveMotion();
+      try {
+        m.moverThink(dt);
+      } catch (err) {
+        console.error(err);
+        continue;
+      }
+      if (h.local.equals(this.savedLocal)) {
+        this.snapAfterMove.delete(m);
+        continue;
+      }
+      this.moveSubtree(m);
+      if (this.pushWith(m) === 'blocked') {
+        if (m.unblockable) this.killPlayer(`crushed by ${m.classname} ${m.targetname}`.trim());
+        else {
+          m.restoreMotion();
+          this.moveSubtree(m);
+          m.blocked();
+        }
+      }
+      if (this.snapAfterMove.delete(m)) this.forSubtree(m, (e) => e.hier!.prevAbs.copy(e.hier!.abs));
+    }
+  }
+
+  /**
+   * Call right after playerMove with the ground state from before it: leaving a moving model adds its velocity
+   * (Source's ground entity velocity, z replaced), landing on one subtracts it, so jumps off trains and
+   * platforms keep their momentum and a landing player keeps its world velocity.
+   */
+  afterPlayerMove(wasOnGround: boolean, wasGroundModel: number): void {
+    const ps = this.host.player;
+    if (wasOnGround && wasGroundModel > 0 && !ps.onGround) {
+      const v = this.modelVelocity(wasGroundModel);
+      if (v) {
+        ps.baseVelocity.x += v.x;
+        ps.baseVelocity.y += v.y;
+        ps.baseVelocity.z = v.z;
+      }
+    } else if (!wasOnGround && ps.onGround && ps.groundModel > 0) {
+      const v = this.modelVelocity(ps.groundModel);
+      if (v) {
+        ps.baseVelocity.x -= v.x;
+        ps.baseVelocity.y -= v.y;
+        ps.baseVelocity.z = v.z;
+      }
+    }
+  }
+
+  /**
+   * Sends the placements of moving brush models and model entities to the renderer, interpolated between the
+   * last two ticks like the player (`alpha` 0 = previous tick, 1 = current). Call every rendered frame.
+   */
+  applyRenderTransforms(alpha: number): void {
+    const r = this.host.renderer;
+    for (const e of this.renderList) {
+      const h = e.hier;
+      if (!h || e.killed) continue;
+      const moving = !h.prevAbs.equals(h.abs);
+      if (!moving && h.sent && h.sent.equals(h.abs)) continue;
+      const p = moving ? lerpPose(h.prevAbs, h.abs, alpha, this.renderPose) : h.abs;
+      if (h.sent && h.sent.equals(p)) continue;
+      try {
+        if (e.model > 0) r.setModelTransform?.(e.model, p.origin, p.angles);
+        else {
+          const slot = this.propSlot.get(e);
+          if (slot !== undefined) r.setEntityTransform?.(slot, p.origin, p.angles);
+        }
+      } catch {
+        /* renderer not ready */
+      }
+      (h.sent ??= new Pose()).copy(p);
+    }
+  }
+
+  /** World placement of an entity by name (its hierarchy placement when it moves), or null. */
+  placementOf(name: string): { origin: Vec3; angles: QAngle } | null {
+    const e = this.findFirst(name, null, null, null);
+    if (!e || e instanceof PlayerEnt) return null;
+    return { origin: v3clone(e.origin), angles: qaClone(e.hier ? e.hier.abs.angles : e.angles) };
+  }
+
+  /** Mover state by name (tests, debugging): speed, door state / progress, train path node. */
+  moverState(name: string): { classname: string; origin: Vec3; angles: QAngle; speed?: number; state?: string; position?: number; node?: string } | null {
+    const e = this.findFirst(name, null, null, null);
+    if (!(e instanceof MoverEnt) || !e.hier) return null;
+    const out: { classname: string; origin: Vec3; angles: QAngle; speed?: number; state?: string; position?: number; node?: string } = {
+      classname: e.classname,
+      origin: v3clone(e.hier.abs.origin),
+      angles: qaClone(e.hier.abs.angles),
+    };
+    if (e instanceof FuncRotating) out.speed = e.speed;
+    else if (e instanceof FuncDoor) {
+      out.state = e.state;
+      out.position = e.travel > 0 ? e.pos / e.travel : 0;
+    } else if (e instanceof FuncMoveLinear || e instanceof MomentaryRotButton) out.position = e.position;
+    else if (e instanceof FuncTrackTrain) {
+      out.speed = e.speed;
+      out.node = e.last?.targetname ?? '';
+    }
+    return out;
+  }
+
+  /** @internal The placement of `e` changed outside a mover think: move its hierarchy now (no push). */
+  syncHierarchy(e: Ent, snap: boolean): void {
+    if (!e.hier) return;
+    this.moveSubtree(e);
+    if (snap) this.forSubtree(e, (c) => c.hier!.prevAbs.copy(c.hier!.abs));
+  }
+
+  /** @internal A mover jumped (train teleport node) during its think: don't interpolate this tick. */
+  snapNextRender(e: Ent): void {
+    this.snapAfterMove.add(e);
+  }
+
+  /** @internal Puts a hierarchy member at a world origin and/or angles (AddOutput origin, point_teleport). */
+  teleportEnt(e: Ent, origin: Vec3 | null, angles: QAngle | null): void {
+    const h = e.hier;
+    if (!h) return;
+    const abs = new Pose().copy(h.abs);
+    abs.set(origin ?? abs.origin, angles ?? abs.angles);
+    if (h.parent?.hier) relativePose(h.parent.hier.abs, abs, h.local);
+    else h.local.copy(abs);
+    this.syncHierarchy(e, true);
+  }
+
+  /** @internal Crush / block damage to the player (respects a damage filter, kills at 0 health). */
+  damagePlayer(dmg: number, reason: string): void {
+    if (!(dmg > 0) || !this.playerTakesDamage(DMG_CRUSH)) return;
+    this.player.health -= dmg;
+    if (this.player.health <= 0) this.killPlayer(reason);
+  }
+
+  /** Placement record of `e` (created at its spawn placement: entity origin + angles, like its brushes). */
+  private ensureHier(e: Ent): Hier {
+    if (e.hier) return e.hier;
+    const base = new Pose();
+    if (e.model > 0) {
+      const p = brushEntityPlacement(e.srcLike());
+      base.set(p.origin, p.angles);
+    } else base.set(e.origin, e.angles);
+    const h: Hier = {
+      parent: null,
+      children: [],
+      local: new Pose().copy(base),
+      abs: new Pose().copy(base),
+      base,
+      prevAbs: new Pose().copy(base),
+      pushFrom: new Pose().copy(base),
+      sent: null,
+      rigid: null,
+      depth: 0,
+    };
+    e.hier = h;
+    if (e.model > 0) {
+      try {
+        this.host.collision.setModelBasePlacement?.(e.model, base.origin, base.angles);
+      } catch {
+        /* no collision world */
+      }
+    }
+    if (e instanceof BaseTrigger && e.brushes.length) {
+      h.rigid = e.brushes.map((b) => new RigidBrush(b));
+      e.brushes = h.rigid.map((rb) => rb.brush);
+    }
+    return h;
+  }
+
+  /** Builds the placement records of `ents` and links parentname parents (keeping world placements). */
+  private setupHierarchy(ents: Ent[]): void {
+    if (!ents.length) return;
+    for (const e of ents) this.ensureHier(e);
+    for (const e of ents) {
+      const pn = (e.kv.parentname ?? '').split(',')[0].trim();
+      if (!pn) continue;
+      const p = this.findFirst(pn, e, null, null);
+      if (p instanceof Ent) this.link(e, p);
+    }
+    this.sortHierarchy();
+  }
+
+  /** After spawn/activate: path_track back links; no interpolation from the build placement. */
+  private finishHierarchySpawn(): void {
+    for (const e of this.ents) if (e instanceof PathTrack && e.next && !e.next.prev) e.next.prev = e;
+    for (const e of this.hierList) e.hier!.prevAbs.copy(e.hier!.abs);
+  }
+
+  /** @internal A mover created without a placement record (template copies): give it one. */
+  adoptMover(e: Ent): void {
+    this.setupHierarchy([e]);
+  }
+
+  /** Parents `child` to `parent` (null = unparent) keeping its world placement. False for a loop. */
+  private link(child: Ent, parent: Ent | null): boolean {
+    const h = this.ensureHier(child);
+    if (parent) {
+      for (let p: Ent | null = parent; p; p = p.hier?.parent ?? null) if (p === child) return false;
+    }
+    if (h.parent?.hier) {
+      const sib = h.parent.hier.children;
+      const i = sib.indexOf(child);
+      if (i >= 0) sib.splice(i, 1);
+    }
+    h.parent = parent;
+    if (parent) {
+      const ph = this.ensureHier(parent);
+      ph.children.push(child);
+      relativePose(ph.abs, h.abs, h.local);
+    } else h.local.copy(h.abs);
+    return true;
+  }
+
+  /** Re-derives hierarchy order (parents first), the mover list and the render list. */
+  private sortHierarchy(): void {
+    const list = this.ents.filter((e) => e.hier && !e.killed);
+    for (const e of list) {
+      let d = 0;
+      for (let p = e.hier!.parent; p && d < 64; p = p.hier?.parent ?? null) d++;
+      e.hier!.depth = d;
+    }
+    list.sort((a, b) => a.hier!.depth - b.hier!.depth);
+    this.hierList = list;
+    this.moverList = list.filter((e): e is MoverEnt => e instanceof MoverEnt);
+    this.renderList = list.filter((e) => e.model > 0 || this.propSlot.has(e));
+  }
+
+  private forSubtree(root: Ent, fn: (e: Ent) => void): void {
+    const stack = this.walkStack;
+    const base = stack.length;
+    stack.push(root);
+    while (stack.length > base) {
+      const e = stack.pop()!;
+      fn(e);
+      const h = e.hier;
+      if (h) for (const c of h.children) if (!c.killed) stack.push(c);
+    }
+  }
+
+  /** Recomputes the world placement of `root` and its descendants from their local placements. */
+  private moveSubtree(root: Ent): void {
+    this.forSubtree(root, (e) => {
+      const h = e.hier!;
+      h.pushFrom.copy(h.abs);
+      if (h.parent?.hier) composePose(h.parent.hier.abs, h.local, h.abs);
+      else h.abs.copy(h.local);
+      if (!h.abs.equals(h.pushFrom)) this.syncEnt(e);
+    });
+  }
+
+  /** Mirrors a moved hierarchy member: entity origin/angles, collision brushes, trigger brushes. */
+  private syncEnt(e: Ent): void {
+    const h = e.hier!;
+    const a = h.abs;
+    e.origin.x = a.origin.x;
+    e.origin.y = a.origin.y;
+    e.origin.z = a.origin.z;
+    e.angles.pitch = a.angles.pitch;
+    e.angles.yaw = a.angles.yaw;
+    e.angles.roll = a.angles.roll;
+    if (e.model > 0) {
+      try {
+        this.host.collision.setModelTransform?.(e.model, a.origin, a.angles);
+      } catch {
+        /* no collision world */
+      }
+    }
+    if (h.rigid && e instanceof BaseTrigger) {
+      const rot = placementDelta(h.base.origin, h.base.m, a.origin, a.m, this.deltaRot, this.deltaT);
+      const t = this.deltaT;
+      const mn = e.mins;
+      const mx = e.maxs;
+      mn.x = mn.y = mn.z = Infinity;
+      mx.x = mx.y = mx.z = -Infinity;
+      for (let i = 0; i < h.rigid.length; i++) {
+        const rb = h.rigid[i];
+        rb.update(rot ? this.deltaRot : null, t.x, t.y, t.z);
+        e.brushes[i] = rb.brush;
+        const B = rb.bounds;
+        if (B[0] < mn.x) mn.x = B[0];
+        if (B[1] < mn.y) mn.y = B[1];
+        if (B[2] < mn.z) mn.z = B[2];
+        if (B[3] > mx.x) mx.x = B[3];
+        if (B[4] > mx.y) mx.y = B[4];
+        if (B[5] > mx.z) mx.z = B[5];
+      }
+    }
+  }
+
+  /** Pusher step for the player after `m` (and its hierarchy) moved: the first solid model that carries or pushes it decides. */
+  private pushWith(m: Ent): 'none' | 'moved' | 'blocked' {
+    const ps = this.host.player;
+    let result: 'none' | 'moved' | 'blocked' = 'none';
+    this.forSubtree(m, (e) => {
+      if (result !== 'none' || e.model <= 0) return;
+      const h = e.hier!;
+      if (h.pushFrom.equals(h.abs)) return;
+      const riding = ps.onGround && ps.groundModel === e.model;
+      try {
+        result = pushPlayer(this.host.collision, ps, e.model, h.pushFrom, h.abs, riding, this.pushSaved);
+      } catch {
+        result = 'none';
+      }
+    });
+    return result;
+  }
+
+  /** Linear velocity (u/s) of a moving brush model's origin over the current tick, or null when it's still. */
+  private modelVelocity(model: number): Vec3 | null {
+    const e = this.brushByModel.get(model);
+    const h = e?.hier;
+    const dt = this.host.tickInterval;
+    if (!h || !(dt > 0)) return null;
+    const v = this.groundVel;
+    v.x = (h.abs.origin.x - h.prevAbs.origin.x) / dt;
+    v.y = (h.abs.origin.y - h.prevAbs.origin.y) / dt;
+    v.z = (h.abs.origin.z - h.prevAbs.origin.z) / dt;
+    return v.x !== 0 || v.y !== 0 || v.z !== 0 ? v : null;
   }
 
   onPlayerTeleported(): void {
@@ -1837,6 +3157,10 @@ export class EntitySystem implements IEntitySystem {
         bestDist = tr.fraction * USE_RANGE;
         const hit = tr.model > 0 ? this.brushByModel.get(tr.model) : undefined;
         if (hit instanceof FuncButton && !hit.killed) best = hit;
+        else if (hit instanceof FuncDoor && !hit.killed && hit.usable) {
+          hit.activate_(this.player, true);
+          return true;
+        }
       }
     } catch {
       /* no collision world */
@@ -1862,6 +3186,7 @@ export class EntitySystem implements IEntitySystem {
    * the renderer again: call after the renderer (re)built the map's meshes.
    */
   reapplyRender(): void {
+    for (const e of this.hierList) if (e.hier) e.hier.sent = null;
     for (const m of this.hiddenModels) this.setModelVisible(m, false);
     for (const t of this.triggers) this.setModelVisible(t.model, false);
     for (const e of this.ents) if (e instanceof BrushEnt) e.applyRender(false);
@@ -2023,6 +3348,7 @@ export class EntitySystem implements IEntitySystem {
     }
     this.debugList = null;
     for (const e of created) if (e.model > 0) this.hiddenModels.delete(e.model);
+    this.setupHierarchy(created.filter((e) => MOVER_CLASSES.has(e.classname.toLowerCase()) || !!e.kv.parentname));
     for (const e of created) e.spawn();
     for (const e of created) {
       e.activate();
@@ -2055,6 +3381,12 @@ export class EntitySystem implements IEntitySystem {
     if (e.killed) return;
     e.killed = true;
     this.unindexName(e);
+    if (e.hier) {
+      // children stay where they are (Kill doesn't remove the hierarchy; KillHierarchy does)
+      for (const c of e.hier.children.slice()) this.link(c, null);
+      this.link(e, null);
+      this.sortHierarchy();
+    }
     if (e instanceof BaseTrigger && e.engineTouching) {
       e.engineTouching = false;
       e.filterTouching = false;
@@ -2226,12 +3558,43 @@ export class EntitySystem implements IEntitySystem {
         return new PointTeleport(this, src);
       case 'point_template':
         return new PointTemplate(this, src);
+      case 'path_track':
+      case 'path_corner':
+        return new PathTrack(this, src);
     }
     if (cls.startsWith('filter_')) return new FilterEnt(this, src); // damage type, mass, context...: accept
     if (src.model > 0) {
-      const b = cls === 'func_button' || cls === 'func_rot_button' ? new FuncButton(this, src) : new BrushEnt(this, src);
+      let b: BrushEnt;
+      switch (cls) {
+        case 'func_button':
+        case 'func_rot_button':
+          b = new FuncButton(this, src);
+          this.buttons.push(b as FuncButton);
+          break;
+        case 'func_rotating':
+          b = new FuncRotating(this, src);
+          break;
+        case 'func_door':
+        case 'func_door_rotating':
+          b = new FuncDoor(this, src);
+          this.doors.push(b as FuncDoor);
+          break;
+        case 'func_movelinear':
+        case 'func_water_analog':
+          b = new FuncMoveLinear(this, src);
+          break;
+        case 'momentary_rot_button':
+          b = new MomentaryRotButton(this, src);
+          break;
+        case 'func_tracktrain':
+        case 'func_tanktrain':
+        case 'func_train':
+          b = new FuncTrackTrain(this, src);
+          break;
+        default:
+          b = new BrushEnt(this, src);
+      }
       this.brushByModel.set(src.model, b);
-      if (b instanceof FuncButton) this.buttons.push(b);
       return b;
     }
     return new Ent(this, src);
@@ -2381,6 +3744,30 @@ export class EntitySystem implements IEntitySystem {
         b.touching = hit;
       }
     }
+
+    // touch-opening doors (same one-unit contact; the player can't overlap a solid door)
+    if (this.doors.length) {
+      if (!this.buttons.length) {
+        bmins.x -= 1;
+        bmins.y -= 1;
+        bmins.z -= 1;
+        bmaxs.x += 1;
+        bmaxs.y += 1;
+        bmaxs.z += 1;
+      }
+      const zero = this.zeroVec;
+      for (const d of this.doors) {
+        if (d.killed || !d.touchOpens) continue;
+        let hit = false;
+        try {
+          hit = this.host.collision.testModelBox(d.model, zero, bmins, bmaxs, MASK_PLAYERSOLID);
+        } catch {
+          hit = false;
+        }
+        if (hit && !d.touching) d.activate_(p, false);
+        d.touching = hit;
+      }
+    }
   }
 
   // ---------------------------------------------------------------- I/O
@@ -2438,6 +3825,19 @@ export class EntitySystem implements IEntitySystem {
         return;
       case 'killhierarchy':
         this.killHierarchy(target, 0);
+        return;
+      case 'setparent': {
+        const p = param.trim() ? this.findFirst(param.split(',')[0].trim(), target, activator, caller) : null;
+        if (p instanceof PlayerEnt) return; // parenting to the player isn't simulated
+        if (p) this.ensureHier(p);
+        if (this.link(target, p)) {
+          this.sortHierarchy();
+          this.syncHierarchy(target, true);
+        }
+        return;
+      }
+      case 'clearparent':
+        if (target.hier?.parent && this.link(target, null)) this.sortHierarchy();
         return;
       case 'fireuser1':
       case 'fireuser2':

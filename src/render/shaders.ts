@@ -253,6 +253,14 @@ vec3 synthLight(vec3 n) {
 
 void main() {
 #include <logdepthbuf_fragment>
+#if defined( USE_LOGARITHMIC_DEPTH_BUFFER ) && defined( DEPTH_BIAS )
+  {
+    // logarithmic depth is written by the shader, out of polygonOffset's reach: the same slope-scaled bias
+    // toward the eye here (one pixel's depth slope + a few units), so blended surfaces beat coplanar opaque ones
+    float fd = log2(vFragDepth) * logDepthBufFC * 0.5;
+    gl_FragDepth = fd - (max(abs(dFdx(fd)), abs(dFdy(fd))) + DEPTH_BIAS);
+  }
+#endif
   vec4 albedo = texture(map, vUv);
 #ifdef USE_BLEND2
   vec4 albedo2 = texture(map2, vUv2);
@@ -385,14 +393,24 @@ vec2 waveGradient(vec2 p, float t) {
 
 void main() {
 #include <logdepthbuf_fragment>
+#if defined( USE_LOGARITHMIC_DEPTH_BUFFER ) && defined( DEPTH_BIAS )
+  {
+    // logarithmic depth is written by the shader, out of polygonOffset's reach: the same slope-scaled bias
+    // toward the eye here (one pixel's depth slope + a few units), so blended surfaces beat coplanar opaque ones
+    float fd = log2(vFragDepth) * logDepthBufFC * 0.5;
+    gl_FragDepth = fd - (max(abs(dFdx(fd)), abs(dFdy(fd))) + DEPTH_BIAS);
+  }
+#endif
   vec3 V = normalize(vPosW - cameraPosition);
+  // the surface normal on the viewer's side: a top face seen from above, a $bottommaterial face (or a lone
+  // double-sided surface) seen from below
   vec3 n0 = normalize(vNormalW);
-  bool below = dot(V, n0) > 0.0;
+  if (dot(V, n0) > 0.0) n0 = -n0;
+  bool below = n0.z < -0.01;
   // ripple strength fades with distance (avoids shimmering) and on steep faces
   float strength = 2.2 / (1.0 + vViewDepth / 1800.0) * smoothstep(0.5, 0.9, abs(n0.z));
   vec2 g = waveGradient(vPosW.xy, uTime) * strength;
   vec3 n = normalize(n0 + vec3(-g, 0.0) * sign(n0.z + 1e-4));
-  if (below) n = -n;
   float cosv = clamp(dot(-V, n), 0.0, 1.0);
   float fresnel = 0.02 + 0.98 * pow(1.0 - cosv, 5.0);
   vec3 R = reflect(V, n);
@@ -494,11 +512,13 @@ in vec2 aCorner;      // x: 0 = start, 1 = end; y: side -1 / 1
 in vec4 aColor;       // rgb (linear), intensity
 in float aWidth;      // world half-width
 in float aFade;       // intensity multiplier at the segment end (posts fade upward)
+in float aSoft;       // 1: soft glow band around a beam (no core)
 uniform float uPixelScale; // world units per pixel at distance 1
 uniform float uMinPixels;
 out vec4 vColor;
 out float vSide;
 out float vAlong;
+out float vSoft;
 void main() {
   vec3 p = mix(aStart, aEnd, aCorner.x);
   vec3 dir = aEnd - aStart;
@@ -516,10 +536,13 @@ void main() {
   vec4 mv = viewMatrix * vec4(p, 1.0);
   gl_Position = projectionMatrix * mv;
   vColor = vec4(aColor.rgb, aColor.a * mix(1.0, aFade, aCorner.x));
-  // keep thin far beams from flickering: fade intensity a bit when the width is clamped to pixels
-  vColor.a *= clamp(aWidth / max(w, 1e-3), 0.55, 1.0);
+  // keep thin far beams from flickering: fade intensity a bit when the width is clamped to pixels; a glow
+  // band clamped to pixels (far away) fades out with it instead of piling onto its beam
+  float clampFade = clamp(aWidth / max(w, 1e-3), 0.0, 1.0);
+  vColor.a *= mix(max(clampFade, 0.55), clampFade, aSoft);
   vSide = aCorner.y;
   vAlong = aCorner.x;
+  vSoft = aSoft;
 #include <logdepthbuf_vertex>
 }
 `;
@@ -534,11 +557,13 @@ uniform float uOpacity;
 in vec4 vColor;
 in float vSide;
 in float vAlong;
+in float vSoft;
 void main() {
 #include <logdepthbuf_fragment>
   float d = abs(vSide);
-  float core = 1.0 - smoothstep(0.0, 0.35, d);
-  float glow = exp(-d * d * 5.0);
+  float core = (1.0 - smoothstep(0.0, 0.35, d)) * (1.0 - vSoft);
+  // beams: a tight glow around the core; glow bands: a wide, soft falloff reaching zero at the band's edge
+  float glow = mix(exp(-d * d * 5.0), exp(-d * d * 3.0) * (1.0 - d), vSoft);
   float pulse = 1.0 + uPulse * sin(uTime * 2.6);
   float k = (core * 1.1 + glow * 0.75) * vColor.a * pulse * uOpacity;
   vec3 c = vColor.rgb * k + vec3(core * core * 0.35 * vColor.a);

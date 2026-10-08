@@ -1,9 +1,12 @@
 // End-to-end UI test: serves ui-harness.html (real Ui + SoundSystem + MockGame) with Vite and drives it in
 // headless Chromium. Skipped when no Chromium is installed (CI) or with SURF_UI_BROWSER=0.
-import { existsSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+
+/** Private Vite dependency cache of this file's dev server (removed afterwards). */
+let viteCache = '';
 
 function findChromium(): string | null {
   if (process.env.SURF_UI_BROWSER === '0') return null;
@@ -49,10 +52,14 @@ export function buildBuiltinMap() { throw new Error('stub'); }`,
     }
     server = await createServer({
       configFile: false,
+      // own dependency cache: other dev servers on this tree (tests in parallel, a running `npm run dev`) must not
+      // re-optimize the shared node_modules/.vite under this page
+      cacheDir: (viteCache = mkdtempSync(join(tmpdir(), 'surf-vite-ui-'))),
       root: ROOT,
       base: './',
       logLevel: 'error',
-      server: { port: 0, host: '127.0.0.1', strictPort: false, fs: { allow: [ROOT, tmpdir()] } },
+      // no HMR / file watching: other work in the tree must not reload the page under the test
+      server: { port: 0, host: '127.0.0.1', strictPort: false, hmr: false, watch: { ignored: ['**/*'] }, fs: { allow: [ROOT, tmpdir()] } },
       optimizeDeps: { exclude: ['node-unrar-js'] },
       resolve: { alias },
     });
@@ -68,13 +75,15 @@ export function buildBuiltinMap() { throw new Error('stub'); }`,
       if (m.type() === 'error' && !/Failed to load resource|ERR_FAILED|net::/.test(m.text())) errors.push(`console.error: ${m.text()}`);
     });
     await page.goto(`http://127.0.0.1:${port}/ui-harness.html?scene=menu`, { waitUntil: 'load' });
-    await page.waitForFunction(() => (window as any).__harness?.ready, null, { timeout: 60000 });
+    // generous: the full suite runs other browser/real-map tests in parallel (CPU contention)
+    await page.waitForFunction(() => (window as any).__harness?.ready, null, { timeout: 180000 });
     await wait(300);
-  }, 120000);
+  }, 240000);
 
   afterAll(async () => {
     await browser?.close();
     await server?.close();
+    if (viteCache) rmSync(viteCache, { recursive: true, force: true });
   });
 
   it('main menu renders the catalog-driven home page', async () => {
@@ -209,6 +218,18 @@ export function buildBuiltinMap() { throw new Error('stub'); }`,
       r.dispatchEvent(new Event('input', { bubbles: true }));
     });
     expect(await ev(() => (window as any).__harness.cv('cl_crosshairsize'))).toBe('7');
+    // CS:GO share code: decoded into the cl_crosshair* cvars; a bad checksum is refused with a clear message
+    await page.fill('.xh-paste', 'CSGO-O4Jsi-V36wY-rTMGK-9w7qF-jQ8WB');
+    await page.click('.xh-pastebox .btn-accent');
+    await wait(80);
+    expect(await ev(() => ['cl_crosshairsize', 'cl_crosshairgap', 'cl_crosshairthickness', 'cl_crosshairstyle', 'cl_crosshaircolor', 'cl_crosshair_t'].map((n) => (window as any).__harness.cv(n)))).toEqual(['33', '1', '4.1', '2', '5', '1']);
+    await page.fill('.xh-paste', 'CSGO-WbJbh-4KBUq-eFnwE-sFn6P-o7TjD');
+    await page.click('.xh-pastebox .btn-accent');
+    await wait(80);
+    expect(await ev(() => [...document.querySelectorAll('.toast.error')].at(-1)?.textContent)).toContain('checksum');
+    await page.click('.xh-pastebox .btn-ghost');
+    await wait(50);
+    expect(await ev(() => (window as any).__harness.cv('cl_crosshairsize'))).toBe('5');
 
     await page.click('.settings .tab:has-text("Binds")');
     await wait(100);
@@ -297,6 +318,65 @@ export function buildBuiltinMap() { throw new Error('stub'); }`,
     expect(await ev(() => document.querySelector('.toast.error')!.textContent)).toContain('Network error');
     expect(await ev(() => document.querySelector('.loading-screen')!.classList.contains('hidden'))).toBe(true);
     expect(await ev(() => !document.querySelector('.menu-screen')!.classList.contains('hidden'))).toBe(true);
+  });
+
+  it('a new load after a failed one refreshes the loading screen (name, pills, error state)', async () => {
+    await ev(() => {
+      const h = (window as any).__harness;
+      h.game.disconnect();
+      h.game.failNext = { message: 'HTTP 404 while downloading', viaSetLoading: true };
+      void h.game.loadMapFile(new File([new Uint8Array(4)], 'surf_typo.bsp')).catch(() => undefined);
+    });
+    await page.waitForFunction(() => document.querySelector('.loading-screen.error') !== null, null, { timeout: 10000 });
+    expect(await ev(() => document.querySelector('.loading-title')!.textContent)).toBe('surf_typo');
+    // console `map` of a catalog map: no browser involvement, the header must follow the game's load
+    await ev(() => void (window as any).__harness.game.loadCatalogMap('surf_utopia_njv'));
+    await wait(150);
+    expect(await ev(() => document.querySelector('.loading-title')!.textContent)).toBe('surf_utopia_njv');
+    expect(await ev(() => document.querySelector('.loading-screen')!.classList.contains('error'))).toBe(false);
+    expect(await ev(() => document.querySelector('.loading-actions .btn-accent')!.classList.contains('hidden'))).toBe(true);
+    expect(await ev(() => [...document.querySelectorAll('.loading-pills .pill')].map((p) => p.textContent).join(' '))).toMatch(/Tier \d/);
+    await page.waitForFunction(() => (window as any).__harness.game.state === 'playing', null, { timeout: 20000 });
+    // a file of a catalog map gets the catalog's tier / type
+    await ev(() => void (window as any).__harness.game.loadMapFile(new File([new Uint8Array(4)], 'surf_kitsune.bsp')));
+    await wait(120);
+    expect(await ev(() => [...document.querySelectorAll('.loading-pills .pill')].map((p) => p.textContent).join(' '))).toMatch(/Tier \d/);
+    await page.waitForFunction(() => (window as any).__harness.game.state === 'playing', null, { timeout: 20000 });
+  });
+
+  it('cl_showpos is drawn top-right like CS:GO', async () => {
+    await ev(() => (window as any).__harness.game.executeCommand('cl_showpos 1'));
+    await wait(150);
+    const r = await ev(() => {
+      const b = document.querySelector('.hud-pos')!.getBoundingClientRect();
+      return { left: b.left, right: b.right, top: b.top, text: document.querySelector('.hud-pos')!.textContent };
+    });
+    expect(r.text).toMatch(/^name: .*\npos: /);
+    expect(r.left).toBeGreaterThan(800);
+    expect(r.right).toBeGreaterThan(1500);
+    expect(r.top).toBeLessThan(40);
+    await ev(() => (window as any).__harness.game.executeCommand('cl_showpos 0'));
+  });
+
+  it('config files: pasting several lines into the console saves / execs them as a .cfg', async () => {
+    await ev(() => localStorage.removeItem('surf.cfg.autoexec'));
+    await page.keyboard.press('Backquote');
+    await wait(80);
+    await ev(() => {
+      const dt = new DataTransfer();
+      dt.setData('text/plain', '// autoexec\nsensitivity 1.7\ncl_crosshairgap -2\n');
+      document.querySelector('.devcon-input')!.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+    });
+    await page.waitForSelector('.cfg-modal', { timeout: 5000 });
+    expect(await ev(() => (document.querySelector('.cfg-name') as HTMLInputElement).value)).toBe('autoexec');
+    await page.click('.cfg-modal .btn-accent');
+    await wait(100);
+    expect(await ev(() => localStorage.getItem('surf.cfg.autoexec'))).toBe('// autoexec\nsensitivity 1.7\ncl_crosshairgap -2\n');
+    expect(await ev(() => ['sensitivity', 'cl_crosshairgap'].map((n) => (window as any).__harness.cv(n)))).toEqual(['1.7', '-2']);
+    expect(await ev(() => document.querySelector('.cfg-modal'))).toBeNull();
+    await page.keyboard.press('Backquote');
+    await wait(50);
+    expect(await ev(() => (window as any).__harness.ui.console.isOpen)).toBe(false);
   });
 
   it('updateHud is cheap enough to run every frame', async () => {

@@ -66,6 +66,25 @@
   margin-left: auto;
 }
 
+/* "Import .cfg" sits right before the close button */
+.surf-ui .devcon-title .devcon-cfg {
+  margin-left: auto;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: none;
+  color: var(--text-2);
+}
+
+.surf-ui .devcon-title .devcon-cfg .icon {
+  width: 0.95rem;
+  height: 0.95rem;
+  color: var(--accent-2);
+}
+
+.surf-ui .devcon-title .devcon-cfg + .btn-icon {
+  margin-left: 0.2rem;
+}
+
 .surf-ui .devcon-output {
   flex: 1;
   min-height: 0;

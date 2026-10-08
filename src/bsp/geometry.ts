@@ -387,7 +387,7 @@ export function buildRenderBatches(
         cz /= n;
       }
       // world-space centroid
-      const sign = face.side ? -1 : 1;
+      const sign = 1; // planes[planeNum] already faces the front: vbsp sets side = planeNum & 1 (planes come in negated pairs)
       let nx = plane.normal.x * sign;
       let ny = plane.normal.y * sign;
       let nz = plane.normal.z * sign;
@@ -580,7 +580,7 @@ export function buildRenderBatches(
     const lmW = face.lightmapTextureSizeInLuxels[0] + 1;
     const lmH = face.lightmapTextureSizeInLuxels[1] + 1;
     const plane = bsp.planes[face.planeNum];
-    const sign = face.side ? -1 : 1;
+    const sign = 1; // planes[planeNum] already faces the front: vbsp sets side = planeNum & 1 (planes come in negated pairs)
     const fnx = plane.normal.x * sign;
     const fny = plane.normal.y * sign;
     const fnz = plane.normal.z * sign;
@@ -966,7 +966,7 @@ function buildOverlayBatches(bsp: BspFile, ctx: OverlayContext): RenderBatch[] {
       const face = bsp.faces[f];
       const plane = face ? bsp.planes[face.planeNum] : undefined;
       if (!face || !plane) continue;
-      const sign = face.side ? -1 : 1;
+      const sign = 1; // planes[planeNum] already faces the front: vbsp sets side = planeNum & 1 (planes come in negated pairs)
       const fnx = plane.normal.x * sign;
       const fny = plane.normal.y * sign;
       const fnz = plane.normal.z * sign;

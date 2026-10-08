@@ -15,6 +15,7 @@ import {
   computeSurfaceHints,
   fallbackMaterial,
   generateProceduralImage,
+  hashString,
   imageAverage,
   isProceduralImage,
   lastMaterialStats,
@@ -1393,6 +1394,54 @@ describe('material names and families', () => {
     const m = fallbackMaterial('concrete/x', undefined, 1024, 256);
     expect(m.image!.width / m.image!.height).toBe(4);
   });
+
+  it('plain stand-ins have fine detail but no large low-frequency blotches (they read as fog when tiled)', () => {
+    // Luma statistics: per-pixel spread (detail) vs the spread of 32x32 block means (blotches), both relative
+    // to the mean. Stock textures' variation is mostly fine-scale; low-frequency clouds look like fog/dirt.
+    const stats = (img: DecodedImage) => {
+      const { width: W, height: H, data } = img;
+      const lum = new Float64Array(W * H);
+      for (let i = 0; i < W * H; i++) lum[i] = 0.2126 * data[i * 4] + 0.7152 * data[i * 4 + 1] + 0.0722 * data[i * 4 + 2];
+      const mean = lum.reduce((a, b) => a + b, 0) / lum.length;
+      const sd = (xs: ArrayLike<number>) => {
+        let m = 0;
+        for (let i = 0; i < xs.length; i++) m += xs[i];
+        m /= xs.length;
+        let v = 0;
+        for (let i = 0; i < xs.length; i++) v += (xs[i] - m) ** 2;
+        return Math.sqrt(v / xs.length);
+      };
+      const B = 32;
+      const blocks: number[] = [];
+      for (let by = 0; by < H; by += B)
+        for (let bx = 0; bx < W; bx += B) {
+          let s = 0;
+          for (let y = by; y < by + B; y++) for (let x = bx; x < bx + B; x++) s += lum[y * W + x];
+          blocks.push(s / (B * B));
+        }
+      return { detail: sd(lum) / mean, blotch: sd(blocks) / mean };
+    };
+    const cases: [string, number][] = [
+      ['concrete/concretewall006a', 0.02],
+      ['concrete/concretefloor007a', 0.02],
+      ['de_prodigy/ceiling01', 0.02],
+      ['concrete/concrete_a', 0.02],
+      ['cs_italy/plasterwall01', 0.012],
+      ['custom/something', 0.02],
+      ['nature/dirtfloor005', 0.02],
+      ['nature/grass001', 0.025],
+      ['nature/sandfloor010a', 0.012],
+      ['nature/rockwall001', 0.045],
+    ];
+    for (const [name, maxBlotch] of cases) {
+      const fam = classifyMaterial(name);
+      const img = generateProceduralImage({ family: fam, color: [0.5, 0.48, 0.45], seed: hashString(name), width: 256, height: 256, name });
+      const s = stats(img);
+      expect(s.detail, `${name} (${fam}) detail`).toBeGreaterThan(0.015);
+      expect(s.blotch, `${name} (${fam}) blotches`).toBeLessThan(maxBlotch);
+      expect(s.blotch / s.detail, `${name} (${fam}) low-frequency share`).toBeLessThan(0.5);
+    }
+  });
 });
 
 // ============================================================================ buildMaterials (synthetic)
@@ -1940,6 +1989,145 @@ describe('prefetchMaterialFiles', () => {
     expect(M.get('maps/m/concrete/concretefloor039a_1_2_3')!.detail).toBeDefined();
     expect(px(M.get('stock/a')!.image!, 0, 0)).toEqual([1, 1, 1, 255]);
     expect(isProceduralImage(M.get('stock/missing')!.image)).toBe(true);
+  });
+});
+
+describe('prefetchMaterialFiles (options)', () => {
+  const fakeContent = (files: Record<string, Uint8Array | string>) => {
+    const m = new Map<string, Uint8Array>();
+    for (const [k, v] of Object.entries(files)) m.set(normalizePakPath(k), typeof v === 'string' ? te.encode(v) : v);
+    const reads: string[] = [];
+    let inFlight = 0;
+    let maxInFlight = 0;
+    return {
+      reads,
+      get maxInFlight() {
+        return maxInFlight;
+      },
+      src: {
+        has: (p: string) => m.has(normalizePakPath(p)),
+        read: async (p: string) => {
+          reads.push(normalizePakPath(p));
+          inFlight++;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          await new Promise((r) => setTimeout(r, 1));
+          inFlight--;
+          return m.get(normalizePakPath(p)) ?? null;
+        },
+      },
+    };
+  };
+  const tex = vtfSolid(4, 4, [10, 20, 30, 255]);
+
+  it('reports progress, limits concurrency and stops on abort', async () => {
+    const files: Record<string, Uint8Array | string> = {};
+    const mats: { name: string }[] = [];
+    for (let i = 0; i < 40; i++) {
+      files[`materials/stock/m${i}.vmt`] = `"LightmappedGeneric" { "$basetexture" "stock/m${i}" }`;
+      files[`materials/stock/m${i}.vtf`] = tex;
+      mats.push({ name: `stock/m${i}` });
+    }
+    const c = fakeContent(files);
+    const progress: [number, number][] = [];
+    const got = await prefetchMaterialFiles(makeBsp(mats), null, c.src, { concurrency: 4, onProgress: (d, t) => progress.push([d, t]) });
+    expect(got.size).toBe(80);
+    expect(c.maxInFlight).toBeLessThanOrEqual(4);
+    expect(progress.at(-1)).toEqual([80, 80]);
+    for (let i = 1; i < progress.length; i++) expect(progress[i][0]).toBeGreaterThanOrEqual(progress[i - 1][0]);
+    const ac = new AbortController();
+    const c2 = fakeContent(files);
+    const partial = await prefetchMaterialFiles(makeBsp(mats), null, c2.src, {
+      concurrency: 2,
+      signal: ac.signal,
+      onProgress: (d) => {
+        if (d === 10) ac.abort();
+      },
+    });
+    expect(partial.size).toBeLessThan(20);
+  });
+
+  it('follows nested includes, envmap masks (also normal-map alpha) and skips textures of tool materials', async () => {
+    const c = fakeContent({
+      'materials/a/base.vmt': '"patch" { "include" "materials/a/mid.vmt" "insert" { "$envmap" "env_cubemap" "$envmapmask" "a/mask" } }',
+      'materials/a/mid.vmt': '"patch" { "include" "a/root" "replace" { "$detail" "a/detail" } }',
+      'materials/a/root.vmt': '"LightmappedGeneric" { "$basetexture" "a/root" "$bumpmap" "a/root_normal" }',
+      'materials/a/root.vtf': tex,
+      'materials/a/mask.vtf': tex,
+      'materials/a/detail.vtf': tex,
+      'materials/a/root_normal.vtf': tex,
+      'materials/b/shiny.vmt': '"LightmappedGeneric" { "$basetexture" "b/shiny" "$envmap" "env_cubemap" "$bumpmap" "b/shiny_normal" "$normalmapalphaenvmapmask" "1" }',
+      'materials/b/shiny.vtf': tex,
+      'materials/b/shiny_normal.vtf': tex,
+      'materials/b/plain.vmt': '"LightmappedGeneric" { "$basetexture" "b/plain" "$bumpmap" "b/plain_normal" }',
+      'materials/b/plain.vtf': tex,
+      'materials/b/plain_normal.vtf': tex,
+      'materials/tools/toolsnodraw.vmt': '"LightmappedGeneric" { "$basetexture" "tools/toolsnodraw" }',
+      'materials/tools/toolsnodraw.vtf': tex,
+      'materials/c/clip.vmt': '"LightmappedGeneric" { "$basetexture" "c/clip" "%compileclip" "1" }',
+      'materials/c/clip.vtf': tex,
+    });
+    const bsp = makeBsp([{ name: 'a/base' }, { name: 'b/shiny' }, { name: 'b/plain' }, { name: 'tools/toolsnodraw' }, { name: 'c/clip' }]);
+    const got = await prefetchMaterialFiles(bsp, null, c.src, { detailTextures: true });
+    expect([...got.keys()].sort()).toEqual(
+      [
+        'materials/a/base.vmt',
+        'materials/a/mid.vmt',
+        'materials/a/root.vmt',
+        'materials/a/root.vtf',
+        'materials/a/mask.vtf',
+        'materials/a/detail.vtf',
+        'materials/b/shiny.vmt',
+        'materials/b/shiny.vtf',
+        'materials/b/shiny_normal.vtf',
+        'materials/b/plain.vmt',
+        'materials/b/plain.vtf',
+        'materials/tools/toolsnodraw.vmt',
+        'materials/c/clip.vmt',
+      ].sort(),
+    );
+    const M = buildMaterials(bsp, null, { extraSources: [mapFileSource(got)] });
+    expect(isProceduralImage(M.get('a/base')!.image)).toBe(false);
+    expect(M.get('a/base')!.envmap!.maskImage).not.toBeNull();
+    expect(M.get('a/base')!.detail).toBeDefined();
+    expect(M.get('b/shiny')!.envmap!.mask).toBe('normalalpha');
+    expect(M.get('b/shiny')!.envmap!.maskImage).not.toBeNull();
+    // without detail textures
+    const c2 = fakeContent({ 'materials/a/root.vmt': '"LightmappedGeneric" { "$basetexture" "a/root" "$detail" "a/detail" }', 'materials/a/root.vtf': tex, 'materials/a/detail.vtf': tex });
+    const got2 = await prefetchMaterialFiles(makeBsp([{ name: 'a/root' }]), null, c2.src, { detailTextures: false });
+    expect([...got2.keys()].sort()).toEqual(['materials/a/root.vmt', 'materials/a/root.vtf']);
+  });
+
+  it('sky: LDR faces first, HDR textures only for faces without an LDR texture', async () => {
+    const files: Record<string, Uint8Array | string> = {};
+    for (const s of ['rt', 'lf', 'bk', 'ft', 'up', 'dn']) {
+      files[`materials/skybox/sky_a${s}.vmt`] = `"Sky" { "$basetexture" "skybox/sky_a${s}" "$hdrcompressedtexture" "skybox/sky_a_hdr${s}" }`;
+      files[`materials/skybox/sky_a_hdr${s}.vtf`] = tex;
+      if (s !== 'up') files[`materials/skybox/sky_a${s}.vtf`] = tex;
+    }
+    const c = fakeContent(files);
+    const pak = makePak({ 'materials/skybox/sky_alf.vtf': vtfSolid(4, 4, [1, 2, 3, 255]) });
+    const got = await prefetchMaterialFiles(makeBsp([{ name: 'tools/toolsskybox' }]), pak, c.src, { skyName: 'sky_a' });
+    const vtfs = [...got.keys()].filter((k) => k.endsWith('.vtf')).sort();
+    // lf is packed in the map; up has no LDR texture so its HDR one is fetched
+    expect(vtfs).toEqual(['materials/skybox/sky_a_hdrup.vtf', 'materials/skybox/sky_abk.vtf', 'materials/skybox/sky_adn.vtf', 'materials/skybox/sky_aft.vtf', 'materials/skybox/sky_art.vtf']);
+    const sky = loadSky('sky_a', pak, { extraSources: [mapFileSource(got)] });
+    expect(sky.faces).not.toBeNull();
+    expect(px(sky.faces!.lf, 0, 0).slice(0, 3)).toEqual([1, 2, 3]);
+  });
+
+  it('never throws for a broken source; unreadable files are left out', async () => {
+    const src = {
+      has: (p: string) => {
+        if (p.includes('boom')) throw new Error('has failed');
+        return true;
+      },
+      read: async (p: string) => {
+        if (p.endsWith('.vtf')) throw new Error('read failed');
+        return te.encode(`"LightmappedGeneric" { "$basetexture" "x/y" }`);
+      },
+    };
+    const got = await prefetchMaterialFiles(makeBsp([{ name: 'a/b' }, { name: 'boom/c' }]), null, src);
+    expect([...got.keys()]).toEqual(['materials/a/b.vmt']);
   });
 });
 

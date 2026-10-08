@@ -7,13 +7,29 @@
 //      frame); each tick's view angles are the previous frame's angles interpolated towards the current ones at
 //      that tick's simulated time within the frame, so a steady mouse turn is the same angle on every tick at any
 //      fps (smooth strafes at low fps, no 1x/2x alternation when fps and tickrate differ);
-//   3. the camera renders the eye position interpolated between the last two ticks (alpha = leftover time).
-// Per tick (docs/ARCHITECTURE.md "Game loop & tick order"): usercmd -> base velocity -> zone button filters and
-// strafe stats -> playerMove -> +use -> entities (triggers, I/O) -> timer -> replay recording -> sounds.
+//   3. the camera renders the eye position interpolated between the last two ticks (alpha = leftover time), and
+//      moving brushes (doors, rotators, trains) and the props on them are drawn interpolated the same way.
+// Per tick (docs/ARCHITECTURE.md "Game loop & tick order"): movers (carry / push the player) -> usercmd -> base
+// velocity -> zone button filters and strafe stats -> playerMove (+ ground mover velocity) -> +use -> entities
+// (triggers, I/O) -> timer -> replay recording -> sounds.
+//
+// Pausing (ESC / the pause menu) works like CS:GO's ESC menu during a ranked run: the world keeps running (the
+// movement keys are released, the player keeps flying or falling) and the run goes on. Otherwise (start zone,
+// practice, menus, a finished run) pausing freezes the world. When the game is forced to stop simulating in the
+// middle of a ranked run (the tab is hidden, frames stop for over a second, a map change gave up and returned),
+// the run goes on as practice ("Timer stopped — run paused, it won't count"), and the hidden time is never
+// caught up. The debug API's pause() is a hard freeze (deterministic stepping with runTicks).
+//
+// Map changes: `map <name>` checks the name first (built-in list, else the catalog) and only prints
+// "map load failed: <name> not found" for an unknown one. While a new map downloads and parses, the current
+// session is kept aside (not simulated); it is dropped when the new map is ready, or comes back (with the
+// error in chat and console) when the load fails. Loading reports carry the load's id and map name
+// (LoadProgress.loadId / mapName) so the loading screen can tell loads apart.
 import { QAngle, angleDiff, angleVectors, normalizeAngle, qa } from '../core/angles';
 import { conPrint, console_, Cvar, FCVAR_CHEAT, FCVAR_REPLICATED } from '../core/cvars';
 import { Vec3, v3, v3clone, v3copy } from '../core/vec3';
-import { LoadedMap, ZoneDef, ZoneSource } from '../map/types';
+import { BUILTIN_MAPS } from '../map/builtin/list';
+import { FogDef, LoadedMap, ZoneDef, ZoneSource } from '../map/types';
 import { CatalogEntry, getCatalogEntry, loadCatalog } from '../maps/catalog';
 import { extractMapArchive, fetchCatalogMap } from '../maps/downloader';
 import type { CollisionWorld } from '../physics/collision';
@@ -52,6 +68,7 @@ import {
   ViewState,
 } from './api';
 import { configSavePending, loadSavedConfig, registerBindCommands, writeConfig } from './binds';
+import { execCfg } from './cfgstore';
 import {
   CHAT_PREFIX,
   CommandContext,
@@ -64,6 +81,7 @@ import {
   playerName,
   registerGameCommands,
   welcomeMessage,
+  zoneSourceText,
 } from './commands';
 import type { TimerHost } from './contracts';
 import { getMoveVars, hostTimescale, isCustomPhysics, isPhysicsCvar, registerConvars, tickInterval } from './convars';
@@ -93,6 +111,13 @@ const FOOTSTEP_MIN_SPEED = 150;
 const SPECTATE_LOOP_PAUSE = 2;
 /** Lowest effective fps_max (10 ticks per frame must cover 128 tick). */
 const MIN_FPS_LIMIT = 30;
+/** A frame gap this long during a ranked run means the game stopped simulating: the run can't count. */
+const STALL_MS = 1000;
+/**
+ * BSPs larger than this drop the previous map before parsing instead of keeping it until the parse succeeded:
+ * two of the biggest maps in memory at once could run the tab out of memory.
+ */
+const KEEP_PREVIOUS_MAX_BSP_BYTES = 128 * 1024 * 1024;
 
 // ------------------------------------------------------------------------------------------ map loading back-ends
 
@@ -103,8 +128,14 @@ export interface BuiltinInfo {
 }
 
 /** Map loading back-ends (the defaults import the real modules lazily; tests inject fakes). */
+/** Loader options derived from the renderer's capabilities. */
+export interface BspLoadOptions {
+  /** Keep the VTFs' DXT mip chains (the renderer can upload S3TC): full-resolution textures, 4-8x less memory. */
+  compressedTextures?: boolean;
+}
+
 export interface MapLoaders {
-  loadBsp(name: string, data: ArrayBuffer, onProgress?: (p: LoadProgress) => void): Promise<LoadedMap>;
+  loadBsp(name: string, data: ArrayBuffer, onProgress?: (p: LoadProgress) => void, opts?: BspLoadOptions): Promise<LoadedMap>;
   buildBuiltin(id: string): Promise<LoadedMap>;
   builtinMaps(): Promise<BuiltinInfo[]>;
   catalog(): Promise<CatalogEntry[]>;
@@ -153,17 +184,16 @@ export async function fetchWithProgress(url: string, onProgress?: (p: LoadProgre
 }
 
 export const defaultLoaders: MapLoaders = {
-  async loadBsp(name, data, onProgress) {
+  async loadBsp(name, data, onProgress, opts) {
     const m = await import('../bsp/loadmap');
-    return m.loadBspMap(name, data, onProgress);
+    return m.loadBspMap(name, data, onProgress, opts?.compressedTextures ? { materials: { compressedTextures: true } } : {});
   },
   async buildBuiltin(id) {
     const m = await import('../map/builtin/index');
     return m.buildBuiltinMap(id);
   },
   async builtinMaps() {
-    const m = await import('../map/builtin/index');
-    return m.BUILTIN_MAPS.map((b: BuiltinInfo) => ({ id: b.id, name: b.name, tier: b.tier }));
+    return BUILTIN_MAPS.map((b: BuiltinInfo) => ({ id: b.id, name: b.name, tier: b.tier }));
   },
   catalog: () => loadCatalog(),
   fetchCatalogMap: (entry, onProgress, signal) => fetchCatalogMap(entry, onProgress, signal),
@@ -171,7 +201,7 @@ export const defaultLoaders: MapLoaders = {
   fetchUrl: fetchWithProgress,
 };
 
-type LoadRequest =
+export type LoadRequest =
   | { kind: 'catalog'; name: string }
   | { kind: 'builtin'; id: string }
   | { kind: 'file'; file: File }
@@ -194,6 +224,12 @@ function isAbortError(e: unknown): boolean {
   return !!e && typeof e === 'object' && (e as { name?: string }).name === 'AbortError';
 }
 
+/** The catalog entry for `name` (case-insensitive, ".bsp" optional) from a freshly loaded catalog list. */
+function findCatalogEntry(list: readonly CatalogEntry[] | null | undefined, name: string): CatalogEntry | undefined {
+  const n = name.toLowerCase().replace(/\.bsp$/, '');
+  return getCatalogEntry(n) ?? list?.find((e) => e.name.toLowerCase() === n);
+}
+
 /** A human-readable load error message. */
 export function describeLoadError(e: unknown): string {
   if (e instanceof RangeError && /allocat|memory/i.test(e.message)) return `Out of memory (${e.message}). Close other tabs and retry.`;
@@ -205,6 +241,16 @@ export function describeLoadError(e: unknown): string {
 const yieldToBrowser = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
 // ------------------------------------------------------------------------------------------ tick math (pure)
+
+/** Moving-brush hooks of game/entities.ts EntitySystem (duck-typed like the other entity extras). */
+interface MoverHooks {
+  /** Before playerMove: movers move, carrying / pushing the player. */
+  tickMovers(): void;
+  /** After playerMove: ground entity velocity when leaving / landing on a mover. */
+  afterPlayerMove(wasOnGround: boolean, wasGroundModel: number): void;
+  /** Every rendered frame: interpolated mover placements to the renderer. */
+  applyRenderTransforms(alpha: number): void;
+}
 
 /**
  * Base velocity conversion (CBasePlayer::PhysicsSimulate semantics): if no trigger set FL_BASEVELOCITY during the
@@ -276,12 +322,24 @@ function renderSettingValue(field: keyof RenderSettings, c: Cvar): boolean | num
   }
 }
 
+/**
+ * The render settings a cvar drives (null if none). r_drawzones: 0 off, 1 outline on the zone floor (the look of
+ * server zone beams), 2 the full box.
+ */
+export function renderSettingsForCvar(c: Cvar): Partial<RenderSettings> | null {
+  if (c.name === 'r_drawzones') return { drawZones: c.num > 0, zoneStyle: c.num >= 2 ? 'box' : 'floor' };
+  const field = RENDER_CVARS[c.name];
+  if (!field) return null;
+  return { [field]: renderSettingValue(field, c) } as Partial<RenderSettings>;
+}
+
 /** Every render setting from the cvars. */
 export function renderSettingsFromCvars(): Partial<RenderSettings> {
   const out: Partial<RenderSettings> = {};
-  for (const [name, field] of Object.entries(RENDER_CVARS)) {
+  for (const name of Object.keys(RENDER_CVARS)) {
     const c = console_.getCvar(name);
-    if (c) (out as Record<string, boolean | number>)[field] = renderSettingValue(field, c);
+    const r = c ? renderSettingsForCvar(c) : null;
+    if (r) Object.assign(out, r);
   }
   return out;
 }
@@ -360,6 +418,8 @@ export class Session implements TimerHost, CommandSession {
   zonesDirty = true;
   zoneGroupSent = -1;
   ghostGroup = 0;
+  /** How this map was loaded (`retry` reloads it). */
+  request: LoadRequest | null = null;
   private readonly game: Game;
 
   constructor(game: Game, map: LoadedMap, tier: number | null) {
@@ -464,6 +524,14 @@ export interface GameDeps {
   autotest?: boolean;
 }
 
+/** The session kept aside while another map loads (it comes back if that load fails). */
+interface SuspendedSession {
+  session: Session;
+  /** The state it comes back in ('playing' or 'paused'). */
+  state: GameState;
+  request: LoadRequest | null;
+}
+
 interface SpectateState {
   group: number;
   /** Real time (s) at which replay time 0 is shown. */
@@ -488,6 +556,10 @@ export class Game implements GameApi, CommandContext {
 
   private _state: GameState = 'menu';
   private _session: Session | null = null;
+  /** The previous map's session while a new map downloads and parses (see "Map changes" above). */
+  private suspended: SuspendedSession | null = null;
+  /** Debug API / tests: paused with nothing simulating until resume(), even mid-run. */
+  private frozen = false;
   private loadingName: string | null = null;
   private loadSeq = 0;
   private currentLoad: LoadToken | null = null;
@@ -537,6 +609,12 @@ export class Game implements GameApi, CommandContext {
     registerZoneCommands();
     this.input.buttons.showscores.onChange = (down) => this.ui.setScoreboardVisible(down);
     loadSavedConfig();
+    // like CS:GO: config.cfg, then the user's autoexec.cfg (stored with cfg_save or added in the settings)
+    try {
+      execCfg('autoexec', true);
+    } catch (e) {
+      console.error(e);
+    }
     this.offCvarChange = console_.onCvarChange((c, old) => this.onCvarChanged(c, old));
   }
 
@@ -564,6 +642,30 @@ export class Game implements GameApi, CommandContext {
 
   get spectating(): boolean {
     return this.spec !== null;
+  }
+
+  /** GameApi.rawInputActive: raw mouse input of the current pointer lock (null before the first capture). */
+  get rawInputActive(): boolean | null {
+    return this.device?.rawInputActive ?? null;
+  }
+
+  /**
+   * True while the pause menu is open over a ranked run in progress: the world keeps simulating (CS:GO's ESC menu
+   * never stops the server), with every key released.
+   */
+  get simulatingWhilePaused(): boolean {
+    const s = this._session;
+    return !!s && this._state === 'paused' && this.liveWhilePaused(s);
+  }
+
+  private liveWhilePaused(s: Session): boolean {
+    if (this.frozen || this.spec) return false;
+    return (s.timer.timerState ?? s.timer.getHud().state) === 'running';
+  }
+
+  /** The world of session `s` simulates this frame. */
+  private isLive(s: Session): boolean {
+    return this._state === 'playing' || (this._state === 'paused' && this.liveWhilePaused(s));
   }
 
   on(event: GameEvent, cb: (data?: unknown) => void): () => void {
@@ -594,8 +696,14 @@ export class Game implements GameApi, CommandContext {
     handleSay(this, text, false);
   }
 
-  pause(): void {
+  /**
+   * Opens the pause menu: every key is released; the world keeps running during a ranked run (see the top of the
+   * file) and freezes otherwise. `freeze` (debug API, tests) stops the simulation in any case until resume().
+   */
+  pause(opts?: { freeze?: boolean }): void {
+    if (this._state === 'paused' && opts?.freeze) this.frozen = true;
     if (this._state !== 'playing') return;
+    this.frozen = !!opts?.freeze;
     this.dispatcher.releaseAll();
     this.input.releaseAll();
     this.setState('paused');
@@ -603,14 +711,31 @@ export class Game implements GameApi, CommandContext {
 
   resume(): void {
     if (this._state !== 'paused') return;
+    this.frozen = false;
     this.lastFrameMs = 0;
     this.input.discardMouse();
     this.setState('playing');
   }
 
+  /**
+   * The page was hidden or shown (visibilitychange). Hidden: the browser stops the frames, so a ranked run in
+   * progress can't count any more (practice); either way the time the page was hidden is never caught up.
+   */
+  onVisibilityChange(hidden: boolean): void {
+    this.lastFrameMs = 0;
+    this.acc = 0;
+    if (!hidden) return;
+    this.dispatcher.releaseAll();
+    this.input.releaseAll();
+    if (this.autotest) return;
+    const s = this._session;
+    if (s && (this._state === 'playing' || this._state === 'paused')) s.timer.interruptRun?.();
+  }
+
   disconnect(): void {
     const wasLoading = this._state === 'loading';
     this.abortLoad();
+    this.dropSuspended();
     this.unloadSession();
     this.loadingName = null;
     if (wasLoading) this.ui.setLoading(null);
@@ -650,18 +775,19 @@ export class Game implements GameApi, CommandContext {
   loadCatalogMap(name: string): Promise<void> {
     return this.runLoad({ kind: 'catalog', name }, name.replace(/\.bsp$/i, ''), async (token) => {
       this.progress(token, { phase: 'download', message: 'Loading the map catalog…' });
-      await this.loaders.catalog();
+      const list = await this.loaders.catalog();
       this.check(token);
-      const entry = getCatalogEntry(token.name);
+      const entry = findCatalogEntry(list, token.name);
       if (!entry) throw new Error(`"${token.name}" is not in the map catalog. Drop the .bsp file onto the menu to play it.`);
       token.name = entry.name;
       this.loadingName = entry.name;
       const got = await this.loaders.fetchCatalogMap(entry, (p) => this.progress(token, p), token.abort.signal);
       this.check(token);
       this.progress(token, { phase: 'parse', message: 'Reading the map…' });
+      this.beforeParse(got.bsp);
       await yieldToBrowser();
       this.check(token);
-      const map = await this.loaders.loadBsp(entry.name, got.bsp, (p) => this.progress(token, p));
+      const map = await this.loaders.loadBsp(entry.name, got.bsp, (p) => this.progress(token, p), this.bspLoadOptions());
       return { map, tier: entry.tier };
     });
   }
@@ -713,9 +839,13 @@ export class Game implements GameApi, CommandContext {
     });
   }
 
-  /** `map <name>`: a built-in id/name, else a catalog map. */
-  async loadMapByName(name: string): Promise<void> {
-    const n = name.trim().replace(/\.bsp$/i, '');
+  /**
+   * `map <name>`: a built-in id/name, else a catalog map. Like CS:GO, an unknown name is only a console error
+   * ("map load failed: <name> not found"): the current map (and run) stays as it is. `validate` false (the ?map=
+   * URL parameter, where nobody sees the console) shows the loading screen's error for an unknown name instead.
+   */
+  async loadMapByName(name: string, validate = true): Promise<void> {
+    const n = name.trim().replace(/^"+|"+$/g, '').replace(/^maps[\\/]/i, '').replace(/\.bsp$/i, '');
     if (!n) return;
     let builtin: BuiltinInfo | undefined;
     try {
@@ -725,7 +855,19 @@ export class Game implements GameApi, CommandContext {
       /* no built-in maps */
     }
     if (builtin) return this.loadBuiltinMap(builtin.id);
-    return this.loadCatalogMap(n);
+    if (!validate) return this.loadCatalogMap(n);
+    let entry: CatalogEntry | undefined;
+    try {
+      entry = findCatalogEntry(await this.loaders.catalog(), n);
+    } catch (e) {
+      conPrint(`map load failed: ${n} (the map catalog is unavailable: ${describeLoadError(e)})`, 'error');
+      return;
+    }
+    if (!entry) {
+      conPrint(`map load failed: ${n} not found`, 'error');
+      return;
+    }
+    return this.loadCatalogMap(entry.name);
   }
 
   /** `retry`: loads the last requested map again. */
@@ -772,15 +914,31 @@ export class Game implements GameApi, CommandContext {
     }
     this.check(token);
     this.progress(token, { phase: 'parse', message: 'Reading the map…' });
+    this.beforeParse(bsp);
     await yieldToBrowser();
     this.check(token);
-    const map = await this.loaders.loadBsp(name, bsp, (p) => this.progress(token, p));
+    const map = await this.loaders.loadBsp(name, bsp, (p) => this.progress(token, p), this.bspLoadOptions());
     return { map, tier };
+  }
+
+  /** A very large BSP is parsed without the previous map kept aside (memory). */
+  private beforeParse(bsp: ArrayBuffer): void {
+    if (bsp.byteLength > KEEP_PREVIOUS_MAX_BSP_BYTES) this.dropSuspended();
+  }
+
+  /** What the renderer can take: S3TC-capable devices get the maps' original DXT textures. */
+  private bspLoadOptions(): BspLoadOptions {
+    try {
+      return { compressedTextures: !!this.renderer.capabilities?.().compressedTextures };
+    } catch {
+      return {};
+    }
   }
 
   private async runLoad(req: LoadRequest, name: string, load: (token: LoadToken) => Promise<{ map: LoadedMap; tier: number | null }>): Promise<void> {
     this.abortLoad();
-    this.unloadSession();
+    // the current map stays aside (not simulated) until the new one is downloaded and parsed
+    this.suspendSession();
     const token: LoadToken = { seq: ++this.loadSeq, abort: new AbortController(), name };
     this.currentLoad = token;
     this.lastLoad = req;
@@ -789,7 +947,9 @@ export class Game implements GameApi, CommandContext {
     try {
       const { map, tier } = await load(token);
       this.check(token);
-      await this.finishLoad(token, map, tier);
+      // the new map is ready: the previous one goes now (its GPU memory before the new upload)
+      this.dropSuspended();
+      await this.finishLoad(token, map, tier, req);
     } catch (e) {
       this.loadFailed(token, e);
     }
@@ -799,11 +959,65 @@ export class Game implements GameApi, CommandContext {
     if (token.seq !== this.loadSeq || token.abort.signal.aborted) throw new LoadAborted();
   }
 
+  /** A load report with the load's id and map name (LoadProgress.loadId / mapName). */
+  private loadReport(token: LoadToken, p: LoadProgress): LoadProgress {
+    return { ...p, loadId: token.seq, mapName: token.name };
+  }
+
   private progress(token: LoadToken, p: LoadProgress): void {
     // late callbacks (a renderer still reporting after the map is up) must not bring the loading screen back
     if (token.seq !== this.loadSeq || this.currentLoad !== token) return;
-    this.ui.setLoading(p);
-    this.emitEvent('loadprogress', p);
+    const r = this.loadReport(token, p);
+    this.ui.setLoading(r);
+    this.emitEvent('loadprogress', r);
+  }
+
+  /** Keeps the current session aside while a new map loads (nothing simulates or renders it meanwhile). */
+  private suspendSession(): void {
+    const s = this._session;
+    if (!s) return;
+    if (this.spec) this.stopSpectate();
+    if (this.suspended) this.dropSuspended(); // (never both: a session only exists while nothing is suspended)
+    this.suspended = { session: s, state: this._state === 'paused' ? 'paused' : 'playing', request: s.request };
+    this._session = null;
+    installZoneEditor(null);
+    this.dispatcher.releaseAll();
+    this.input.releaseAll();
+    this.ui.setScoreboardVisible(false);
+    this.sound.setWind(0, false);
+  }
+
+  /** The new map is ready (or the player left): the suspended session is unloaded for good. */
+  private dropSuspended(): void {
+    const sus = this.suspended;
+    if (!sus) return;
+    this.suspended = null;
+    this.unloadSession(sus.session);
+  }
+
+  /**
+   * A load failed while another map was being played: that map comes back as it was. The world stood still
+   * meanwhile, so a ranked run in progress goes on as practice.
+   */
+  private restoreSuspended(): boolean {
+    const sus = this.suspended;
+    if (!sus) return false;
+    this.suspended = null;
+    const s = sus.session;
+    this._session = s;
+    installZoneEditor(s.zoneEditor);
+    if (sus.request) this.lastLoad = sus.request;
+    s.zonesDirty = true;
+    this.acc = 0;
+    this.lastFrameMs = 0;
+    this.input.discardMouse();
+    try {
+      s.timer.interruptRun?.();
+    } catch (e) {
+      console.error(e);
+    }
+    this.setState(sus.state);
+    return true;
   }
 
   private abortLoad(): void {
@@ -846,12 +1060,20 @@ export class Game implements GameApi, CommandContext {
     }
   }
 
-  private async finishLoad(token: LoadToken, map: LoadedMap, tier: number | null): Promise<void> {
+  private async finishLoad(token: LoadToken, map: LoadedMap, tier: number | null, req: LoadRequest | null = null): Promise<void> {
     await this.uploadMap(token, map);
     const s = new Session(this, map, tier);
+    s.request = req;
     this._session = s;
     this.input.releaseAll();
     this.dispatcher.releaseAll();
+    // map logic switching the player's fog (SetFogController) drives the renderer's world fog
+    const ents = s.entities as GameEntities & { onFogController?: ((fog: FogDef) => void) | null };
+    if ('onFogController' in ents) {
+      ents.onFogController = (fog) => {
+        if (this._session === s) this.renderer.setFog?.(fog);
+      };
+    }
     try {
       s.entities.spawn();
     } catch (e) {
@@ -878,15 +1100,19 @@ export class Game implements GameApi, CommandContext {
     this.acc = 0;
     this.lastFrameMs = 0;
     this.input.discardMouse();
-    this.ui.setLoading({ phase: 'done', message: 'Ready' });
-    this.emitEvent('loadprogress', { phase: 'done', message: 'Ready' });
+    const ready = this.loadReport(token, { phase: 'done', message: 'Ready' });
+    this.ui.setLoading(ready);
+    this.emitEvent('loadprogress', ready);
     this.ui.setLoading(null);
     this.setState('playing');
     // show the HUD now (not next frame): the chat feed lives in it and the welcome lines follow
     this.ui.updateHud(this.refreshHud());
     this.emitEvent('mapload', map.name);
     for (const w of map.warnings ?? []) conPrint(`${map.name}: ${w}`, 'warn');
-    conPrint(`Map ${map.name} loaded: ${map.entities.length} entities, ${map.models.length} brush models, zones: ${zones.source} (${zones.zones.length})`, 'info');
+    conPrint(
+      `Map ${map.name} loaded: ${map.entities.length} entities, ${map.models.length} brush models, zones: ${zoneSourceText(map, zones.source)} (${zones.zones.length})`,
+      'info',
+    );
     welcomeMessage(this, s);
   }
 
@@ -896,22 +1122,34 @@ export class Game implements GameApi, CommandContext {
     console.error(e);
     const msg = describeLoadError(e);
     conPrint(`Failed to load ${token.name}: ${msg}`, 'error');
-    this.ui.chat([...CHAT_PREFIX, { text: `Couldn't load ${token.name}: ${msg}`, color: 'lightred' }]);
     this.currentLoad = null;
-    this.unloadSession();
     this.loadingName = null;
-    this.ui.setLoading({ phase: 'error', message: msg });
-    this.emitEvent('loadprogress', { phase: 'error', message: msg });
+    if (this.suspended) {
+      // the map that was being played comes back (CS:GO keeps you on the server when a map change fails)
+      const report = this.loadReport(token, { phase: 'error', message: msg, recovered: true });
+      this.ui.setLoading(null);
+      this.emitEvent('loadprogress', report);
+      this.restoreSuspended();
+      this.ui.chat([...CHAT_PREFIX, { text: `Couldn't load ${token.name}: ${msg}`, color: 'lightred' }]);
+      return;
+    }
+    this.ui.chat([...CHAT_PREFIX, { text: `Couldn't load ${token.name}: ${msg}`, color: 'lightred' }]);
+    this.unloadSession();
+    const report = this.loadReport(token, { phase: 'error', message: msg });
+    this.ui.setLoading(report);
+    this.emitEvent('loadprogress', report);
     this.setState('menu');
   }
 
-  private unloadSession(): void {
-    const s = this._session;
+  /** Unloads a session (default: the current one) and clears what it showed in the renderer. */
+  private unloadSession(s: Session | null = this._session): void {
     if (!s) return;
-    this.spec = null;
+    if (s === this._session) {
+      this.spec = null;
+      installZoneEditor(null);
+      this._session = null;
+    }
     s.dispose();
-    installZoneEditor(null);
-    this._session = null;
     this.dispatcher.releaseAll();
     this.input.releaseAll();
     try {
@@ -1039,10 +1277,10 @@ export class Game implements GameApi, CommandContext {
 
   private onCvarChanged(c: Cvar, _old: string): void {
     this.cvarsChanged = true;
-    const field = RENDER_CVARS[c.name];
-    if (field) {
+    const rs = renderSettingsForCvar(c);
+    if (rs) {
       try {
-        this.renderer.setSettings({ [field]: renderSettingValue(field, c) } as Partial<RenderSettings>);
+        this.renderer.setSettings(rs);
       } catch (e) {
         console.error(e);
       }
@@ -1119,10 +1357,16 @@ export class Game implements GameApi, CommandContext {
       };
       window.addEventListener('pagehide', flush);
       window.addEventListener('beforeunload', beforeUnload);
+      // a hidden tab gets no frames: a ranked run can't go on (and the hidden time is never caught up)
+      const visibility = () => this.onVisibilityChange(typeof document !== 'undefined' && document.hidden);
+      if (typeof document !== 'undefined') document.addEventListener('visibilitychange', visibility);
       this.windowCleanups.push(
         () => window.removeEventListener('resize', resize),
         () => window.removeEventListener('pagehide', flush),
         () => window.removeEventListener('beforeunload', beforeUnload),
+        () => {
+          if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', visibility);
+        },
       );
       resize();
       installDebugApi(this);
@@ -1134,7 +1378,7 @@ export class Game implements GameApi, CommandContext {
     }
     if (opts.bsp) void this.loadMapUrl(opts.bsp);
     else if (opts.builtin) void this.loadBuiltinMap(opts.builtin);
-    else if (opts.map) void this.loadMapByName(opts.map);
+    else if (opts.map) void this.loadMapByName(opts.map, false);
   }
 
   /** Stops the loop and input listeners (tests, hot reload). */
@@ -1171,7 +1415,8 @@ export class Game implements GameApi, CommandContext {
       this.nextFrameMs = Math.max(this.nextFrameMs + period, nowMs - period);
     } else this.nextFrameMs = nowMs;
     if (this.startMs < 0) this.startMs = nowMs;
-    let dt = this.lastFrameMs > 0 ? (nowMs - this.lastFrameMs) / 1000 : 0;
+    const gapMs = this.lastFrameMs > 0 ? nowMs - this.lastFrameMs : 0;
+    let dt = gapMs / 1000;
     if (!(dt > 0)) dt = 0;
     if (dt > MAX_FRAME_DT) dt = MAX_FRAME_DT;
     this.lastFrameMs = nowMs;
@@ -1181,7 +1426,10 @@ export class Game implements GameApi, CommandContext {
       this.emitEvent('cvarschanged');
     }
     const s = this._session;
-    if (s && this._state === 'playing') this.simulateFrame(s, dt);
+    const live = !!s && this.isLive(s);
+    // no frames for over a second (a debugger, a frozen or throttled page): the world stood still mid-run
+    if (s && live && gapMs > STALL_MS && !this.autotest) s.timer.interruptRun?.();
+    if (s && live) this.simulateFrame(s, dt);
     else {
       this.input.discardMouse();
       this.dispatcher.afterTick();
@@ -1189,7 +1437,7 @@ export class Game implements GameApi, CommandContext {
     const hud = this.refreshHud();
     if (s && (this._state === 'playing' || this._state === 'paused')) this.renderFrame(s, hud);
     this.ui.updateHud(hud);
-    if (s && this._state === 'playing') {
+    if (s && live && this._session === s) {
       const v = this.spec ? this.specVel : s.player.velocity;
       const speed = Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
       this.sound.setWind(speed, this.spec ? true : !s.player.onGround);
@@ -1216,7 +1464,8 @@ export class Game implements GameApi, CommandContext {
       this.input.tickAngles(this.tickAngles, i, n, r.acc, ti, span);
       this.tickSession(s, this.tickAngles);
       this.dispatcher.afterTick();
-      if (this._session !== s || this._state !== 'playing' || this.spec) break;
+      // (a run that ends while the pause menu is open freezes the world from the next tick on)
+      if (this._session !== s || !this.isLive(s) || this.spec) break;
     }
     this.alpha = ti > 0 ? Math.min(1, Math.max(0, this.acc / ti)) : 1;
     this.input.endFrame();
@@ -1246,6 +1495,16 @@ export class Game implements GameApi, CommandContext {
     s.advanceClock(ti);
     v3copy(s.prevOrigin, ps.origin);
     s.prevViewOffset = ps.viewOffsetZ;
+    const movers = s.entities as GameEntities & Partial<MoverHooks>;
+
+    // 0. moving brushes (doors, rotators, trains) move first: they carry riders and push the player
+    if (typeof movers.tickMovers === 'function') {
+      try {
+        movers.tickMovers();
+      } catch (e) {
+        this.systemError('movers', e);
+      }
+    }
 
     // 1. usercmd from the +commands
     const noclip = ps.moveType === MOVETYPE_NOCLIP || ps.moveType === MOVETYPE_OBSERVER;
@@ -1259,7 +1518,11 @@ export class Game implements GameApi, CommandContext {
     s.timer.recordInput(cmd.sidemove, cmd.forwardmove, yawDelta, ps.onGround, s.lastJumped);
     // 3. movement
     const oldButtons = ps.oldButtons;
+    const wasOnGround = ps.onGround;
+    const wasGroundModel = ps.groundModel;
     playerMove(ps, cmd, s.collision, vars, ti, s.ev);
+    // leaving / landing on a moving brush keeps world momentum (ground entity velocity)
+    if (typeof movers.afterPlayerMove === 'function') movers.afterPlayerMove(wasOnGround, wasGroundModel);
     s.lastJumped = s.ev.jumped;
     if (cmd.buttons & IN_USE && !(oldButtons & IN_USE) && typeof s.entities.pressUse === 'function') {
       angleVectors(cmd.viewangles, this.fwd);
@@ -1495,17 +1758,26 @@ export class Game implements GameApi, CommandContext {
     }
     this.updateGhost(s, hud);
     this.updateDebugBoxes(s);
+    // moving brushes and the props on them, between the last two ticks like the player
+    const movers = s.entities as GameEntities & Partial<MoverHooks>;
+    if (typeof movers.applyRenderTransforms === 'function') {
+      try {
+        movers.applyRenderTransforms(this.alpha);
+      } catch (e) {
+        this.systemError('movers', e);
+      }
+    }
     this.renderer.render(view);
   }
 
   private updateGhost(s: Session, hud: HudState): void {
     const want = (console_.getCvar('surf_ghost')?.num ?? 1) !== 0 && (console_.getCvar('surf_hide')?.num ?? 0) === 0 && !this.spec;
     let ghost: GhostState | null = null;
-    if (want) {
-      const st = hud.timer.state;
+    // the ghost runs with the run clock: hidden in the start zone (it would stand in your face while you
+    // prestrafe), from the tick that leaves it at the same run time as you
+    if (want && hud.timer.state === 'running') {
       // the rendered player is between the previous and the current tick: (runTicks - 1 + alpha) ticks into the run
-      if (st === 'running') ghost = s.replay.ghostAt(Math.max(0, hud.timer.time - (1 - this.alpha) * tickInterval()));
-      else if (st === 'startzone') ghost = s.replay.ghostAt(0);
+      ghost = s.replay.ghostAt(Math.max(0, hud.timer.time - (1 - this.alpha) * tickInterval()));
     }
     if (ghost) {
       this.renderer.setGhosts([ghost]);
