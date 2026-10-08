@@ -21,8 +21,10 @@
 //                   parent; inner nodes reference the convex hull of their subtree, leaves the real ledges.
 //   text          keyvalues blocks after the last solid (solid { "index" .. "surfaceprop" .. } editparams {...})
 //
-// IVP space is metric and Y-down: Source (x, y, z) = (ivp.x, ivp.z, -ivp.y) / 0.0254 (verified against the
-// .mdl hull bounds of every packed model of the test maps).
+// IVP space is metric and Y-down: Source (x, y, z) = (ivp.x, ivp.z, -ivp.y) / 0.0254. Checked against the .mdl
+// hull boxes of the 202 models packed in the test maps: of the 48 axis mappings this one fits the most (99 equal
+// boxes, the next best 59; 193 collision boxes lie inside their hull box, the rest are collision meshes made
+// bigger than the visible model).
 //
 // Prop collision (buildPropCollision) follows the engine's traces: a prop_static whose solid type is
 // SOLID_VPHYSICS (6) collides with the convex pieces of the first solid of its model's .phy, placed by the prop's
@@ -36,10 +38,10 @@
 import type { QAngle } from '../core/angles';
 import { Vec3, v3 } from '../core/vec3';
 import type { MapEntity } from '../map/types';
-import { brushFromBox, brushFromPlanes, brushWindings } from '../physics/brushbuild';
+import { brushFromBox, brushWindings } from '../physics/brushbuild';
 import { Brush, BrushSide, CONTENTS_SOLID, Plane } from '../physics/types';
 import { normalizePakPath } from './pakfile';
-import { PROP_COLLISION_MODEL, parseStaticPropLump, readStudioHeader, StudioHeader } from './props';
+import { PROP_COLLISION_MODEL, parseStaticPropLump, readStudioHeader } from './props';
 import type { BspFile } from './types';
 
 export { PROP_COLLISION_MODEL };
@@ -412,11 +414,6 @@ function snap(c: number): number {
   return c;
 }
 
-/** Brush of a convex piece in model space (bevels for the model axes), or null when degenerate. */
-export function convexBrush(c: PhyConvex, contents = CONTENTS_SOLID, model = 0): Brush | null {
-  return brushFromPlanes(convexPlanes(c), contents, model);
-}
-
 // ------------------------------------------------------------------------------------------ placement
 
 /**
@@ -733,7 +730,6 @@ export interface ModelFileSource {
 
 /** Collision data of one model, shared by all its placements. */
 export interface ModelCollision {
-  header: StudioHeader | null;
   /** Convex pieces of the first collide solid; null without a usable .phy. */
   convexes: CachedConvex[] | null;
   /** The model bounds (studio hull box, else the view box), model space; null when empty. */
@@ -934,7 +930,7 @@ export class PropCollisionBuilder {
         }
       }
     }
-    return { header, convexes, boxMin, boxMax, contents };
+    return { convexes, boxMin, boxMax, contents };
   }
 
   add(p: SolidPropPlacement): void {
@@ -1001,9 +997,9 @@ function boxPlanes(mins: Vec3, maxs: Vec3): Plane[] {
 }
 
 /**
- * Collision brushes (model 0) for every solid prop placement of the map (see solidPropPlacements and
- * PropCollisionBuilder), model files read from `sources` in order (the pakfile first), then
- * opts.extraSources. Never throws.
+ * Collision brushes (brush model PROP_COLLISION_MODEL) for every solid prop placement of the map (see
+ * solidPropPlacements and PropCollisionBuilder), model files read from `sources` in order (the pakfile first),
+ * then opts.extraSources. Never throws.
  */
 export function buildPropCollision(bsp: BspFile, entities: MapEntity[], sources: ModelFileSource[], opts: PropCollisionOptions = {}): PropCollision {
   const all = [...sources, ...(opts.extraSources ?? [])];
