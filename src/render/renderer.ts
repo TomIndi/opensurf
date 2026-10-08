@@ -74,6 +74,7 @@ export const DEFAULT_SETTINGS: RenderSettings = {
   renderScale: 1,
   fogEnabled: true,
   drawSky3D: true,
+  zoneStyle: 'floor',
 };
 
 const FAR = 1 << 20;
@@ -464,12 +465,15 @@ export class Renderer implements RendererApi {
     for (const k of Object.keys(s) as (keyof RenderSettings)[]) {
       const v = s[k];
       if (v === undefined || v === null) continue;
-      if (typeof DEFAULT_SETTINGS[k] === 'boolean') (this.settings as unknown as Record<string, boolean>)[k] = !!v;
+      if (k === 'zoneStyle') {
+        if (v === 'floor' || v === 'box') this.settings.zoneStyle = v;
+      } else if (typeof DEFAULT_SETTINGS[k] === 'boolean') (this.settings as unknown as Record<string, boolean>)[k] = !!v;
       else if (typeof v === 'number' && Number.isFinite(v)) (this.settings as unknown as Record<string, number>)[k] = v;
     }
     const st = this.settings;
     this.shared.uFullbright.value = st.fullbright ? 1 : 0;
     this.shared.uBrightness.value = Math.max(0.05, Math.min(4, st.brightness));
+    this.zones.setStyle(st.zoneStyle);
     this.zones.setEnabled(st.drawZones);
     if (st.wireframe !== prev.wireframe) this.materials?.setWireframe(st.wireframe);
     if (st.maxAnisotropy !== prev.maxAnisotropy) this.textures?.setAnisotropy(st.maxAnisotropy);

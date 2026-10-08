@@ -5,9 +5,32 @@ import type { ZoneDef } from '../src/map/types';
 import { brushFromBox } from '../src/physics/brushbuild';
 import { CONTENTS_PLAYERCLIP, CONTENTS_SOLID } from '../src/physics/types';
 import { BOX_EDGES, ClipBrushes, DebugBoxes, clipBrushGeometry, writeBoxLines } from '../src/render/debugdraw';
-import { GHOST_DUCK_HEIGHT, GHOST_STAND_HEIGHT, Ghosts, TRAIL_SECONDS, ghostPose } from '../src/render/ghosts';
+import {
+  GHOST_DUCK_HEIGHT,
+  GHOST_FADE_FAR,
+  GHOST_FADE_NEAR,
+  GHOST_LABEL_HIDE,
+  GHOST_STAND_HEIGHT,
+  Ghosts,
+  TRAIL_SECONDS,
+  ghostDistance,
+  ghostFade,
+  ghostLabelFade,
+  ghostPose,
+} from '../src/render/ghosts';
 import { srgbToLinear } from '../src/render/worldmaterials';
-import { BEAM_BOTTOM, BEAM_POST, BEAM_TOP, INACTIVE_GROUP_DIM, ZoneBeams, beamGeometry, zoneColor, zoneSegments } from '../src/render/zones';
+import {
+  BEAM_BOTTOM,
+  BEAM_GLOW,
+  BEAM_POST,
+  BEAM_TOP,
+  FLOOR_POST_HEIGHT,
+  INACTIVE_GROUP_DIM,
+  ZoneBeams,
+  beamGeometry,
+  zoneColor,
+  zoneSegments,
+} from '../src/render/zones';
 
 const zone = (type: ZoneDef['type'], group = 0, mins = [0, 0, 0], maxs = [100, 50, 128]): ZoneDef => ({
   type,
@@ -37,8 +60,38 @@ describe('zone beams', () => {
     expect(zoneColor('unknown-type')).toEqual(o);
   });
 
-  it('12 segments per box: bright floor rectangle, fading posts, faint top', () => {
-    const segs = zoneSegments([zone('start')], 0);
+  it("default 'floor' style: a bright rectangle just above the floor, its soft glow and short posts fading out - no top edges", () => {
+    const segs = zoneSegments([zone('start', 0, [0, 0, 0], [100, 50, 128])], 0);
+    expect(segs).toHaveLength(12);
+    expect(zoneSegments([zone('start')], 0, 'floor')).toEqual(segs);
+    const flat = segs.filter((s) => s.a[2] === s.b[2]);
+    const beams = flat.filter((s) => !s.soft);
+    const glow = flat.filter((s) => s.soft);
+    const posts = segs.filter((s) => s.a[2] !== s.b[2]);
+    expect(beams).toHaveLength(4);
+    expect(glow).toHaveLength(4);
+    expect(posts).toHaveLength(4);
+    // everything stays near the floor: nothing at eye level (64) or at the zone's top (128)
+    for (const s of segs) expect(Math.max(s.a[2], s.b[2])).toBeLessThan(48);
+    for (const s of flat) {
+      expect(s.a[2]).toBeGreaterThan(0);
+      expect(s.a[2]).toBeLessThanOrEqual(2);
+    }
+    expect(beams[0].intensity).toBe(BEAM_BOTTOM);
+    expect(glow[0].intensity).toBe(BEAM_GLOW);
+    expect(glow[0].width).toBeGreaterThan(beams[0].width * 3);
+    expect(posts[0].b[2] - posts[0].a[2]).toBeCloseTo(FLOOR_POST_HEIGHT, 6);
+    expect(posts[0].fade).toBe(0);
+    // the rectangle is closed
+    const pts = beams.flatMap((s) => [s.a.join(), s.b.join()]);
+    for (const p of pts) expect(pts.filter((q) => q === p)).toHaveLength(2);
+    // a zone lower than the posts: posts end at its top
+    const low = zoneSegments([zone('start', 0, [0, 0, 0], [100, 50, 20])], 0).filter((s) => s.a[2] !== s.b[2]);
+    for (const p of low) expect(p.b[2]).toBeCloseTo(20, 6);
+  });
+
+  it("'box' style: 12 segments per box: bright floor rectangle, fading posts, faint top", () => {
+    const segs = zoneSegments([zone('start')], 0, 'box');
     expect(segs).toHaveLength(12);
     const bottom = segs.filter((s) => s.a[2] === s.b[2] && s.a[2] < 10);
     const top = segs.filter((s) => s.a[2] === s.b[2] && s.a[2] > 100);
@@ -59,13 +112,16 @@ describe('zone beams', () => {
   });
 
   it('other courses are dimmer; flat and broken zones are handled', () => {
-    const segs = zoneSegments([zone('start', 0), zone('start', 2)], 0);
-    expect(segs[12].intensity).toBeCloseTo(BEAM_BOTTOM * INACTIVE_GROUP_DIM, 6);
-    expect(zoneSegments([zone('end', 0, [0, 0, 0], [10, 10, 0])], 0)).toHaveLength(4);
-    expect(zoneSegments([zone('end', 0, [NaN, 0, 0]), null as unknown as ZoneDef], 0)).toHaveLength(0);
-    // swapped mins/maxs still give a proper box
-    const sw = zoneSegments([zone('stage', 0, [100, 50, 128], [0, 0, 0])], 0);
-    expect(sw).toHaveLength(12);
+    for (const style of ['floor', 'box'] as const) {
+      const segs = zoneSegments([zone('start', 0), zone('start', 2)], 0, style);
+      expect(segs[12].intensity).toBeCloseTo(BEAM_BOTTOM * INACTIVE_GROUP_DIM, 6);
+      // a flat zone: just the rectangle (and its glow)
+      expect(zoneSegments([zone('end', 0, [0, 0, 0], [10, 10, 0])], 0, style)).toHaveLength(style === 'box' ? 4 : 8);
+      expect(zoneSegments([zone('end', 0, [NaN, 0, 0]), null as unknown as ZoneDef], 0, style)).toHaveLength(0);
+      // swapped mins/maxs still give a proper box
+      const sw = zoneSegments([zone('stage', 0, [100, 50, 128], [0, 0, 0])], 0, style);
+      expect(sw).toHaveLength(12);
+    }
   });
 
   it('beam geometry: 4 vertices / 6 indices per segment with both endpoints', () => {
@@ -74,6 +130,10 @@ describe('zone beams', () => {
     expect(g.getAttribute('aStart').count).toBe(segs.length * 4);
     expect(g.index!.count).toBe(segs.length * 6);
     expect(g.getAttribute('aCorner').getX(2)).toBe(1);
+    // glow bands are flagged for the shader (no bright core)
+    const soft = g.getAttribute('aSoft');
+    expect(soft.count).toBe(segs.length * 4);
+    segs.forEach((sg, i) => expect(soft.getX(i * 4)).toBe(sg.soft ?? 0));
     expect(g.boundingSphere!.radius).toBeGreaterThan(50);
     expect(beamGeometry([]).index!.count).toBe(0);
   });
@@ -94,6 +154,31 @@ describe('zone beams', () => {
     expect(zb.mesh.visible).toBe(true);
     zb.set([], 0);
     expect(zb.mesh.visible).toBe(false);
+    zb.dispose();
+  });
+
+  it("ZoneBeams: 'floor' by default, 'box' on request (r_drawzones 2), rebuilt when the style changes", () => {
+    const zb = new ZoneBeams({ value: 0 }, { value: 0.001 });
+    expect(zb.zoneStyle).toBe('floor');
+    zb.set([zone('start')], 0);
+    const g1 = zb.mesh.geometry;
+    const topZ = (): number => {
+      const e = zb.mesh.geometry.getAttribute('aEnd');
+      let m = -Infinity;
+      for (let i = 0; i < e.count; i++) m = Math.max(m, e.getZ(i));
+      return m;
+    };
+    expect(topZ()).toBeLessThan(64);
+    zb.setStyle('box');
+    expect(zb.zoneStyle).toBe('box');
+    expect(zb.mesh.geometry).not.toBe(g1);
+    expect(topZ()).toBeCloseTo(128, 6);
+    const g2 = zb.mesh.geometry;
+    zb.setStyle('box');
+    expect(zb.mesh.geometry).toBe(g2);
+    zb.setStyle(undefined);
+    expect(zb.zoneStyle).toBe('floor');
+    expect(topZ()).toBeLessThan(64);
     zb.dispose();
   });
 });
@@ -141,6 +226,47 @@ describe('ghosts', () => {
     expect(pb.group.visible).toBe(false);
     g.dispose();
     expect(g.count).toBe(0);
+  });
+
+  it('fades out near the eye and hides the name tag up close (the PB ghost standing in your face at the start)', () => {
+    expect(ghostFade(0)).toBe(0);
+    expect(ghostFade(GHOST_FADE_NEAR)).toBe(0);
+    expect(ghostFade(GHOST_FADE_FAR)).toBe(1);
+    expect(ghostFade(1e4)).toBe(1);
+    const mid = ghostFade((GHOST_FADE_NEAR + GHOST_FADE_FAR) / 2);
+    expect(mid).toBeGreaterThan(0.3);
+    expect(mid).toBeLessThan(0.7);
+    expect(ghostLabelFade(GHOST_LABEL_HIDE)).toBe(0);
+    expect(ghostLabelFade(GHOST_LABEL_HIDE - 1)).toBe(0);
+    expect(ghostLabelFade(400)).toBe(1);
+    // distance to the ghost's axis: an eye at head height beside it, or high above it
+    expect(ghostDistance({ x: 30, y: 40, z: 64 }, { x: 0, y: 0, z: 0 }, 72)).toBeCloseTo(50, 6);
+    expect(ghostDistance({ x: 0, y: 0, z: 172 }, { x: 0, y: 0, z: 0 }, 72)).toBeCloseTo(100, 6);
+
+    const g = new Ghosts({ value: 0 });
+    const at = (x: number) => {
+      g.set([ghost({ origin: { x, y: 0, z: 0 } })]);
+      g.update(1, new Vector3(0, 0, 64), 0.001);
+      return g.get('pb')!;
+    };
+    let s = at(40);
+    expect(s.fade).toBe(0);
+    expect(s.bodyVisible).toBe(false);
+    expect(s.labelVisible).toBe(false);
+    s = at(100);
+    expect(s.fade).toBeGreaterThan(0);
+    expect(s.fade).toBeLessThan(1);
+    expect(s.bodyVisible).toBe(true);
+    expect(s.labelVisible).toBe(false);
+    s = at(600);
+    expect(s.fade).toBe(1);
+    expect(s.labelFade).toBe(1);
+    expect(s.labelVisible).toBe(true);
+    // a ghost without a name never shows a tag
+    g.set([ghost({ name: '', origin: { x: 600, y: 0, z: 0 } })]);
+    g.update(1, new Vector3(0, 0, 64), 0.001);
+    expect(g.get('pb')!.labelVisible).toBe(false);
+    g.dispose();
   });
 
   it('the trail keeps ~1.5 s of samples, restarts after teleports and hides when off', () => {

@@ -34,6 +34,37 @@ const TRAIL_HALF_WIDTH = 5;
 const TRAIL_HEIGHT = 36;
 /** A jump larger than this between frames is a teleport: the trail restarts. */
 const TRAIL_TELEPORT = 640;
+/**
+ * Near the camera the ghost fades out (your PB replay standing in the spawn, right in your face while you
+ * prestrafe): invisible within GHOST_FADE_NEAR units of the eye, fully visible from GHOST_FADE_FAR.
+ */
+export const GHOST_FADE_NEAR = 64;
+export const GHOST_FADE_FAR = 256;
+/** The name tag is hidden within GHOST_LABEL_HIDE units and fades in up to GHOST_LABEL_FULL. */
+export const GHOST_LABEL_HIDE = 128;
+export const GHOST_LABEL_FULL = 192;
+const TRAIL_OPACITY = 0.9;
+
+function smoothstep(e0: number, e1: number, x: number): number {
+  const t = Math.max(0, Math.min(1, (x - e0) / (e1 - e0)));
+  return t * t * (3 - 2 * t);
+}
+
+/** Distance from the eye to a ghost standing at `feet` (to the nearest point of its vertical axis). */
+export function ghostDistance(cam: { x: number; y: number; z: number }, feet: { x: number; y: number; z: number }, height: number): number {
+  const z = Math.max(feet.z, Math.min(feet.z + height, cam.z));
+  return Math.hypot(cam.x - feet.x, cam.y - feet.y, cam.z - z);
+}
+
+/** Opacity of a ghost body (and trail) at distance `d` from the eye. */
+export function ghostFade(d: number): number {
+  return smoothstep(GHOST_FADE_NEAR, GHOST_FADE_FAR, d);
+}
+
+/** Opacity of a ghost's name tag at distance `d` from the eye (0 = hidden). */
+export function ghostLabelFade(d: number): number {
+  return d <= GHOST_LABEL_HIDE ? 0 : smoothstep(GHOST_LABEL_HIDE, GHOST_LABEL_FULL, d);
+}
 
 /** Body + head layout for a pose (world units above the feet). */
 export function ghostPose(ducked: boolean): { bodyRadius: number; bodyLength: number; bodyCenter: number; headCenter: number; headRadius: number; height: number } {
@@ -72,6 +103,10 @@ class GhostObject {
   private labelAspect = 4;
   private name = '';
   private ducked = false;
+  private height = GHOST_STAND_HEIGHT;
+  /** Current distance fade (1 = fully visible), for tests/diagnostics. */
+  fade = 1;
+  labelFade = 1;
   /** Ring buffer of trail samples (preallocated: no per-frame allocation). */
   private readonly ring: TrailSample[] = Array.from({ length: TRAIL_MAX }, () => ({ x: 0, y: 0, z: 0, t: 0 }));
   private ringHead = 0; // index of the oldest sample
@@ -130,7 +165,7 @@ class GhostObject {
       glslVersion: GLSL3,
       vertexShader: TRAIL_VERTEX,
       fragmentShader: TRAIL_FRAGMENT,
-      uniforms: { uColor: { value: new Vector3(0.5, 0.8, 1) }, uOpacity: { value: 0.9 } },
+      uniforms: { uColor: { value: new Vector3(0.5, 0.8, 1) }, uOpacity: { value: TRAIL_OPACITY } },
       side: DoubleSide,
     });
     this.trailMaterial.transparent = true;
@@ -167,6 +202,7 @@ class GhostObject {
       this.head.position.set(0, 0, p.headCenter);
       this.label.position.set(0, 0, p.height + 6);
       (this.material.uniforms.uHeight as U<number>).value = p.height;
+      this.height = p.height;
     }
     const name = s.name ?? '';
     if (name !== this.name) {
@@ -221,11 +257,22 @@ class GhostObject {
     this.labelAspect = canvas.width / canvas.height;
   }
 
-  /** Per-frame: trail samples, label size. */
+  /** Per-frame: distance fade, trail samples, label size. */
   update(time: number, cam: Vector3, pixelScale: number): void {
     const s = this.state;
     if (!s) return;
     const visible = this.group.visible;
+    // fade out near the eye (body, trail) and hide the name tag up close
+    const dist = ghostDistance(cam, this.group.position, this.height);
+    this.fade = ghostFade(dist);
+    this.labelFade = ghostLabelFade(dist);
+    (this.material.uniforms.uOpacity as U<number>).value = this.fade;
+    (this.trailMaterial.uniforms.uOpacity as U<number>).value = TRAIL_OPACITY * this.fade;
+    const bodyOn = this.fade > 0.003;
+    this.body.visible = bodyOn;
+    this.head.visible = bodyOn;
+    this.labelMaterial.opacity = this.labelFade;
+    this.label.visible = this.name.length > 0 && this.labelFade > 0.003;
     // label: ~16 world units tall up close, never smaller than ~14 px
     if (this.label.visible) {
       const d = cam.distanceTo(this.group.position);
@@ -233,7 +280,7 @@ class GhostObject {
       this.label.scale.set(h * this.labelAspect, h, 1);
       this.label.updateMatrixWorld();
     }
-    this.updateTrail(time, cam, visible && !!s.trail);
+    this.updateTrail(time, cam, visible && !!s.trail && bodyOn);
   }
 
   private sample(i: number): TrailSample {
@@ -402,9 +449,19 @@ export class Ghosts {
   }
 
   /** For tests/diagnostics. */
-  get(id: string): { group: Group; trailSamples: number; trailVisible: boolean } | null {
+  get(id: string): { group: Group; trailSamples: number; trailVisible: boolean; fade: number; labelFade: number; bodyVisible: boolean; labelVisible: boolean } | null {
     const o = this.objects.get(id);
-    return o ? { group: o.group, trailSamples: o.trailSamples, trailVisible: o.trail.visible } : null;
+    return o
+      ? {
+          group: o.group,
+          trailSamples: o.trailSamples,
+          trailVisible: o.trail.visible,
+          fade: o.fade,
+          labelFade: o.labelFade,
+          bodyVisible: o.body.visible,
+          labelVisible: o.label.visible,
+        }
+      : null;
   }
 
   dispose(): void {

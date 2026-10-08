@@ -7,6 +7,7 @@
 //   spawn=N                  use spawn point N
 //   time=T                   fixed animation time (deterministic screenshots)
 //   fullbright=1 fog=0 sky3d=0 wire=1 scale=0.5 aniso=N brightness=B zones=0 clips=1   settings
+//   zonestyle=floor|box      zone beams: floor outline (default) or the full box
 //   demo=1                   demo zones + a ghost (with trail) in front of the camera
 //   noext=EXT_a,EXT_b        pretend extensions are missing (fallback paths)
 //   ds=auto|0|1              back-face culling of BSP surfaces (default auto: see auditFaceOrientation)
@@ -70,6 +71,7 @@ renderer.setSettings({
   brightness: num('brightness', 1),
   drawZones: flag('zones', true),
   drawClips: flag('clips', false),
+  zoneStyle: params.get('zonestyle') === 'box' ? 'box' : 'floor',
 });
 
 const view: ViewState = { origin: { x: 0, y: 0, z: 64 }, angles: { pitch: 0, yaw: 0, roll: 0 }, fov: num('fov', 90), time: 0 };

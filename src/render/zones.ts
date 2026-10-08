@@ -1,5 +1,8 @@
-// SurfTimer-style zone beams: every zone is drawn as glowing beams along its box edges - a bright rectangle
-// on the floor, corner posts fading upward and a faint top - in the zone type's colour, gently pulsing.
+// SurfTimer-style zone beams in the zone type's colour, gently pulsing. Two styles (r_drawzones 1 / 2):
+//   'floor' (default) - the look of zone beams on CS:GO surf servers: a bright rectangle just above the zone's
+//            floor with a soft glow, and short corner posts fading upward. Nothing crosses the view at eye
+//            level in a spawn room.
+//   'box'   - the whole box: the floor rectangle, corner posts fading upward and a faint top.
 // Zones of other courses (bonuses while on the main course and vice versa) are dimmer.
 import { BufferAttribute, BufferGeometry, CustomBlending, GLSL3, Mesh, OneFactor, ShaderMaterial, Sphere, Vector3 } from 'three';
 import type { ZoneDef, ZoneType } from '../map/types';
@@ -35,7 +38,13 @@ export interface BeamSegment {
   /** Intensity factor at b (posts fade upward). */
   fade: number;
   width: number;
+  /** 1: a soft glow band (no bright core) around a beam; 0 / absent: a beam. */
+  soft?: number;
 }
+
+/** How zones are drawn (RenderSettings.zoneStyle): outline on the zone's floor, or the whole box. */
+export type ZoneStyle = 'floor' | 'box';
+export const DEFAULT_ZONE_STYLE: ZoneStyle = 'floor';
 
 /** Intensities of the parts of a zone box. */
 export const BEAM_BOTTOM = 1.0;
@@ -45,23 +54,36 @@ export const BEAM_TOP = 0.22;
 export const INACTIVE_GROUP_DIM = 0.35;
 /** Beam half-width in world units (SurfTimer beams are ~1-2 units wide). */
 export const BEAM_HALF_WIDTH = 1.1;
+/** Floor style: how far above the zone's bottom the rectangle runs (zones usually sit on a floor). */
+export const FLOOR_BEAM_LIFT = 1;
+/** Floor style: the soft glow band around the floor rectangle. */
+export const BEAM_GLOW = 0.3;
+export const BEAM_GLOW_HALF_WIDTH = 7;
+/** Floor style: corner posts this tall (well below eye level, 64), fading out upward. */
+export const FLOOR_POST_HEIGHT = 40;
 
 function finiteBox(z: ZoneDef): boolean {
   const v = [z.mins?.x, z.mins?.y, z.mins?.z, z.maxs?.x, z.maxs?.y, z.maxs?.z];
   return v.every((x) => typeof x === 'number' && Number.isFinite(x));
 }
 
-/** The beam segments of a set of zones (12 per zone: 4 bottom, 4 posts, 4 top). */
-export function zoneSegments(zones: readonly ZoneDef[], activeGroup: number): BeamSegment[] {
+/**
+ * The beam segments of a set of zones. 'box': 12 per zone (4 bottom, 4 posts, 4 top). 'floor' (default): 12
+ * per zone - the 4 bottom beams, their 4 soft glow bands and 4 short posts fading out upward (no top edges).
+ */
+export function zoneSegments(zones: readonly ZoneDef[], activeGroup: number, style: ZoneStyle = DEFAULT_ZONE_STYLE): BeamSegment[] {
   const out: BeamSegment[] = [];
+  const box = style === 'box';
   for (const z of zones) {
     if (!z || !finiteBox(z)) continue;
     const x0 = Math.min(z.mins.x, z.maxs.x);
     const x1 = Math.max(z.mins.x, z.maxs.x);
     const y0 = Math.min(z.mins.y, z.maxs.y);
     const y1 = Math.max(z.mins.y, z.maxs.y);
-    const z0 = Math.min(z.mins.z, z.maxs.z) + 0.5; // just above the floor the zone usually sits on
+    const zb = Math.min(z.mins.z, z.maxs.z);
     const z1 = Math.max(z.maxs.z, z.mins.z);
+    // just above the floor the zone usually sits on
+    const z0 = Math.min(z1, zb + (box ? 0.5 : FLOOR_BEAM_LIFT));
     const srgb = zoneColor(z.type);
     const color: [number, number, number] = [srgbToLinear(srgb[0]), srgbToLinear(srgb[1]), srgbToLinear(srgb[2])];
     const dim = (z.group ?? 0) === activeGroup ? 1 : INACTIVE_GROUP_DIM;
@@ -75,6 +97,21 @@ export function zoneSegments(zones: readonly ZoneDef[], activeGroup: number): Be
       const [ax, ay] = corners[i];
       const [bx, by] = corners[(i + 1) % 4];
       out.push({ a: [ax, ay, z0], b: [bx, by, z0], color, intensity: BEAM_BOTTOM * dim, fade: 1, width: BEAM_HALF_WIDTH });
+    }
+    if (!box) {
+      for (let i = 0; i < 4; i++) {
+        const [ax, ay] = corners[i];
+        const [bx, by] = corners[(i + 1) % 4];
+        out.push({ a: [ax, ay, z0], b: [bx, by, z0], color, intensity: BEAM_GLOW * dim, fade: 1, width: BEAM_GLOW_HALF_WIDTH, soft: 1 });
+      }
+      const top = Math.min(z1, z0 + FLOOR_POST_HEIGHT);
+      if (top - z0 > 1) {
+        for (let i = 0; i < 4; i++) {
+          const [ax, ay] = corners[i];
+          out.push({ a: [ax, ay, z0], b: [ax, ay, top], color, intensity: BEAM_POST * dim, fade: 0, width: BEAM_HALF_WIDTH * 0.8 });
+        }
+      }
+      continue;
     }
     if (z1 - z0 > 1) {
       for (let i = 0; i < 4; i++) {
@@ -100,6 +137,7 @@ export function beamGeometry(segs: readonly BeamSegment[]): BufferGeometry {
   const color = new Float32Array(n * 4 * 4);
   const width = new Float32Array(n * 4);
   const fade = new Float32Array(n * 4);
+  const soft = new Float32Array(n * 4);
   const pos = new Float32Array(n * 4 * 3);
   const index = new Uint32Array(n * 6);
   const CORNERS = [
@@ -129,6 +167,7 @@ export function beamGeometry(segs: readonly BeamSegment[]): BufferGeometry {
       color[v * 4 + 3] = g.intensity;
       width[v] = g.width;
       fade[v] = g.fade;
+      soft[v] = g.soft ?? 0;
     }
     for (const p of [g.a, g.b]) {
       minx = Math.min(minx, p[0]);
@@ -149,6 +188,7 @@ export function beamGeometry(segs: readonly BeamSegment[]): BufferGeometry {
   geo.setAttribute('aColor', new BufferAttribute(color, 4));
   geo.setAttribute('aWidth', new BufferAttribute(width, 1));
   geo.setAttribute('aFade', new BufferAttribute(fade, 1));
+  geo.setAttribute('aSoft', new BufferAttribute(soft, 1));
   geo.setIndex(new BufferAttribute(index, 1));
   if (n > 0) {
     const c = new Vector3((minx + maxx) / 2, (miny + maxy) / 2, (minz + maxz) / 2);
@@ -164,6 +204,9 @@ export class ZoneBeams {
   private readonly material: ShaderMaterial;
   private key = '';
   private enabled = true;
+  private style: ZoneStyle = DEFAULT_ZONE_STYLE;
+  private zones: readonly ZoneDef[] = [];
+  private group = 0;
 
   constructor(time: U<number>, pixelScale: U<number>) {
     this.material = new ShaderMaterial({
@@ -196,14 +239,28 @@ export class ZoneBeams {
 
   /** Replaces the zones (cheap no-op when nothing changed). */
   set(zones: readonly ZoneDef[], activeGroup: number): void {
-    const key = zoneKey(zones, activeGroup);
+    this.zones = zones ?? [];
+    this.group = activeGroup;
+    const key = `${this.style}|${zoneKey(this.zones, activeGroup)}`;
     if (key === this.key) return;
     this.key = key;
-    const segs = zoneSegments(zones ?? [], activeGroup);
+    const segs = zoneSegments(this.zones, activeGroup, this.style);
     this.mesh.geometry.dispose();
     this.mesh.geometry = beamGeometry(segs);
     this.mesh.userData.segments = segs.length;
     this.refresh();
+  }
+
+  /** r_drawzones 1 / 2: outline on the zone floor or the full box (rebuilds the beams when it changes). */
+  setStyle(style: ZoneStyle | undefined | null): void {
+    const st: ZoneStyle = style === 'box' ? 'box' : 'floor';
+    if (st === this.style) return;
+    this.style = st;
+    this.set(this.zones, this.group);
+  }
+
+  get zoneStyle(): ZoneStyle {
+    return this.style;
   }
 
   /** r_drawzones. */

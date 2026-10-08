@@ -4,6 +4,8 @@ import { fallbackMaterial } from '../src/bsp/materials';
 import type { MaterialDef } from '../src/map/types';
 import { TextureCache } from '../src/render/textures';
 import {
+  BLEND_OFFSET_FACTOR,
+  BLEND_OFFSET_UNITS,
   SurfaceMaterials,
   SurfaceVariant,
   applyModelAlpha,
@@ -53,10 +55,10 @@ const variant = (over: Partial<SurfaceVariant> = {}): SurfaceVariant => ({
   ...over,
 });
 
-function factory() {
+function factory(reversedDepth = false) {
   const textures = new TextureCache(caps);
   const shared = createSharedUniforms();
-  return { textures, shared, mats: new SurfaceMaterials({ textures, shared }) };
+  return { textures, shared, mats: new SurfaceMaterials({ textures, shared, reversedDepth }) };
 }
 
 describe('colour helpers', () => {
@@ -144,6 +146,34 @@ describe('SurfaceMaterials', () => {
     expect(two.side).toBe(DoubleSide);
     expect(two).not.toBe(one);
     expect(mats.get(testMaterial('wall'), variant({ doubleSided: true }), '', null, -1)).toBe(two);
+  });
+
+  it('blended surfaces win the depth test against coplanar opaque ones (slope-scaled offset toward the eye)', () => {
+    for (const reversed of [true, false]) {
+      const { mats } = factory(reversed);
+      const blended = [
+        mats.get(testMaterial('grid', { translucent: true, alpha: 0.75 }), variant(), '', null, -1),
+        mats.get(testMaterial('glow', { additive: true }), variant(), '', null, -1),
+        mats.get(testMaterial('glass', { alpha: 0.5 }), variant(), '', null, -1),
+        mats.get(testMaterial('water', { isWater: true, translucent: true }), variant(), '', null, -1),
+        mats.get(testMaterial('overlay'), variant({ decal: true }), '', null, -1),
+      ];
+      for (const m of blended) {
+        expect(m.polygonOffset).toBe(true);
+        // three.js negates the factor for a reversed depth buffer: -1 is toward the eye in both modes
+        expect(m.polygonOffsetFactor).toBe(BLEND_OFFSET_FACTOR);
+        expect(BLEND_OFFSET_FACTOR).toBeLessThan(0);
+        // ...but passes the units through: toward the eye is + with reversed Z, - otherwise
+        expect(m.polygonOffsetUnits).toBe(reversed ? BLEND_OFFSET_UNITS : -BLEND_OFFSET_UNITS);
+        // logarithmic depth is written by the shader: the same bias there
+        expect(m.defines.DEPTH_BIAS).toBeDefined();
+        expect(Number(m.defines.DEPTH_BIAS)).toBeGreaterThan(0);
+        expect(Number(m.defines.DEPTH_BIAS)).toBeLessThan(1e-6);
+      }
+      const opaque = mats.get(testMaterial('wall'), variant(), '', null, -1);
+      expect(opaque.polygonOffset).toBe(false);
+      expect(opaque.defines.DEPTH_BIAS).toBeUndefined();
+    }
   });
 
   it('decals: depth biased, no depth writes', () => {

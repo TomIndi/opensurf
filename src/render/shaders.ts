@@ -512,11 +512,13 @@ in vec2 aCorner;      // x: 0 = start, 1 = end; y: side -1 / 1
 in vec4 aColor;       // rgb (linear), intensity
 in float aWidth;      // world half-width
 in float aFade;       // intensity multiplier at the segment end (posts fade upward)
+in float aSoft;       // 1: soft glow band around a beam (no core)
 uniform float uPixelScale; // world units per pixel at distance 1
 uniform float uMinPixels;
 out vec4 vColor;
 out float vSide;
 out float vAlong;
+out float vSoft;
 void main() {
   vec3 p = mix(aStart, aEnd, aCorner.x);
   vec3 dir = aEnd - aStart;
@@ -534,10 +536,13 @@ void main() {
   vec4 mv = viewMatrix * vec4(p, 1.0);
   gl_Position = projectionMatrix * mv;
   vColor = vec4(aColor.rgb, aColor.a * mix(1.0, aFade, aCorner.x));
-  // keep thin far beams from flickering: fade intensity a bit when the width is clamped to pixels
-  vColor.a *= clamp(aWidth / max(w, 1e-3), 0.55, 1.0);
+  // keep thin far beams from flickering: fade intensity a bit when the width is clamped to pixels; a glow
+  // band clamped to pixels (far away) fades out with it instead of piling onto its beam
+  float clampFade = clamp(aWidth / max(w, 1e-3), 0.0, 1.0);
+  vColor.a *= mix(max(clampFade, 0.55), clampFade, aSoft);
   vSide = aCorner.y;
   vAlong = aCorner.x;
+  vSoft = aSoft;
 #include <logdepthbuf_vertex>
 }
 `;
@@ -552,11 +557,13 @@ uniform float uOpacity;
 in vec4 vColor;
 in float vSide;
 in float vAlong;
+in float vSoft;
 void main() {
 #include <logdepthbuf_fragment>
   float d = abs(vSide);
-  float core = 1.0 - smoothstep(0.0, 0.35, d);
-  float glow = exp(-d * d * 5.0);
+  float core = (1.0 - smoothstep(0.0, 0.35, d)) * (1.0 - vSoft);
+  // beams: a tight glow around the core; glow bands: a wide, soft falloff reaching zero at the band's edge
+  float glow = mix(exp(-d * d * 5.0), exp(-d * d * 3.0) * (1.0 - d), vSoft);
   float pulse = 1.0 + uPulse * sin(uTime * 2.6);
   float k = (core * 1.1 + glow * 0.75) * vColor.a * pulse * uOpacity;
   vec3 c = vColor.rgb * k + vec3(core * core * 0.35 * vColor.a);
