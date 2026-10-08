@@ -382,16 +382,19 @@ async function scenarioC(browser, maps) {
     await page.evaluate(() => window.__surf.exec('noclip'));
     let vp = 0;
     for (const ramp of ramps.slice(0, 2)) {
-      // stand back from the ramp face, level with its middle, looking at it
-      const hx = ramp.normal.x;
-      const hy = ramp.normal.y;
-      const hl = Math.hypot(hx, hy) || 1;
-      const dist = 700;
-      const eye = { x: ramp.center.x + (hx / hl) * dist, y: ramp.center.y + (hy / hl) * dist, z: ramp.center.z + 120 };
+      // a surfer's view: hovering off one end of the ramp, a bit out from the face and above it, looking along it
+      const t = ramp.tangent;
+      const n = ramp.normal;
+      const hl = Math.hypot(n.x, n.y) || 1;
+      const back = ramp.along[0] - 300;
+      const eye = {
+        x: ramp.center.x + t.x * back + (n.x / hl) * 160,
+        y: ramp.center.y + t.y * back + (n.y / hl) * 160,
+        z: ramp.center.z + 200,
+      };
       await page.evaluate((e) => window.__surf.teleport(e.x, e.y, e.z - 64), eye);
-      const yaw = (Math.atan2(-hy, -hx) * 180) / Math.PI;
-      const pitch = (Math.atan2(eye.z - ramp.center.z, dist) * 180) / Math.PI;
-      await page.evaluate(([p, y]) => window.__surf.setAngles(p, y), [pitch, yaw]);
+      const yaw = (Math.atan2(t.y, t.x) * 180) / Math.PI - 12 * Math.sign(t.x * n.y - t.y * n.x || 1);
+      await page.evaluate(([p, y]) => window.__surf.setAngles(p, y), [14, yaw]);
       await sleep(500);
       await shot(page, `c-${name}-ramp${++vp}`);
     }

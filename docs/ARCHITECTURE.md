@@ -131,7 +131,15 @@ export async function loadBspMap(name: string, data: ArrayBuffer, onProgress?: (
 ```ts
 // render/renderer.ts
 export class Renderer implements RendererApi { constructor(canvas: HTMLCanvasElement); }
+// optional RendererApi members (game/api.ts), implemented by Renderer:
+setFog?(fog: FogDef | null): void;              // runtime world fog (SetFogController); null = the map's own fog
+capabilities?(): RendererCapabilities;          // { compressedTextures (S3TC), maxTextureSize }
 ```
+The game asks `capabilities()` before loading a BSP and passes `loadBspMap(..., { materials: { compressedTextures: true } })`
+when S3TC is available (the VTFs' DXT mip chains are uploaded as-is: full resolution, 4-8x less memory). Brush faces
+are wound toward their front (`dface_t.side == planenum & 1`, the loader never flips them), so BSP surfaces are drawn
+single-sided like the engine; the renderer's face audit (`debugInfo().faces`) falls back to double-sided drawing only
+if a map's audited face area is mostly inverted.
 ### game (game-core; world systems per `src/game/contracts.ts`: `EntitySystem implements IEntitySystem` in entities.ts `constructor(host: WorldHost)`, `SurfTimer implements ISurfTimer` in timer.ts `constructor(host: TimerHost)`, `ReplaySystem implements IReplaySystem` in replay.ts `constructor(mapName: string)` — game-world)
 ```ts
 // game/game.ts
@@ -149,11 +157,13 @@ export class SoundSystem implements SoundApi { constructor(); }
 ```
 ### built-in maps (builtin-maps)
 ```ts
-// map/builtin/index.ts
+// map/builtin/index.ts (re-exports the list)
 export interface BuiltinMapInfo { id: string; name: string; description: string; tier: number; type: 'linear' | 'staged'; }
 export const BUILTIN_MAPS: BuiltinMapInfo[];
 export function buildBuiltinMap(id: string): LoadedMap;
 ```
+The metadata lives in `map/builtin/list.ts` (no geometry code): the UI and the game import the list statically, the
+builders (`index.ts`) are only loaded on demand through the game's dynamic `import()`, so they stay a separate chunk.
 ### map catalog (coordinator)
 ```ts
 // maps/catalog.ts
@@ -175,9 +185,13 @@ export function saveUserZones(mapName: string, zones: ZoneDef[] | null): void;
 
 Fixed tick (`tickrate` cvar, default 100; presets 64 / 85.3 / 100 / 102.4 / 128). Each rendered frame:
 mouse deltas update view angles immediately (rendered at full refresh rate); then run N ticks for the
-elapsed time. Within a frame with several ticks, view angles are interpolated from the previous frame's
-angles to the current ones across the ticks (smooth strafes at low fps). Render interpolates the origin
-between the last two ticks.
+elapsed time (× `host_timescale`, at most 10 per frame). Per-tick view angles are timestamped: tick i of the N
+ticks of a frame samples the view interpolated from the frame's starting angles to its final angles at that tick's
+own simulated time within the frame (`InputState.tickAngles` / `tickFraction`), so a steady mouse turn gives the same
+angle change on every tick at any fps — no 1x/2x alternation when fps and tickrate differ, smooth strafes at low fps.
+Render interpolates the origin between the last two ticks. The simulation clock (`WorldHost.time`) and the timer's
+run/stage clocks accumulate the interval of each simulated tick, so a tickrate change never rescales time already
+simulated.
 
 Per tick:
 1. Build `UserCmd` from +commands state (forward/side 450 like cl_forwardspeed/cl_sidespeed).
@@ -194,6 +208,11 @@ Per tick:
 7. Replay recording.
 
 ## Convars (registered by game-core in `src/game/convars.ts`; UI/renderer/audio read them by name)
+
+`src/game/convars.ts` (`CVAR_DEFS`) is the single definition of every documented cvar (name, default, flags,
+limits, help). `registerConvars()` is idempotent; the UI calls it from its constructor (`ui/cvardefs.ts`
+re-exports the definitions for the settings screens), so every cvar exists before the UI first reads one and
+before the saved config is executed.
 
 Values match SurfTimer's shipped CS:GO `cfg/sourcemod/surftimer/main.cfg` (stamina disabled, `ck_auto_bhop 1`).
 
@@ -238,6 +257,46 @@ Default binds (CS:GO + surf conventions): `w +forward`, `s +back`, `a +moveleft`
 `mouse5 "say !tele"`, `escape` menu, `f2 "say !prac"`.
 Key names follow Source: `a`..`z`, `0`..`9`, `space`, `ctrl`, `shift`, `alt`, `tab`, `enter`, `escape`,
 `backspace`, `uparrow`…, `f1`..`f12`, `mouse1`..`mouse5`, `mwheelup`, `mwheeldown`, `kp_*`, `semicolon`, `` ` ``.
+
+## Collision notes
+
+Box traces follow Source's brush clipping rules (DIST_EPSILON pull-back, startsolid/allsolid, bevel planes). The
+enter fraction starts at a "never updated" sentinel (-9999, as in Source; Quake 3 used -1): a box that starts within
+DIST_EPSILON of a face and moves into it is stopped at fraction 0 however small the move. With -1, moves shorter than
+`DIST_EPSILON - gap` passed unchecked and a player sliding along a slightly slanted wall could creep into it.
+Displacements collide as two-sided triangles (see `docs/CONTRACT_CHANGES.md`).
+
+## Automation & debugging
+
+URL parameters (parsed by `game/debugapi.ts`):
+
+| parameter | effect |
+|---|---|
+| `?map=<name>` | load a built-in map or a catalog map at startup (like the `map` command) |
+| `?builtin=<id>` | load a built-in map (`surf_tutorial`, `surf_neon`, `surf_skyline`) |
+| `?bsp=<url>` | download and play a `.bsp` / `.bsp.bz2` / `.rar` / `.zip` from a URL (dev: `/__maps/<name>.bsp`) |
+| `?autotest=1` | automated sessions: no pointer lock needed (mouse buttons/wheel work without it), never pause on focus or pointer-lock loss, no "click to capture" hint |
+
+`vite.config.ts` serves `$SURF_TEST_MAPS` / `$SURF_TEST_MAPS_LARGE` at `/__maps/<file>` in dev and preview.
+
+`window.__surf` (`SurfDebugApi`, installed by `Game.start()`): `state()` (plain snapshot: game state, map, origin,
+velocity, speed, ground, timer HUD, tick, practice), `loadBuiltin(id)`, `loadUrl(url)`, `loadMap(name)` (resolve once
+playing or failed), `setAngles(pitch, yaw)`, `teleport(x, y, z)` (zero velocity), `setVelocity(x, y, z)`,
+`press(cmd)` / `release(cmd)` / `releaseAll()` (+commands as from the console), `runTicks(n)` (simulate n ticks now
+with the current input — pause first for deterministic stepping), `exec(line)` (returns the console output),
+`say(text)`, `pause()`, `resume()`, `inSolid()`, `zones()`, `triggers()`, `findRamps(max)` (largest surfable world
+ramp faces) and `renderInfo()` (renderer diagnostics: face audit, S3TC, GPU resources), plus `game` itself.
+
+`npm run e2e` (`scripts/e2e.mjs`) starts the Vite dev server on a free port, opens the game in headless Chromium
+(SwiftShader WebGL) and runs: (a) menu + map browser (932 catalog maps, search, built-in tab); (b) every built-in map:
+spawn in the start zone, keyboard movement, leaving the start starts the timer, the fail trigger teleports back,
+`!r`; (c) every map in `$SURF_TEST_MAPS` via `?bsp=`: load time, start-zone placement, not in solid, face audit,
+screenshots at the spawn and ramp viewpoints, fps; (d) deterministic surf runs on the maps' biggest ramps (speed
+builds, never stuck or in solid); (e) chat/console (messagemode, `!help`, silent `/r`, cvars, `getpos`, a rebound
+`toggleconsole` key, scoreboard, pause); (f) map switching without page errors or JS-heap / GPU-resource growth.
+Any uncaught page error fails the run. Env: `SURF_TEST_MAPS`, `SURF_TEST_MAPS_LARGE` (+`E2E_LARGE=1`),
+`CHROMIUM_PATH`, `E2E_OUT` (screenshots + `<prefix>results.json`), `E2E_PREFIX`, `E2E_ONLY=a,c`, `E2E_MAPS=...`.
+SwiftShader renders a few fps at 1280x720, so real-time checks poll instead of assuming frame rates.
 
 ## Data flow
 

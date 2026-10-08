@@ -118,6 +118,10 @@ export interface DebugTrigger {
 export interface DebugRamp {
   center: DebugVec;
   normal: DebugVec;
+  /** Horizontal unit vector along the ramp (perpendicular to the normal's horizontal part). */
+  tangent: DebugVec;
+  /** Extent of the face along `tangent`, from the centre: [min, max] (min <= 0 <= max). */
+  along: [number, number];
   area: number;
   /** Lowest / highest z of the face. */
   minZ: number;
@@ -247,7 +251,17 @@ export function createDebugApi(game: Game): SurfDebugApi {
             if (p.z > maxZ) maxZ = p.z;
           }
           if (!(area > 0)) continue;
-          out.push({ center: { x: ax / area, y: ay / area, z: az / area }, normal: { x: n.x, y: n.y, z: n.z }, area, minZ, maxZ });
+          const center = { x: ax / area, y: ay / area, z: az / area };
+          const hl = Math.hypot(n.x, n.y) || 1;
+          const tangent = { x: -n.y / hl, y: n.x / hl, z: 0 };
+          let lo = 0;
+          let hi = 0;
+          for (const p of w) {
+            const d = (p.x - center.x) * tangent.x + (p.y - center.y) * tangent.y;
+            if (d < lo) lo = d;
+            if (d > hi) hi = d;
+          }
+          out.push({ center, normal: { x: n.x, y: n.y, z: n.z }, tangent, along: [lo, hi], area, minZ, maxZ });
         }
       }
       out.sort((a, b) => b.area - a.area);

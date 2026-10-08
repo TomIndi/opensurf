@@ -66,5 +66,22 @@ is used.
 
 * `npm test` — unit tests (set `SURF_TEST_MAPS=/path/to/bsps` to also run the real-map tests)
 * `npm run typecheck`
+* `npm run e2e` — end-to-end run of the real game in headless Chromium (playwright-core): menu and map browser,
+  every built-in map (spawn, movement, timer start, fail teleport, `!r`), chat and console, and — with
+  `SURF_TEST_MAPS` set — every real map in that folder (load time, start-zone placement, screenshots, fps),
+  deterministic surf runs on their ramps and map switching without errors or memory growth. Screenshots and a
+  `results.json` go to `$E2E_OUT` (default: a temp folder). Uses `/opt/pw-browsers/chromium-*` or `CHROMIUM_PATH`.
 * `npm run catalog` — regenerate `public/maps/catalog.json` / `zones.json`
-* `docs/ARCHITECTURE.md` — module layout and contracts
+* `docs/ARCHITECTURE.md` — module layout, contracts, the `window.__surf` debug API and the e2e scenarios
+
+### URL parameters
+
+| | |
+|---|---|
+| `?map=surf_kitsune` | load a map at startup (built-in id or catalog name) |
+| `?builtin=surf_tutorial` | load a built-in map |
+| `?bsp=<url>` | play a `.bsp` / `.bsp.bz2` / `.rar` / `.zip` from a URL; in dev, files from `$SURF_TEST_MAPS` are served at `/__maps/<name>.bsp` |
+| `?autotest=1` | automation: no pointer lock required, never auto-pauses |
+
+`window.__surf` exposes a small scripting API (state snapshot, map loading, teleport, +commands, `runTicks`,
+console `exec`, chat `say`) for tests and debugging — see `docs/ARCHITECTURE.md`.
