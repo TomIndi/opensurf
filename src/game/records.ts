@@ -98,9 +98,33 @@ export function currentTickrate(): number {
   return DEFAULT_TICKRATE;
 }
 
-/** Normalized course key: "surf_utopia_njv|0|100" (map, course, tickrate). */
+/**
+ * Records style of the runs being played: 'momentum' while surf_keep_momentum is on (teleports keep the speed, so
+ * those runs get their own records, PBs, stage bests and replays, like SurfTimer's styles), '' for normal runs.
+ */
+export function currentStyle(): '' | 'momentum' {
+  try {
+    const c = console_.getCvar('surf_keep_momentum');
+    if (c && c.num > 0) return 'momentum';
+  } catch {
+    /* no console */
+  }
+  return '';
+}
+
+/** Key part of a tickrate in a style: "100" (normal runs), "100m" (momentum runs). */
+export function recordLabel(tickrate: number, style: string = currentStyle()): string {
+  return tickLabel(tickrate) + (style === 'momentum' ? 'm' : '');
+}
+
+/** "100 tick" (normal runs) or "100 tick, momentum" for messages. */
+export function tickStyleText(tickrate: number, style: string = currentStyle()): string {
+  return `${tickLabel(tickrate)} tick${style === 'momentum' ? ', momentum' : ''}`;
+}
+
+/** Normalized course key: "surf_utopia_njv|0|100" (map, course, tickrate; "100m" for momentum runs). */
 export function courseKey(map: string, group: number, tickrate: number = currentTickrate()): string {
-  return `${map.toLowerCase()}|${group | 0}|${tickLabel(tickrate)}`;
+  return `${map.toLowerCase()}|${group | 0}|${recordLabel(tickrate)}`;
 }
 
 /** Stage best key: "surf_kitsune|0|100|s3". */
@@ -241,12 +265,15 @@ export function getCompletions(map: string, group: number, tickrate?: number): n
   return load().courses[courseKey(map, group, tickrate)]?.completions ?? 0;
 }
 
-/** Tickrates (labels) that have records for this course. */
+/** Tickrates (labels) that have records for this course in the current style. */
 export function recordTickrates(map: string, group: number): string[] {
   const prefix = `${map.toLowerCase()}|${group | 0}|`;
+  const momentum = currentStyle() === 'momentum';
   return Object.keys(load().courses)
     .filter((k) => k.startsWith(prefix) && load().courses[k].runs.length)
-    .map((k) => k.slice(prefix.length));
+    .map((k) => k.slice(prefix.length))
+    .filter((l) => l.endsWith('m') === momentum)
+    .map((l) => (momentum ? l.slice(0, -1) : l));
 }
 
 /** Best time of a stage (stage practice or a stage of a ranked run) at the tickrate, or null. */

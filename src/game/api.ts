@@ -172,11 +172,6 @@ export interface GameApi {
    * (or m_rawinput is 0).
    */
   readonly rawInputActive?: boolean | null;
-  /**
-   * Optional: true while the pause menu is open over a ranked run in progress. Like CS:GO's ESC menu the world
-   * keeps running then (keys released, the run still counts), so the menu shouldn't say "Game paused".
-   */
-  readonly simulatingWhilePaused?: boolean;
 }
 
 /** What the game can ask the UI to do. Implemented by ui/ui.ts. */

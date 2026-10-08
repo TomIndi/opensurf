@@ -56,6 +56,12 @@ Sensitivity uses CS:GO units (`sensitivity`, `m_yaw 0.022`), so your CS:GO sensi
 Chat commands: `!r`, `!s <n>`, `!b <n>`, `!back`, `!saveloc`, `!tele`, `!prac`, `!noclip`, `!pb`, `!top`,
 `!replay`, `!ghost`, `!hide`, `!showkeys`, `!zones`, `!help`.
 
+ESC pauses the game (the world and the timer freeze; the run still counts when you resume).
+
+**Keep momentum** (`surf_keep_momentum 1`, on by default; Settings → Game): fail teleports, stage teleports and
+deaths keep your horizontal speed, pointed the way you face after the teleport. Momentum runs have their own records
+(PBs, stage times, replays); `surf_keep_momentum 0` plays like a CS:GO server, where teleports stop you.
+
 ## Physics
 
 Movement follows Source's `CGameMovement` as configured on CS:GO surf servers (SurfTimer's `main.cfg`):

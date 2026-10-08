@@ -654,28 +654,6 @@
   line-height: 1.6;
 }
 
-.surf-ui .pause-state.live {
-  color: #ffcf66;
-}
-
-.surf-ui .pause-state.live::before {
-  content: '';
-  display: inline-block;
-  width: 0.5em;
-  height: 0.5em;
-  margin-right: 0.45em;
-  border-radius: 50%;
-  background: #ff5a5a;
-  vertical-align: 0.05em;
-  animation: live-dot 1.2s ease-in-out infinite;
-}
-
-@keyframes live-dot {
-  50% {
-    opacity: 0.35;
-  }
-}
-
 .surf-ui .pause-content {
   position: relative;
   z-index: 1;

@@ -13,12 +13,12 @@
 // velocity -> zone button filters and strafe stats -> playerMove (+ ground mover velocity) -> +use -> entities
 // (triggers, I/O) -> timer -> replay recording -> sounds.
 //
-// Pausing (ESC / the pause menu) works like CS:GO's ESC menu during a ranked run: the world keeps running (the
-// movement keys are released, the player keeps flying or falling) and the run goes on. Otherwise (start zone,
-// practice, menus, a finished run) pausing freezes the world. When the game is forced to stop simulating in the
-// middle of a ranked run (the tab is hidden, frames stop for over a second, a map change gave up and returned),
-// the run goes on as practice ("Timer stopped — run paused, it won't count"), and the hidden time is never
-// caught up. The debug API's pause() is a hard freeze (deterministic stepping with runTicks).
+// Pausing (ESC, the pause menu, losing the mouse capture, hiding the tab) freezes the world: physics, map logic,
+// movers and the timer all stop, and resuming carries on exactly where the player was (the run still counts: the
+// run clock only counts simulated ticks). Time the game didn't simulate (a hidden tab, a frame gap) is never
+// caught up. A map change that was given up returns to the map with a ranked run turned into practice ("Timer
+// stopped — run paused, it won't count"). The debug API's pause() is the same freeze (deterministic stepping
+// with runTicks).
 //
 // Map changes: `map <name>` checks the name first (built-in list, else the catalog) and only prints
 // "map load failed: <name> not found" for an unknown one. While a new map downloads and parses, the current
@@ -89,6 +89,7 @@ import { installDebugApi, parseUrlOptions } from './debugapi';
 import { EntitySystem } from './entities';
 import { createHudState, horizontalSpeed, turnFromYawDelta, updateHudState } from './hud';
 import { InputDevice, InputState, KeyDispatcher, readMouseSettings, registerButtonCommands } from './input';
+import { momentumVelocity } from './momentum';
 import { ReplaySystem, sampleReplay } from './replay';
 import { SurfTimer } from './timer';
 import { ZoneEditor, getEditorDebugBoxes, installZoneEditor, registerZoneCommands } from './zoneeditor';
@@ -111,8 +112,6 @@ const FOOTSTEP_MIN_SPEED = 150;
 const SPECTATE_LOOP_PAUSE = 2;
 /** Lowest effective fps_max (10 ticks per frame must cover 128 tick). */
 const MIN_FPS_LIMIT = 30;
-/** A frame gap this long during a ranked run means the game stopped simulating: the run can't count. */
-const STALL_MS = 1000;
 /**
  * BSPs larger than this drop the previous map before parsing instead of keeping it until the parse succeeded:
  * two of the biggest maps in memory at once could run the tab out of memory.
@@ -420,6 +419,9 @@ export class Session implements TimerHost, CommandSession {
   ghostGroup = 0;
   /** How this map was loaded (`retry` reloads it). */
   request: LoadRequest | null = null;
+  /** Velocity right before the latest teleport, and whether that teleport stopped the player (momentum.ts). */
+  readonly preTeleportVelocity = v3();
+  lastTeleportStopped = false;
   private readonly game: Game;
 
   constructor(game: Game, map: LoadedMap, tier: number | null) {
@@ -448,6 +450,9 @@ export class Session implements TimerHost, CommandSession {
       this.zonesDirty = true;
     };
     this.zoneEditor = new ZoneEditor(this, timer);
+    // surf_keep_momentum: map teleports and fails give the player their speed back
+    timer.onFailRespawn = () => game.keepMomentum(this);
+    this.entities.addTeleportListener?.(() => game.keepMomentum(this));
   }
 
   get moveVars(): MoveVars {
@@ -558,8 +563,6 @@ export class Game implements GameApi, CommandContext {
   private _session: Session | null = null;
   /** The previous map's session while a new map downloads and parses (see "Map changes" above). */
   private suspended: SuspendedSession | null = null;
-  /** Debug API / tests: paused with nothing simulating until resume(), even mid-run. */
-  private frozen = false;
   private loadingName: string | null = null;
   private loadSeq = 0;
   private currentLoad: LoadToken | null = null;
@@ -592,6 +595,7 @@ export class Game implements GameApi, CommandContext {
   private spec: SpectateState | null = null;
   private readonly specVel = v3();
   private readonly fwd = v3();
+  private readonly momentumVel = v3();
   private readonly eye = v3();
   private readonly hudEye = v3();
 
@@ -649,23 +653,9 @@ export class Game implements GameApi, CommandContext {
     return this.device?.rawInputActive ?? null;
   }
 
-  /**
-   * True while the pause menu is open over a ranked run in progress: the world keeps simulating (CS:GO's ESC menu
-   * never stops the server), with every key released.
-   */
-  get simulatingWhilePaused(): boolean {
-    const s = this._session;
-    return !!s && this._state === 'paused' && this.liveWhilePaused(s);
-  }
-
-  private liveWhilePaused(s: Session): boolean {
-    if (this.frozen || this.spec) return false;
-    return (s.timer.timerState ?? s.timer.getHud().state) === 'running';
-  }
-
-  /** The world of session `s` simulates this frame. */
-  private isLive(s: Session): boolean {
-    return this._state === 'playing' || (this._state === 'paused' && this.liveWhilePaused(s));
+  /** The world simulates this frame (paused = frozen). */
+  private isLive(): boolean {
+    return this._state === 'playing';
   }
 
   on(event: GameEvent, cb: (data?: unknown) => void): () => void {
@@ -697,13 +687,11 @@ export class Game implements GameApi, CommandContext {
   }
 
   /**
-   * Opens the pause menu: every key is released; the world keeps running during a ranked run (see the top of the
-   * file) and freezes otherwise. `freeze` (debug API, tests) stops the simulation in any case until resume().
+   * Opens the pause menu and freezes the world (every key released) until resume(). `freeze` is accepted for the
+   * debug API and tests; every pause is a freeze.
    */
-  pause(opts?: { freeze?: boolean }): void {
-    if (this._state === 'paused' && opts?.freeze) this.frozen = true;
+  pause(_opts?: { freeze?: boolean }): void {
     if (this._state !== 'playing') return;
-    this.frozen = !!opts?.freeze;
     this.dispatcher.releaseAll();
     this.input.releaseAll();
     this.setState('paused');
@@ -711,15 +699,14 @@ export class Game implements GameApi, CommandContext {
 
   resume(): void {
     if (this._state !== 'paused') return;
-    this.frozen = false;
     this.lastFrameMs = 0;
     this.input.discardMouse();
     this.setState('playing');
   }
 
   /**
-   * The page was hidden or shown (visibilitychange). Hidden: the browser stops the frames, so a ranked run in
-   * progress can't count any more (practice); either way the time the page was hidden is never caught up.
+   * The page was hidden or shown (visibilitychange). Hidden: the browser stops the frames, so the game pauses (the
+   * pause menu is up when the player comes back); either way the time the page was hidden is never caught up.
    */
   onVisibilityChange(hidden: boolean): void {
     this.lastFrameMs = 0;
@@ -728,8 +715,7 @@ export class Game implements GameApi, CommandContext {
     this.dispatcher.releaseAll();
     this.input.releaseAll();
     if (this.autotest) return;
-    const s = this._session;
-    if (s && (this._state === 'playing' || this._state === 'paused')) s.timer.interruptRun?.();
+    if (this._state === 'playing') this.pause();
   }
 
   disconnect(): void {
@@ -1179,6 +1165,8 @@ export class Game implements GameApi, CommandContext {
   /** @internal WorldHost.teleportPlayer of a session. */
   teleportInSession(s: Session, origin: Vec3, angles: QAngle | null, velocity: Vec3 | null): void {
     const ps = s.player;
+    v3copy(s.preTeleportVelocity, ps.velocity);
+    s.lastTeleportStopped = !!velocity && velocity.x === 0 && velocity.y === 0 && velocity.z === 0;
     if (Number.isFinite(origin.x) && Number.isFinite(origin.y) && Number.isFinite(origin.z)) v3copy(ps.origin, origin);
     if (angles) {
       const yaw = Number.isFinite(angles.yaw) ? angles.yaw : 0;
@@ -1195,6 +1183,23 @@ export class Game implements GameApi, CommandContext {
     v3copy(s.prevOrigin, ps.origin);
     s.prevViewOffset = ps.viewOffsetZ;
     s.stepDistance = 0;
+  }
+
+  /**
+   * @internal surf_keep_momentum: the teleport that just stopped the player (a map teleport, a death, a teletostart
+   * / checker zone) gives them back the horizontal speed they had, pointed the way they now face.
+   */
+  keepMomentum(s: Session): void {
+    if (!s.lastTeleportStopped) return;
+    s.lastTeleportStopped = false;
+    if ((console_.getCvar('surf_keep_momentum')?.num ?? 1) <= 0) return;
+    const ps = s.player;
+    if (ps.moveType !== MOVETYPE_WALK) return;
+    const v = momentumVelocity(s.preTeleportVelocity, ps.viewAngles.yaw, this.momentumVel);
+    if (v.x * v.x + v.y * v.y < 1) return;
+    ps.velocity.x = v.x;
+    ps.velocity.y = v.y;
+    ps.velocity.z = 0;
   }
 
   /** @internal WorldHost.killPlayer of a session. */
@@ -1426,10 +1431,8 @@ export class Game implements GameApi, CommandContext {
       this.emitEvent('cvarschanged');
     }
     const s = this._session;
-    const live = !!s && this.isLive(s);
-    // no frames for over a second (a debugger, a frozen or throttled page): the world stood still mid-run
-    if (s && live && gapMs > STALL_MS && !this.autotest) s.timer.interruptRun?.();
-    if (s && live) this.simulateFrame(s, dt);
+    // a frame gap (a debugger, a frozen or throttled page) only loses that time: dt is capped, never caught up
+    if (s && this.isLive()) this.simulateFrame(s, dt);
     else {
       this.input.discardMouse();
       this.dispatcher.afterTick();
@@ -1437,7 +1440,7 @@ export class Game implements GameApi, CommandContext {
     const hud = this.refreshHud();
     if (s && (this._state === 'playing' || this._state === 'paused')) this.renderFrame(s, hud);
     this.ui.updateHud(hud);
-    if (s && live && this._session === s) {
+    if (s && this.isLive() && this._session === s) {
       const v = this.spec ? this.specVel : s.player.velocity;
       const speed = Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
       this.sound.setWind(speed, this.spec ? true : !s.player.onGround);
@@ -1464,8 +1467,8 @@ export class Game implements GameApi, CommandContext {
       this.input.tickAngles(this.tickAngles, i, n, r.acc, ti, span);
       this.tickSession(s, this.tickAngles);
       this.dispatcher.afterTick();
-      // (a run that ends while the pause menu is open freezes the world from the next tick on)
-      if (this._session !== s || !this.isLive(s) || this.spec) break;
+      // (map logic or a command that paused / changed the map stops the frame's remaining ticks)
+      if (this._session !== s || !this.isLive() || this.spec) break;
     }
     this.alpha = ti > 0 ? Math.min(1, Math.max(0, this.acc / ti)) : 1;
     this.input.endFrame();

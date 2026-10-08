@@ -243,10 +243,10 @@ Render interpolates the origin between the last two ticks. The simulation clock 
 run/stage clocks accumulate the interval of each simulated tick, so a tickrate change never rescales time already
 simulated.
 
-Pause (ESC, `cancelselect`, losing the pointer lock): like CS:GO's ESC menu, the world keeps running during a ranked
-run (every key released; the run still counts) and freezes otherwise (start zone, practice, finished, spectating).
-When the game can't simulate mid-run (the tab is hidden, frames stop for over a second, a map change that failed
-returned to the map) the run goes on as practice ("Timer stopped — run paused, it won't count"); hidden time is
+Pause (ESC, `cancelselect`, losing the pointer lock, hiding the tab): freezes the world — physics, map logic,
+movers, timer — until resume, and the run carries on and still counts (the run clock counts simulated ticks). A frame
+gap only loses that time (dt is capped); a map change that failed and returned to the map turns a ranked run into
+practice ("Timer stopped — run paused, it won't count"). Time the game didn't simulate is
 never caught up. `map <name>` validates the name first (an unknown one is only `map load failed: <name> not found`
 in the console); during a map change the current session is kept aside and comes back if the download/parse
 fails (`LoadProgress.recovered`).
@@ -296,7 +296,11 @@ Video: `mat_fullbright 0`, `r_drawzones 1` (0 off, 1 floor outline, 2 full box �
 `r_brightness 1`, `r_renderscale 1`, `r_anisotropy 8`, `fog_enable 1`, `r_3dsky 1`.
 
 Surf/HUD: `surf_hud_speed 1`, `surf_hud_timer 1`, `surf_showkeys 1`, `surf_ghost 1`, `surf_ghost_trail 1`,
-`surf_prespeed 350`, `surf_speedometer_color 1`, `surf_chat_sounds 1`.
+`surf_prespeed 350`, `surf_speedometer_color 1`, `surf_chat_sounds 1`, `surf_keep_momentum 1` (teleports keep the speed: a
+map teleport that would stop the player — fails and stage transitions — a death, or a teletostart / checker zone gives
+back the horizontal speed, pointed the way the player faces afterwards; `!r` / `!back` / `!s` / `!b` / `!tele` still
+stop; momentum runs are their own records style: course keys `map|group|100m`, `!pb` / `!top` say "100 tick,
+momentum"; see src/game/momentum.ts).
 
 Autoexec compatibility (`COMPAT_CVAR_DEFS`, hidden, archived where CS:GO archives them, no effect): `viewmodel_*`,
 `cl_bob*`, `r_drawviewmodel`, `cl_draw_only_deathnotices`, `cl_radar_*`, `cl_hud_*` extras, `cl_teamid_overhead_*`,

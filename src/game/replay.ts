@@ -15,7 +15,7 @@ import { Vec3 } from '../core/vec3';
 import { VIEW_OFFSET_DUCK, VIEW_OFFSET_STAND } from '../physics/playertypes';
 import { GhostState } from './api';
 import { IReplaySystem } from './contracts';
-import { tickLabel } from './records';
+import { currentStyle, recordLabel, tickLabel } from './records';
 
 export const FRAME_STRIDE = 6;
 export const DUCKED_FLAG = 1 << 20;
@@ -38,10 +38,13 @@ export interface ReplayData {
   date: number;
 }
 
-/** IndexedDB key of a PB replay: "surf_kitsune|0|100" (legacy keys without the tick: tickrate omitted). */
+/**
+ * IndexedDB key of a PB replay: "surf_kitsune|0|100" ("100m" for momentum runs, records.ts recordLabel; legacy keys
+ * without the tick: tickrate omitted).
+ */
 export function replayKey(map: string, group: number, tickrate?: number): string {
   const base = `${map.toLowerCase()}|${group | 0}`;
-  return tickrate === undefined ? base : `${base}|${tickLabel(tickrate)}`;
+  return tickrate === undefined ? base : `${base}|${recordLabel(tickrate)}`;
 }
 
 /** Number of frames in a replay. */
@@ -276,7 +279,7 @@ export class ReplaySystem implements IReplaySystem {
   }
 
   private memKey(group: number, tickrate: number = this.currentTickrate()): string {
-    return `${group | 0}|${tickLabel(tickrate)}`;
+    return `${group | 0}|${recordLabel(tickrate)}`;
   }
 
   /** The PB replay of a course at the tickrate (default: the current one) if loaded. */
@@ -372,7 +375,7 @@ export class ReplaySystem implements IReplaySystem {
       if (!stored) {
         // replays saved before the tick was part of the key count for the tickrate they were recorded at
         const legacy = await idbGet(replayKey(m, g));
-        if (legacy && legacy.tickrate > 0 && tickLabel(legacy.tickrate) === label) stored = legacy;
+        if (legacy && legacy.tickrate > 0 && tickLabel(legacy.tickrate) === label && !currentStyle()) stored = legacy;
       }
       const data = stored ? fromStored(stored) : null;
       if (!data) return false;
@@ -392,7 +395,7 @@ export class ReplaySystem implements IReplaySystem {
     this.pbs.delete(this.memKey(group, tickrate));
     await idbDelete(replayKey(this.mapName, group, tickrate));
     const legacy = await idbGet(replayKey(this.mapName, group));
-    if (legacy && legacy.tickrate > 0 && tickLabel(legacy.tickrate) === tickLabel(tickrate)) await idbDelete(replayKey(this.mapName, group));
+    if (legacy && legacy.tickrate > 0 && tickLabel(legacy.tickrate) === tickLabel(tickrate) && !currentStyle()) await idbDelete(replayKey(this.mapName, group));
   }
 
   ghostAt(runTime: number): GhostState | null {

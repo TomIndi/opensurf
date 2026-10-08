@@ -29,7 +29,6 @@ export class PauseMenu {
   private visible = false;
   private _page: PausePage = 'root';
   private readonly footState = h('span.pause-state', { text: 'Game paused' });
-  private live: boolean | null = null;
 
   constructor(private readonly deps: PauseMenuDeps) {
     this.mapEl = h('div.pause-map');
@@ -96,17 +95,6 @@ export class PauseMenu {
       ...(t.mapType === 'staged' && t.stageCount ? row('Stages', String(t.stageCount)) : []),
       ...(t.state === 'running' || t.state === 'practice' ? row('Current run', formatTime(t.time)) : []),
     );
-  }
-
-  /**
-   * A ranked run keeps running behind the menu (like CS:GO's ESC menu, which never stops the server): say so
-   * instead of "Game paused".
-   */
-  setLive(live: boolean): void {
-    if (live === this.live) return;
-    this.live = live;
-    this.footState.textContent = live ? 'Your run keeps going — the timer is running' : 'Game paused';
-    this.footState.classList.toggle('live', live);
   }
 
   hide(): void {

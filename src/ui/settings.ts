@@ -363,6 +363,13 @@ export class Settings {
 
     const play = this.group(inner, 'Gameplay');
     this.row(play, 'Field of view', 'Horizontal degrees at 4:3, like CS:GO (default 90). Wider screens see more.', this.slider('fov_desired', { min: 60, max: 130, step: 1, decimals: 0 }), 'fov_desired');
+    this.row(
+      play,
+      'Keep momentum through teleports',
+      'Fail teleports, stage teleports and deaths keep your horizontal speed, pointed the way you face after the teleport. Momentum runs have their own records (PBs, stage times, replays).',
+      this.toggle('surf_keep_momentum'),
+      'surf_keep_momentum',
+    );
 
     const cfg = this.group(inner, 'Config files', 'Bring your CS:GO autoexec.cfg and other configs: binds, sensitivity, crosshair and aliases work like in CS:GO. Run one with exec <name> in the console; autoexec.cfg runs every time the game starts.');
     const importBtn = h('button.btn.btn-sm', { attrs: { type: 'button' } }, icon('upload'), 'Import .cfg');

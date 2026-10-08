@@ -850,7 +850,6 @@ export class Ui implements UiApi {
     );
     if (this.pauseMenu.isVisible) {
       this.pauseMenu.renderRun(hud);
-      this.pauseMenu.setLive(!!this.game?.simulatingWhilePaused);
     }
   }
 }

@@ -13,6 +13,8 @@ import type {
   UiApi,
   ViewState,
 } from '../src/game/api';
+import { console_ } from '../src/core/cvars';
+import { registerConvars } from '../src/game/convars';
 import { Game, MapLoaders } from '../src/game/game';
 import { setRecordsStorage } from '../src/game/records';
 import { parseEntities } from '../src/bsp/entities';
@@ -237,6 +239,9 @@ export function resetGlobals(): void {
   setRecordsStorage(new MemStore());
   setZonesFile(null);
   setCatalog([]);
+  // normal runs (Source's teleport stop, the normal records style); momentum tests turn it on
+  registerConvars();
+  console_.getCvar('surf_keep_momentum')?.set('0');
 }
 
 /** A Game around a test map (not started: drive it with game.frame() / game.runTicks()). */
