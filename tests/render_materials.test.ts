@@ -137,6 +137,13 @@ describe('SurfaceMaterials', () => {
     expect(at.uniforms.uAlphaRef.value).toBeCloseTo(0.7, 9);
     expect(at.transparent).toBe(false);
     expect(at.side).toBe(DoubleSide);
+    // maps whose faces aren't reliably wound: every surface double-sided (a separate cached instance)
+    const one = mats.get(testMaterial('wall'), variant(), '', null, -1);
+    const two = mats.get(testMaterial('wall'), variant({ doubleSided: true }), '', null, -1);
+    expect(one.side).toBe(FrontSide);
+    expect(two.side).toBe(DoubleSide);
+    expect(two).not.toBe(one);
+    expect(mats.get(testMaterial('wall'), variant({ doubleSided: true }), '', null, -1)).toBe(two);
   });
 
   it('decals: depth biased, no depth writes', () => {
@@ -177,6 +184,11 @@ describe('SurfaceMaterials', () => {
     expect(w.transparent).toBe(true);
     expect(w.side).toBe(DoubleSide);
     expect((w.uniforms.uWaterColor.value as Vector3).z).toBeCloseTo(srgbToLinear(0.3), 6);
+    // one face of a top/bottom pair: one-sided (each side shows its own material)
+    const pairFace = mats.get(testMaterial('water', { isWater: true, translucent: true }), variant({ doubleSided: false }), '', null, -1);
+    expect(pairFace.side).toBe(FrontSide);
+    // the shading normal always faces the viewer; "below" = looking at the surface from underneath
+    expect(w.fragmentShader).toContain('if (dot(V, n0) > 0.0) n0 = -n0;');
   });
 
   it('brush entity instances share their model uniforms; alpha below 1 makes opaque materials blend', () => {

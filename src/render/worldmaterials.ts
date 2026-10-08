@@ -135,6 +135,12 @@ export interface SurfaceVariant {
   /** Fog set: main view or 3D skybox. */
   pass: 'world' | 'sky3d';
   /**
+   * No back-face culling (normals are flipped toward the viewer in the shader). Surfaces: in addition to
+   * $nocull, used when the map's faces aren't reliably wound (see auditFaceOrientation). Water: lone surfaces
+   * are seen from both sides; top/bottom face pairs are one-sided (undefined = double-sided).
+   */
+  doubleSided?: boolean;
+  /**
    * Merged brush entities: per-vertex modelIndex looks up (visible, alpha, tint) in this texture. modelPass
    * 0 draws the opaque models, 1 the faded ones (alpha-blended copy), 2 all of them (translucent materials).
    */
@@ -257,6 +263,7 @@ export class SurfaceMaterials {
       v.lightmap ? 'L' : v.vertexLight ? 'V' : v.synthLight ? 'S' : 'U',
       v.blend ? 'B' : '',
       v.decal ? 'D' : '',
+      v.doubleSided ? '2S' : v.doubleSided === false ? '1S' : '',
       v.pass,
       v.modelState ? `MS${v.modelPass ?? 2}` : '',
       instanceKey,
@@ -381,7 +388,7 @@ export class SurfaceMaterials {
       fragmentShader: WORLD_FRAGMENT,
       uniforms,
       defines,
-      side: def.noCull ? DoubleSide : FrontSide,
+      side: def.noCull || v.doubleSided ? DoubleSide : FrontSide,
     });
     m.name = def.name;
     m.wireframe = this.wireframe;
@@ -436,7 +443,7 @@ export class SurfaceMaterials {
       fragmentShader: WATER_FRAGMENT,
       uniforms,
       defines,
-      side: DoubleSide,
+      side: v.doubleSided === false ? FrontSide : DoubleSide,
     });
     m.name = def.name;
     m.transparent = true;

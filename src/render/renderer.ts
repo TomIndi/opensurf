@@ -8,9 +8,14 @@
 //      scaled about the sky_camera (p' = (p - origin) * scale, seen from the main eye == the engine's sky
 //      camera at origin + eye / scale), with the sky_camera fog; then the depth is cleared
 //   3. the main view: (2D sky cube when there is no 3D sky), sky faces as depth-only masks, opaque world
-//      sorted by shader/material, brush entities, props, decals, then translucent surfaces back to front,
-//      zones, ghosts, debug geometry
+//      sorted by shader/material, brush entities, props, decals, then translucent surfaces back to front
+//      (meshes by three.js, the planes inside each translucent mesh by translucency.ts), zones, ghosts, debug
+//      geometry
 //   4. resolve + blit to the canvas (render scale, sRGB output)
+//
+// At load, auditFaceOrientation (mapscene.ts) probes the collision world on both sides of sampled brush faces;
+// if a large share face into solid (a loader emitting faces back to front), BSP surfaces are drawn without
+// back-face culling so no wall disappears.
 import {
   BufferAttribute,
   BufferGeometry,
@@ -35,10 +40,10 @@ import type { Vec3 } from '../core/vec3';
 import type { GhostState, LoadProgress, RenderSettings, RendererApi, ViewState } from '../game/api';
 import type { FogDef, LoadedMap, ZoneDef } from '../map/types';
 import { CONTENTS_SLIME, CONTENTS_WATER } from '../physics/types';
-import { applySourceView, createSourceCamera, sourceVerticalFov } from './camera';
+import { EYE_PULLBACK, applySourceView, createSourceCamera, sourceVerticalFov } from './camera';
 import { ClipBrushes, DebugBoxes } from './debugdraw';
 import { Ghosts } from './ghosts';
-import { MapScene } from './mapscene';
+import { type FaceOrientationAudit, MapScene } from './mapscene';
 import { SkyBox } from './sky';
 import { BLIT_FRAGMENT, BLIT_VERTEX } from './shaders';
 import { TextureCache } from './textures';
@@ -54,6 +59,8 @@ export interface RendererOptions {
   preserveDrawingBuffer?: boolean;
   /** Near plane (default 3). */
   near?: number;
+  /** Back-face culling of BSP surfaces: 'auto' (default, see auditFaceOrientation), or forced on/off (debugging). */
+  doubleSided?: boolean | 'auto';
 }
 
 export const DEFAULT_SETTINGS: RenderSettings = {
@@ -102,6 +109,8 @@ export interface RendererDebugInfo {
   sky: { procedural: boolean; name: string; sky3d: boolean };
   maxAnisotropy: number;
   s3tc: boolean;
+  /** Brush face orientation audit (see auditFaceOrientation) and whether BSP surfaces are drawn double-sided. */
+  faces: { audit: FaceOrientationAudit | null; doubleSided: boolean } | null;
 }
 
 export class Renderer implements RendererApi {
@@ -136,6 +145,7 @@ export class Renderer implements RendererApi {
   private height = 1;
   private pixelRatio = 1;
   private contextLost = false;
+  private readonly doubleSidedOption: boolean | 'auto';
   private lastStats = { drawCalls: 0, triangles: 0, textures: 0 };
   private sky3dActive = false;
   /** Water surfaces (bounds + fog) for the underwater view, and the one the eye is under (null = not underwater). */
@@ -186,6 +196,7 @@ export class Renderer implements RendererApi {
     };
 
     this.camera = createSourceCamera(opts.near ?? 3, FAR);
+    this.doubleSidedOption = opts.doubleSided ?? 'auto';
     this.shared = createSharedUniforms();
     this.sky = new SkyBox(this.shared);
     this.zones = new ZoneBeams(this.shared.uTime, this.pixelScale);
@@ -301,7 +312,7 @@ export class Renderer implements RendererApi {
     textures.setAnisotropy(this.settings.maxAnisotropy);
     const materials = new SurfaceMaterials({ textures, shared: this.shared, alphaToCoverage: this.samples > 0 });
     materials.setWireframe(this.settings.wireframe);
-    const scene = new MapScene(map, { textures, materials, shared: this.shared });
+    const scene = new MapScene(map, { textures, materials, shared: this.shared, doubleSided: this.doubleSidedOption });
     const cleanup = () => {
       scene.dispose();
       materials.dispose();
@@ -318,6 +329,13 @@ export class Renderer implements RendererApi {
         if (aborted()) throw new LoadAbortedError();
       });
       if (aborted()) throw new LoadAbortedError();
+      const audit = scene.faceAudit;
+      if (scene.doubleSided && audit && typeof console !== 'undefined') {
+        console.warn(
+          `[renderer] ${map.name}: ${audit.inverted} of ${audit.inverted + audit.correct} sampled brush faces are wound inside-out ` +
+            `(the loader got their facing wrong); drawing BSP surfaces double-sided`,
+        );
+      }
       this.sky.setMap(map, textures);
       // install
       this.map = map;
@@ -499,10 +517,13 @@ export class Renderer implements RendererApi {
     const t = Number.isFinite(view.time) ? view.time : 0;
     this.shared.uTime.value = t;
     const aspect = this.width / this.height;
-    applySourceView(this.camera, view.origin, view.angles, view.fov, aspect);
+    applySourceView(this.camera, view.origin, view.angles, view.fov, aspect, EYE_PULLBACK);
     const vfov = (sourceVerticalFov(view.fov) * Math.PI) / 180;
     this.pixelScale.value = (2 * Math.tan(vfov / 2)) / Math.max(1, this.targetH);
-    this.mapScene?.update(t);
+    if (this.mapScene) {
+      this.mapScene.update(t);
+      this.mapScene.sortTranslucent(this.camera.position);
+    }
     this.updateUnderwater(view.origin);
     this.ghosts.update(t, this.tmpVec.copy(this.camera.position), this.pixelScale.value);
 
@@ -571,6 +592,7 @@ export class Renderer implements RendererApi {
       sky: { procedural: this.sky.procedural, name: this.sky.name, sky3d: this.sky3dActive },
       maxAnisotropy: this.caps.maxAnisotropy,
       s3tc: this.caps.s3tc,
+      faces: this.mapScene ? { audit: this.mapScene.faceAudit ? { ...this.mapScene.faceAudit } : null, doubleSided: this.mapScene.doubleSided } : null,
     };
   }
 

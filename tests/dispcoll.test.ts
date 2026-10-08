@@ -18,6 +18,7 @@ import {
   createCollisionWorld,
 } from '../src/bsp/bspcollision';
 import { parseEntities } from '../src/bsp/entities';
+import { loadBspMap } from '../src/bsp/loadmap';
 import { parseBsp } from '../src/bsp/reader';
 import { qa } from '../src/core/angles';
 import { Vec3, v3 } from '../src/core/vec3';
@@ -332,6 +333,80 @@ describe('triangle collision: basics', () => {
     expect(worstShave).toBeLessThan(DIST_EPSILON);
   });
 
+  it('box traces match the same triangles collided as brushes (triangleBrush), with lazily built bevels', () => {
+    // a bumpy 12x12 grid plus loose random triangles in one world: many triangles reach the bevel stage, so
+    // the lazily filled bevel store grows several times while the traces run
+    const tris: Tri[] = [];
+    const h = (x: number, y: number) => 20 * Math.sin(x * 0.03) * Math.cos(y * 0.045) + 6 * Math.sin(x * y * 0.0007);
+    const P = (i: number, j: number) => v3(i * 24, j * 24, h(i * 24, j * 24));
+    for (let i = 0; i < 12; i++)
+      for (let j = 0; j < 12; j++) tris.push([P(i, j), P(i + 1, j), P(i + 1, j + 1)], [P(i, j), P(i + 1, j + 1), P(i, j + 1)]);
+    const rnd = mulberry32(7);
+    for (let k = 0; k < 150; k++) {
+      const t = randomTri(rnd, 60);
+      tris.push(t.map((p) => v3(p.x * 0.7 + 150, p.y * 0.7 + 150, p.z * 0.3 + 40)) as Tri);
+    }
+    const world = new CollisionWorld([], { triangles: soupOf(tris) });
+    const brushes = [];
+    for (let i = 0; i < tris.length; i++) {
+      const b = world.triangleBrush(i);
+      if (b) brushes.push(b);
+    }
+    expect(brushes.length).toBe(world.triangleCount);
+    const asBrushes = new CollisionWorld(brushes);
+    const fresh = new CollisionWorld([], { triangles: soupOf(tris) });
+    const a = newTrace();
+    const b = newTrace();
+    const c = newTrace();
+    let hits = 0;
+    let starts = 0;
+    for (let k = 0; k < 4000; k++) {
+      const e = v3(2 + rnd() * 20, 2 + rnd() * 20, 2 + rnd() * 40);
+      const mins = v3(-e.x, -e.y, -e.z);
+      const s = v3(rnd() * 300, rnd() * 300, -60 + rnd() * 160);
+      const end = v3(s.x + (rnd() - 0.5) * 200, s.y + (rnd() - 0.5) * 200, s.z + (rnd() - 0.5) * 200);
+      world.traceBox(s, end, mins, e, MASK_ALL, a);
+      asBrushes.traceBox(s, end, mins, e, MASK_ALL, b);
+      expect(a.startsolid).toBe(b.startsolid);
+      expect(a.allsolid).toBe(b.allsolid);
+      expect(a.fraction).toBeCloseTo(b.fraction, 9);
+      expect(Math.abs(a.endpos.x - b.endpos.x) + Math.abs(a.endpos.y - b.endpos.y) + Math.abs(a.endpos.z - b.endpos.z)).toBeLessThan(1e-6);
+      if (a.fraction < 1 && !a.allsolid) {
+        hits++;
+        // the same plane, or a tie (several planes entered at the same fraction)
+        if (dot(a.plane.normal, b.plane.normal) < 0.999999) expect(a.fraction).toBeCloseTo(b.fraction, 12);
+      }
+      if (a.startsolid) starts++;
+      expect(world.testBox(s, mins, e, MASK_ALL)).toBe(asBrushes.testBox(s, mins, e, MASK_ALL));
+      // the bevel store doesn't change results: a fresh world tracing in a different order agrees
+      if (k % 3 === 0) {
+        fresh.traceBox(s, end, mins, e, MASK_ALL, c);
+        expect(c.fraction).toBe(a.fraction);
+        expect(c.plane.normal).toEqual(a.plane.normal);
+      }
+    }
+    expect(hits).toBeGreaterThan(1000);
+    expect(starts).toBeGreaterThan(50);
+    // enough triangles reached the bevel stage for the store to grow a few times (4096 numbers at first)
+    expect(world.stats().bevelledTriangles).toBeGreaterThan(200);
+    expect(world.stats().bevelledTriangles).toBeLessThanOrEqual(world.triangleCount);
+  });
+
+  it('loadBspMap collides with displacement triangles by default, prisms on request', async () => {
+    const quiet = { log: () => {} };
+    const tri = await loadBspMap('box_world', buildBoxWorld().buffer, undefined, quiet);
+    const pri = await loadBspMap('box_world', buildBoxWorld().buffer, undefined, { ...quiet, displacementCollision: 'prisms' });
+    expect(tri.collision.triangleCount).toBe(8);
+    expect(pri.collision.triangleCount).toBe(0);
+    expect(pri.collision.brushes.length).toBe(tri.collision.brushes.length + 8);
+    for (let x = 4; x < 64; x += 9)
+      for (let y = 4; y < 64; y += 9) {
+        const a = tri.collision.traceBox(v3(x, y, 300), v3(x, y, -30), HULL_MINS, HULL_MAXS, MASK_PLAYERSOLID);
+        const b = pri.collision.traceBox(v3(x, y, 300), v3(x, y, -30), HULL_MINS, HULL_MAXS, MASK_PLAYERSOLID);
+        expect(a.endpos.z).toBeCloseTo(b.endpos.z, 6);
+      }
+  });
+
   it('the synthetic BSP displacement collides like its prisms (top surface)', () => {
     const bsp = parseBsp(buildBoxWorld().buffer);
     const ents = parseEntities(bsp.entitiesText);
@@ -539,10 +614,16 @@ describe.skipIf(MAPS.length === 0)('displacement triangles vs prisms on real map
         const rnd = mulberry32(99);
         const tT = newTrace();
         const tP = newTrace();
+        const tThin = newTrace();
         let dropped = 0;
         let fell = 0;
-        let lower = 0; // rests lower than on the prisms (their extra depth bulges past convex creases)
+        // rests lower than on the prisms: their 2 units of depth behind every triangle stick out of the surface
+        // where a hull meets a displacement from behind (back-to-back displacement pairs, the backs of
+        // downward-facing ones) and bulge past convex creases
+        let lower = 0;
+        let lowerByDepth = 0; // ... on the same plane, exactly the prism depth further along its normal
         let higher = 0; // rests higher than on the prisms: impossible, prism hulls contain the triangles
+        let lowerUnexplained = 0; // lower, and not where a zero-thickness prism (the triangle as a brush) stops it
         let maxLower = 0;
         const notes: string[] = [];
         for (let k = 0; k < 1500; k++) {
@@ -564,6 +645,18 @@ describe.skipIf(MAPS.length === 0)('displacement triangles vs prisms on real map
           if (dz < -0.01) {
             lower++;
             maxLower = Math.max(maxLower, -dz);
+            const n = tP.plane.normal;
+            if (dot(n, tT.plane.normal) > 1 - 1e-9 && Math.abs(-dz * n.z - 2) < 0.05) lowerByDepth++;
+            // a 0.005-unit prism is the triangle as a brush, up to its depth: on a slope with normal n it
+            // holds the hull up to 0.005 / n.z higher (0.05 on a 84 degree slope)
+            worldThin.traceBox(start, end, HULL_MINS, HULL_MAXS, MASK_PLAYERSOLID, tThin);
+            const dThin = tThin.endpos.z - tT.endpos.z;
+            if (Math.abs(dThin) > 0.02 && !(Math.abs(dThin) < 1 && Math.abs(dThin * tThin.plane.normal.z) <= 0.006)) {
+              lowerUnexplained++;
+              if (notes.length < 5) {
+                notes.push(`lower than thin prisms by ${dThin.toFixed(3)} (n.z ${tThin.plane.normal.z.toFixed(3)}) from ${start.x.toFixed(1)},${start.y.toFixed(1)},${start.z.toFixed(1)}`);
+              }
+            }
           }
           if (dz > 0.01 && !tP.startsolid) {
             higher++;
@@ -572,12 +665,15 @@ describe.skipIf(MAPS.length === 0)('displacement triangles vs prisms on real map
         }
         console.log(
           `[dispcoll] ${name}: ${dropped} hull drops, ${fell} fell through; ${dropped - lower - higher} rest where they do on the prisms, ` +
-            `${lower} lower (up to ${maxLower.toFixed(2)} units: the prisms' depth bulges past convex creases), ${higher} higher` +
+            `${lower} lower (up to ${maxLower.toFixed(2)} units; ${lowerByDepth} on the same plane 2 units = the prism depth further, ` +
+            `the rest past the prisms' bulges at creases; ${lowerUnexplained} of them ` +
+            `not where 0.005-unit prisms stop either), ${higher} higher` +
             (notes.length ? `\n  ${notes.join('\n  ')}` : ''),
         );
         expect(dropped).toBeGreaterThan(100);
         expect(fell).toBe(0);
         expect(higher).toBe(0);
+        expect(lowerUnexplained).toBe(0);
       });
 
       it('players walking and surfing on the terrain never end in solid or pass through it', () => {

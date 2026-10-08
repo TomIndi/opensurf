@@ -174,7 +174,7 @@ function backwardFraction(b: RenderBatch): number {
 
 interface SynthFaceOpts {
   texinfo: number;
-  /** Plane normal of the face's plane (the face front is normal * (side ? -1 : 1)). */
+  /** Front normal of the face (= planes[planeNum].normal, as vbsp stores it; `side` is only the planeNum & 1 flag). */
   normal: Vec3;
   side?: number;
   lightOfs?: number;
@@ -752,7 +752,7 @@ describe('buildRenderBatches (synthetic map)', () => {
     expect(sky[0].material).toBe('tools/toolsskybox');
     expect(sky[0].lightmapUVs).toBeNull();
     expect(backwardFraction(sky[0])).toBe(0);
-    expect(sky[0].normals[2]).toBe(-1); // back-side face: normal flipped
+    expect(sky[0].normals[2]).toBe(1); // side=1 does not flip: the plane already faces the front
   });
 
   it('computes texture uvs from the texinfo and winds triangles counter-clockwise from the front', () => {
@@ -1667,10 +1667,12 @@ describe('loadBspMap (box world)', () => {
     expect(map.version).toBe(20);
     expect(map.entities.length).toBe(4);
     expect(map.models.length).toBe(3);
-    // collision: floor + solid func_brush (model 1) + displacement prisms; the trigger is not solid
+    // collision: floor + solid func_brush (model 1) brushes + the displacement's 8 collision triangles
+    // (native triangle collision by default); the trigger is not solid
     expect(map.collision.brushes.some((b) => b.model === 1)).toBe(true);
     expect(map.collision.brushes.some((b) => b.model === 2)).toBe(false);
-    expect(map.collision.brushes.length).toBe(1 + 1 + 8);
+    expect(map.collision.brushes.length).toBe(1 + 1);
+    expect(map.collision.triangleCount).toBe(8);
     // the single spawn (0 0 1) is placed one unit up; the displacement bump next to it blocks the hull there
     expect(map.spawns.length).toBe(1);
     expect(map.spawns[0].origin).toEqual(v3(0, 0, 2));

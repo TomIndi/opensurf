@@ -386,13 +386,15 @@ vec2 waveGradient(vec2 p, float t) {
 void main() {
 #include <logdepthbuf_fragment>
   vec3 V = normalize(vPosW - cameraPosition);
+  // the surface normal on the viewer's side: a top face seen from above, a $bottommaterial face (or a lone
+  // double-sided surface) seen from below
   vec3 n0 = normalize(vNormalW);
-  bool below = dot(V, n0) > 0.0;
+  if (dot(V, n0) > 0.0) n0 = -n0;
+  bool below = n0.z < -0.01;
   // ripple strength fades with distance (avoids shimmering) and on steep faces
   float strength = 2.2 / (1.0 + vViewDepth / 1800.0) * smoothstep(0.5, 0.9, abs(n0.z));
   vec2 g = waveGradient(vPosW.xy, uTime) * strength;
   vec3 n = normalize(n0 + vec3(-g, 0.0) * sign(n0.z + 1e-4));
-  if (below) n = -n;
   float cosv = clamp(dot(-V, n), 0.0, 1.0);
   float fresnel = 0.02 + 0.98 * pow(1.0 - cosv, 5.0);
   vec3 R = reflect(V, n);

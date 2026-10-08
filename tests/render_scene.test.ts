@@ -1,10 +1,15 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { Mesh, ShaderMaterial, Vector3 } from 'three';
+import { DoubleSide, FrontSide, Mesh, ShaderMaterial, Vector3 } from 'three';
 import { describe, expect, it } from 'vitest';
 import type { LoadedMap, RenderProp } from '../src/map/types';
-import { FIXTURE_SKY3D, buildFixtureMap } from '../src/render/fixtures';
+import { FIXTURE_SKY3D, buildFixtureMap, fixtureMaterial, quadBatch } from '../src/render/fixtures';
+import { SURF_SKY } from '../src/bsp/types';
+import { brushFromBox } from '../src/physics/brushbuild';
+import { CollisionWorld } from '../src/physics/collision';
+import { CONTENTS_SOLID } from '../src/physics/types';
 import {
+  INVERTED_FACE_THRESHOLD,
   MapScene,
   ORDER_DECAL,
   ORDER_DECAL_TRANSLUCENT,
@@ -14,6 +19,9 @@ import {
   indexAttribute,
   isEmptyCube,
   mergeProps,
+  auditFaceOrientation,
+  auditSaysInverted,
+  pairedWaterBatches,
   sky3dMatrix,
 } from '../src/render/mapscene';
 import { TextureCache } from '../src/render/textures';
@@ -21,7 +29,7 @@ import { SurfaceMaterials, createSharedUniforms, srgbToLinear } from '../src/ren
 
 const caps = { maxAnisotropy: 8, s3tc: false, maxTextureSize: 4096 };
 
-async function build(map: LoadedMap, opts: { mergeBrushEntities?: boolean; mergeWorld?: boolean } = {}) {
+async function build(map: LoadedMap, opts: { mergeBrushEntities?: boolean; mergeWorld?: boolean; doubleSided?: boolean | 'auto' } = {}) {
   const textures = new TextureCache(caps);
   const shared = createSharedUniforms();
   const materials = new SurfaceMaterials({ textures, shared });
@@ -338,6 +346,112 @@ describe('prop helpers', () => {
   });
 });
 
+/**
+ * A solid block (collision brush) whose 6 faces are drawn as quads; `flip` lists the faces emitted back to
+ * front (as a loader that misreads dface_t.side would).
+ */
+function blockMap(flip: string[], extra: { water?: 'pair' | 'pair-inverted' | 'lone' } = {}): LoadedMap {
+  const map = buildFixtureMap({ withSky3d: false });
+  const v = (x: number, y: number, z: number) => ({ x, y, z });
+  const materials = new Map([['block', fixtureMaterial('block')], ['water', fixtureMaterial('water', { isWater: true, translucent: true, waterFogColor: [0.1, 0.2, 0.3] })], ['water_beneath', fixtureMaterial('water_beneath', { isWater: true, translucent: true })], ['tools/toolsskybox', fixtureMaterial('tools/toolsskybox', { isSky: true })]]);
+  const lo = v(-100, -100, 0);
+  const hi = v(100, 100, 200);
+  const faces: [string, [ReturnType<typeof v>, ReturnType<typeof v>, ReturnType<typeof v>, ReturnType<typeof v>], ReturnType<typeof v>][] = [
+    ['-z', [v(lo.x, lo.y, lo.z), v(hi.x, lo.y, lo.z), v(hi.x, hi.y, lo.z), v(lo.x, hi.y, lo.z)], v(0, 0, -1)],
+    ['+z', [v(lo.x, lo.y, hi.z), v(hi.x, lo.y, hi.z), v(hi.x, hi.y, hi.z), v(lo.x, hi.y, hi.z)], v(0, 0, 1)],
+    ['-x', [v(lo.x, lo.y, lo.z), v(lo.x, hi.y, lo.z), v(lo.x, hi.y, hi.z), v(lo.x, lo.y, hi.z)], v(-1, 0, 0)],
+    ['+x', [v(hi.x, lo.y, lo.z), v(hi.x, hi.y, lo.z), v(hi.x, hi.y, hi.z), v(hi.x, lo.y, hi.z)], v(1, 0, 0)],
+    ['-y', [v(lo.x, lo.y, lo.z), v(hi.x, lo.y, lo.z), v(hi.x, lo.y, hi.z), v(lo.x, lo.y, hi.z)], v(0, -1, 0)],
+    ['+y', [v(lo.x, hi.y, lo.z), v(hi.x, hi.y, lo.z), v(hi.x, hi.y, hi.z), v(lo.x, hi.y, hi.z)], v(0, 1, 0)],
+  ];
+  const batches = [];
+  // many copies so the audit has enough samples (each copy is its own batch)
+  for (let k = 0; k < 8; k++) {
+    for (const [name, c, n] of faces) {
+      const out = flip.includes(name) ? v(-n.x, -n.y, -n.z) : n;
+      batches.push(quadBatch('block', c, out, { lightmap: null }));
+    }
+  }
+  // a sky face and a tool-less translucent face never count
+  batches.push(quadBatch('tools/toolsskybox', faces[1][1], v(0, 0, -1), { surfFlags: SURF_SKY }));
+  const wq = [v(200, -50, 50), v(300, -50, 50), v(300, 50, 50), v(200, 50, 50)] as [ReturnType<typeof v>, ReturnType<typeof v>, ReturnType<typeof v>, ReturnType<typeof v>];
+  if (extra.water === 'pair' || extra.water === 'pair-inverted') {
+    batches.push(quadBatch('water', wq, v(0, 0, 1)));
+    batches.push(quadBatch('water_beneath', wq, extra.water === 'pair' ? v(0, 0, -1) : v(0, 0, 1)));
+  } else if (extra.water === 'lone') batches.push(quadBatch('water', wq, v(0, 0, 1)));
+  map.render.batches = batches;
+  map.render.materials = materials;
+  map.render.props = [];
+  map.render.lightmap = null;
+  map.collision = new CollisionWorld([brushFromBox(lo, hi, CONTENTS_SOLID)]);
+  return map;
+}
+
+describe('face orientation audit', () => {
+  it('counts faces wound toward the solid side as inverted', () => {
+    const good = auditFaceOrientation(blockMap([]));
+    expect(good.inverted).toBe(0);
+    expect(good.correctArea).toBeCloseTo(good.correct * 200 * 200 / 2, -2); // 200x200 quads split in two triangles
+    expect(good.correct).toBe(good.sampled); // every block face has solid behind and air in front
+    expect(auditSaysInverted(good)).toBe(false);
+    // a third of the faces back to front - what a loader flipping dface_t.side faces produces
+    const bad = auditFaceOrientation(blockMap(['-x', '+y']));
+    expect(bad.inverted / (bad.inverted + bad.correct)).toBeCloseTo(1 / 3, 1);
+    expect(auditSaysInverted(bad)).toBe(true);
+    // a few stray faces stay below the threshold
+    const audit = (inverted: number, correct: number, invertedArea = inverted * 100, correctArea = correct * 100) => ({ sampled: inverted + correct, inverted, correct, ambiguous: 0, invertedArea, correctArea });
+    expect(auditSaysInverted(audit(40, 960))).toBe(false);
+    expect(auditSaysInverted(audit(160, 840))).toBe(INVERTED_FACE_THRESHOLD < 0.16);
+    expect(auditSaysInverted(audit(10, 0))).toBe(false); // too few to judge
+    // weighted by area: many inverted slivers (overlapping detail brushes) don't outvote the walls
+    expect(auditSaysInverted(audit(300, 700, 300 * 5, 700 * 2000))).toBe(false);
+    expect(auditSaysInverted(audit(100, 900, 100 * 4000, 900 * 1000))).toBe(true);
+  });
+
+  it('samples a bounded number of triangles and copes without collision', () => {
+    const a = auditFaceOrientation(blockMap([]), 10);
+    expect(a.sampled).toBeLessThanOrEqual(12);
+    expect(a.sampled).toBeGreaterThan(0);
+    const m = blockMap([]);
+    (m as { collision: unknown }).collision = null;
+    expect(auditFaceOrientation(m)).toEqual({ sampled: 0, inverted: 0, correct: 0, ambiguous: 0, invertedArea: 0, correctArea: 0 });
+    const t = blockMap([]);
+    (t.collision as { pointContents: unknown }).pointContents = () => {
+      throw new Error('boom');
+    };
+    expect(auditFaceOrientation(t).inverted).toBe(0);
+  });
+
+  it("'auto' draws BSP surfaces double-sided only when the audit finds inverted faces", async () => {
+    const sides = (s: MapScene) => new Set(s.meshes().filter((m) => !(m.material as ShaderMaterial).userData.surf?.isMask).map((m) => (m.material as ShaderMaterial).side));
+    const ok = await build(blockMap([]));
+    expect(ok.scene.doubleSided).toBe(false);
+    expect(ok.scene.faceAudit!.correct).toBeGreaterThan(0);
+    expect(sides(ok.scene)).toEqual(new Set([FrontSide]));
+    const bad = await build(blockMap(['-x', '+y']));
+    expect(bad.scene.doubleSided).toBe(true);
+    expect(sides(bad.scene)).toEqual(new Set([DoubleSide]));
+    // forced either way
+    expect(sides((await build(blockMap(['-x', '+y']), { doubleSided: false })).scene)).toEqual(new Set([FrontSide]));
+    const forced = await build(blockMap([]), { doubleSided: true });
+    expect(forced.scene.faceAudit).toBeNull();
+    expect(sides(forced.scene)).toEqual(new Set([DoubleSide]));
+  });
+
+  it('water: top/bottom face pairs are one-sided, lone surfaces double-sided', async () => {
+    const waterSide = (s: MapScene) => s.meshes().filter((m) => /water/.test(m.name)).map((m) => (m.material as ShaderMaterial).side);
+    const pair = blockMap([], { water: 'pair' });
+    expect(pairedWaterBatches(pair.render.batches, pair.render.materials).size).toBe(2);
+    expect(waterSide((await build(pair)).scene)).toEqual([FrontSide, FrontSide]);
+    // both faces pointing up (bottom face emitted inside-out): no pair, both visible from both sides
+    const inv = blockMap([], { water: 'pair-inverted' });
+    expect(pairedWaterBatches(inv.render.batches, inv.render.materials).size).toBe(0);
+    expect(waterSide((await build(inv)).scene)).toEqual([DoubleSide, DoubleSide]);
+    const lone = blockMap([], { water: 'lone' });
+    expect(waterSide((await build(lone)).scene)).toEqual([DoubleSide]);
+  });
+});
+
 describe('built-in maps', async () => {
   let mod: typeof import('../src/map/builtin/index') | null = null;
   try {
@@ -390,6 +504,13 @@ describe.skipIf(!MAPS)('real maps', () => {
         expect(Number.isFinite(m.geometry.boundingSphere!.radius)).toBe(true);
       }
       if (map.render.sky3d && map.render.sky3d.area >= 0) expect(scene.stats.sky3dMeshes).toBeGreaterThan(0);
+      // the face orientation audit decides most samples, quickly, and drives the culling mode
+      const ta = performance.now();
+      const audit = auditFaceOrientation(map);
+      expect(performance.now() - ta).toBeLessThan(1000);
+      expect(audit.inverted + audit.correct).toBeGreaterThan(audit.sampled * 0.5);
+      expect(scene.faceAudit).toEqual(audit);
+      expect(scene.doubleSided).toBe(auditSaysInverted(audit));
       // a material instance per (material, variant): far fewer than meshes
       expect(materials.materials.length).toBeLessThan(scene.stats.meshes + 2);
       expect(textures.count).toBeGreaterThan(0);

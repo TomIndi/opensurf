@@ -118,7 +118,7 @@ export function buildDisplacementMesh(bsp: BspFile, index: number): Displacement
 
   // Winding: (v00, v10, v01) has the winding of cross(corner1 - corner0, corner3 - corner0); make it
   // counter-clockwise around the front normal.
-  const sign = face.side ? -1 : 1;
+  const sign = 1; // planes[planeNum] already faces the front (vbsp: side = planeNum & 1)
   const fnx = plane.normal.x * sign;
   const fny = plane.normal.y * sign;
   const fnz = plane.normal.z * sign;

@@ -6,6 +6,14 @@ import type { Vec3 } from '../core/vec3';
 
 const DEG = Math.PI / 180;
 
+/**
+ * The renderer draws from 1/73 unit behind the eye. Map vertices sit on a 1/32-unit grid and so do eyes at
+ * spawns and on flat ground; with an axis-aligned view (every spawn) whole rows of vertices then lie exactly in
+ * the eye's plane (clip w = 0), which some rasterizers (SwiftShader) clip wrongly - the triangle smears across
+ * the screen. The offset keeps |w| >= 0.0137 for such vertices and is far below anything visible.
+ */
+export const EYE_PULLBACK = 1 / 73;
+
 /** Largest |pitch| the renderer accepts (the game clamps to 89 like cl_pitchup/cl_pitchdown). */
 export const MAX_PITCH = 89;
 
@@ -87,10 +95,18 @@ export function rigidInverse(m: Matrix4, out: Matrix4): Matrix4 {
 /**
  * Points `camera` at a Source view: Z-up (camera.up = 0,0,1), world matrix from the eye and angles, vertical
  * fov from the Source fov, aspect from the viewport. The camera must have matrixAutoUpdate and
- * matrixWorldAutoUpdate off (the renderer maintains its matrices itself).
+ * matrixWorldAutoUpdate off (the renderer maintains its matrices itself). `pullBack` moves the eye back along
+ * the view direction by that many units (see EYE_PULLBACK).
  */
-export function applySourceView(camera: PerspectiveCamera, origin: Vec3, angles: QAngle, fov: number, aspect: number): void {
+export function applySourceView(camera: PerspectiveCamera, origin: Vec3, angles: QAngle, fov: number, aspect: number, pullBack = 0): void {
   viewMatrixWorld(origin, angles, camera.matrixWorld);
+  if (pullBack) {
+    // move the eye back along the view direction (column 2 of the camera matrix is -forward)
+    const e = camera.matrixWorld.elements;
+    e[12] += e[8] * pullBack;
+    e[13] += e[9] * pullBack;
+    e[14] += e[10] * pullBack;
+  }
   rigidInverse(camera.matrixWorld, camera.matrixWorldInverse);
   camera.position.set(camera.matrixWorld.elements[12], camera.matrixWorld.elements[13], camera.matrixWorld.elements[14]);
   const vfov = sourceVerticalFov(fov);

@@ -41,9 +41,20 @@ interface Harness {
   };
   setView: (pos: number[] | null, ang: number[] | null, fov?: number) => void;
   readPixel: (x: number, y: number) => number[];
+  cullingDiff: () => number;
   renderNow: () => { drawCalls: number; triangles: number; textures: number };
   reload: (n: number) => Promise<{ textures: number; geometries: number; programs: number }>;
-  info: () => { depth: string; samples: number; textures: number; geometries: number; programs: number; scene: Record<string, number> | null; targetSize: number[]; sky: { procedural: boolean; sky3d: boolean } };
+  info: () => {
+    depth: string;
+    samples: number;
+    textures: number;
+    geometries: number;
+    programs: number;
+    scene: Record<string, number> | null;
+    targetSize: number[];
+    sky: { procedural: boolean; sky3d: boolean };
+    faces: { audit: { inverted: number; correct: number } | null; doubleSided: boolean } | null;
+  };
 }
 
 declare const window: { __renderHarness: Harness };
@@ -284,6 +295,25 @@ describe.skipIf(!chromiumPath)('renderer in a real browser', () => {
         const info = await page.evaluate(() => window.__renderHarness.info());
         expect(info.scene!.meshes).toBeGreaterThan(10);
         expect(info.scene!.triangles).toBeGreaterThan(10000);
+        // no wall may vanish to back-face culling: the spawn view (and three more directions) look the same with
+        // culling switched off for every surface (the face orientation audit picks double-sided drawing when
+        // the loader emits faces inside-out)
+        expect(info.faces).toBeTruthy();
+        for (const turn of [0, 90, 180, 270]) {
+          const diff = await page.evaluate((turn) => {
+            const h = window.__renderHarness;
+            if (turn) h.setView(null, [10, turn]);
+            return h.cullingDiff();
+          }, turn);
+          expect(diff, `pixels lost to culling, view ${turn}`).toBeLessThan(0.02);
+        }
+        if (name === 'surf_kitsune') {
+          // the red stage start: a floor of 4 stacked translucent grids (black, thin red lines), seen from a
+          // spawn position whose eye plane contains floor vertices. Mostly dark - not the solid red of layers
+          // drawn front to back or of triangles smeared from w = 0 vertices
+          const px = await pixelAt(page, [-15360, -15088, 880], [0, 90], 0.3, 0.9);
+          expect(px[0], `floor pixel ${px}`).toBeLessThan(120);
+        }
         const first = await page.evaluate(() => window.__renderHarness.reload(1));
         const again = await page.evaluate(() => window.__renderHarness.reload(2));
         expect(again.textures).toBe(first.textures);

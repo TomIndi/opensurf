@@ -20,20 +20,27 @@
 //  - Real-map brushes should keep the compiler's bevel sides (Source-exact edge behaviour);
 //    addBrushBevels never removes them, it only adds missing ones.
 //
-// Triangle meshes (displacement terrain, CollisionWorldOptions.triangles) live in a second BVH and are
-// traced with the same clipping rules: for box traces every triangle is a zero-thickness convex hull whose
-// planes are the triangle plane facing each way plus the bevels that make plane pushing exact (the box's
-// axial planes and the edge x axis planes, i.e. the separating axes of a box and a triangle), clipped
-// exactly like a brush (DIST_EPSILON pull-back, startsolid/allsolid, corner shaving). Triangles are
-// TWO-SIDED: a box is stopped DIST_EPSILON in front of whichever face it approaches, so terrain can't be
-// passed from above or below. (Source's displacements are solid from the front only; the old prism
-// brushes were two-sided too.) A zero-thickness hull would let degenerate flat boxes slip through, because
-// the pulled-in leave fraction equals the enter fraction; for those the far face is moved
-// TRI_MIN_THICKNESS behind the triangle (as seen from the trace start). Point traces use a plain two-sided
-// segment/triangle test with the same face-plane rules and edges included, so rays don't leak through
-// the seams between triangles the way they do between thin brushes.
+// Triangle meshes (displacement terrain, CollisionWorldOptions.triangles) live in their own BVH (a
+// Morton-order tree: linear-time to build, which matters for the ~180k terrain triangles of the heaviest
+// maps) and are traced with the same clipping rules as brushes: for box traces every triangle is a
+// zero-thickness convex hull whose planes are the triangle plane facing each way, the triangle's axial
+// bounds and its edge x axis bevels - the separating axes of a box and a triangle, so plane pushing is
+// exact - clipped exactly like a brush (DIST_EPSILON pull-back, startsolid/allsolid, corner shaving). The
+// reported plane is the triangle plane, or the axial / bevel plane that was entered last (edge and vertex
+// contacts), as for brush bevels. A triangle's edge bevel planes are built the first time a box trace gets
+// that far (and kept): most terrain triangles are never touched, so building the world stays cheap.
+// Triangles are TWO-SIDED: a box is stopped DIST_EPSILON in front of whichever face it approaches, so
+// terrain can't be passed from above or below. Source's displacement collision is solid from the front
+// only; the 2-unit prism brushes this replaces were solid from both sides, and two-sided keeps that: a
+// player who ends up under terrain (a teleport, a moving brush) can't fall through it from behind either.
+// A zero-thickness hull would let degenerate flat boxes slip through, because the pulled-in leave
+// fraction equals the enter fraction; for those the far face is moved TRI_MIN_THICKNESS behind the
+// triangle (as seen from the trace start). Point traces use a plain two-sided segment/triangle test with
+// the same face-plane rules and edges included, so rays don't leak through the seams between triangles
+// the way they do between thin brushes.
 // Triangles have no volume: pointContents ignores them (like Source, where displacements aren't part of
-// the BSP contents), while testBox/traceBox see them (touching counts as inside, as for brushes).
+// the BSP contents), while testBox/traceBox see them (touching counts as inside, as for brushes). queryBox
+// reports brushes only; queryTriangles / triangle / triangleBrush expose the triangles.
 //
 // Implemented from the algorithm descriptions; no engine code was used.
 import { Vec3, v3 } from '../core/vec3';
@@ -102,33 +109,32 @@ const AXIAL_LIMIT = 1 - 1e-9;
 const TRI_MIN_CROSS = 1e-6;
 
 // ------------------------------------------------------------------------------------- triangle clipping
-// Module-scope clip state for one triangle (traces are synchronous and never re-enter): start/end box
-// centres, the enter/leave fractions and the leading (unexpanded) plane. Same rules as the brush loop in
-// CollisionWorld.traceBox.
-let kSx = 0;
-let kSy = 0;
-let kSz = 0;
-let kTx = 0;
-let kTy = 0;
-let kTz = 0;
-let kEnter = -1;
-let kLeave = 1;
+// Clip state for one triangle, shared by the clip helpers below (traces are synchronous and never
+// re-enter); same rules as the brush loop in CollisionWorld.traceBox. The numbers live in a typed array:
+// numbers kept in module-scope `let`s are boxed, so every store would allocate in the hottest loop.
+//   KS[0..2]  start box centre         KS[3..5]  end box centre
+//   KS[6]     enter fraction           KS[7]     leave fraction
+//   KS[8..10] leading plane normal     KS[11]    leading plane distance (unexpanded)
+//   KS[12]    the trace's best fraction so far: a triangle entered at or after it can't change the result
+const KS = new Float64Array(13);
 let kStartOut = false;
 let kGetOut = false;
-let kLnx = 0;
-let kLny = 0;
-let kLnz = 0;
-let kLd = 0;
-/** The trace's current best fraction: a triangle entered at or after it can't change the result. */
-let kBest = 1;
+
+/**
+ * Numbers per triangle slot in the triangle data array: vertices a, b, c (9; counter-clockwise around the
+ * normal), unit normal (3), plane distance (1). One record per triangle keeps a leaf's data contiguous.
+ */
+const TRI_STRIDE = 13;
+/** Most numbers triangleBevels writes for one triangle: the count + 18 planes. */
+const TRI_BEVELS_MAX = 1 + 18 * 4;
 
 /**
  * One half-space n.p <= dist (dist already pushed out by the box; `support` = the unexpanded plane
  * distance reported on a hit). Returns false when the move misses the hull (clearly in front of it).
  */
 function clipPlane(nx: number, ny: number, nz: number, dist: number, support: number): boolean {
-  const d1 = nx * kSx + ny * kSy + nz * kSz - dist;
-  const d2 = nx * kTx + ny * kTy + nz * kTz - dist;
+  const d1 = nx * KS[0] + ny * KS[1] + nz * KS[2] - dist;
+  const d2 = nx * KS[3] + ny * KS[4] + nz * KS[5] - dist;
   if (d2 > 0) kGetOut = true;
   if (d1 > 0) {
     kStartOut = true;
@@ -138,21 +144,21 @@ function clipPlane(nx: number, ny: number, nz: number, dist: number, support: nu
   }
   if (d1 > d2) {
     const f = (d1 - DIST_EPSILON) / (d1 - d2);
-    if (f > kEnter) {
-      kEnter = f;
-      kLnx = nx;
-      kLny = ny;
-      kLnz = nz;
-      kLd = support;
+    if (f > KS[6]) {
+      KS[6] = f;
+      KS[8] = nx;
+      KS[9] = ny;
+      KS[10] = nz;
+      KS[11] = support;
       // (an entering plane means the start is outside: no startsolid either)
-      if (f >= kBest) return false;
+      if (f >= KS[12]) return false;
     }
   } else {
     const f = (d1 + DIST_EPSILON) / (d1 - d2);
-    if (f < kLeave) kLeave = f;
+    if (f < KS[7]) KS[7] = f;
   }
   // enter/leave only move towards each other: once crossed (and started outside) it's a miss
-  return !(kStartOut && kEnter >= kLeave);
+  return !(kStartOut && KS[6] >= KS[7]);
 }
 
 /**
@@ -174,97 +180,158 @@ function clipAxial(axis: number, lo: number, hi: number, e: number, s: number): 
 }
 
 /**
- * The edge x axis bevels of triangle slot t, from its cached bevel data (see computeBevels): for edge i
- * (vertex i -> i+1) and axis a, normal c = (unit edge x axis) * inv, kept in the direction(s) flagged
- * where the edge supports the triangle; the plane distance is the triangle's support along it.
+ * The swept box (centre KS[0..2] -> KS[3..5], half extents ex/ey/ez) against the face and axial planes of
+ * triangle slot `t` of T (TRI_STRIDE per slot), after a swept-bounds broad phase within [0, KS[12]]. Resets
+ * the clip state first. Returns false when the move misses; otherwise the edge bevels (clipBevelPlanes)
+ * complete the hull and then KS[6..11], kStartOut and kGetOut hold the result, exactly like a brush clip.
+ * The planes are the separating axes of a box and a triangle, so plane pushing is exact.
  */
-function clipBevels(
-  D: Float32Array, INV: Float32Array, F: Uint32Array, t: number,
-  ax: number, ay: number, az: number,
-  bx: number, by: number, bz: number,
-  cx: number, cy: number, cz: number,
-  ex: number, ey: number, ez: number,
-): boolean {
-  const flags = F[t];
-  if (flags === 0) return true;
-  const o = t * 9;
-  for (let i = 0; i < 3; i++) {
-    const bits = (flags >>> (i * 6)) & 63;
-    if (bits === 0) continue;
-    const dx = D[o + i * 3];
-    const dy = D[o + i * 3 + 1];
-    const dz = D[o + i * 3 + 2];
-    for (let k = 0; k < 3; k++) {
-      const dir = (bits >>> (k * 2)) & 3;
-      if (dir === 0) continue;
-      const inv = INV[o + i * 3 + k];
-      let nx: number;
-      let ny: number;
-      let nz: number;
-      if (k === 0) {
-        nx = 0;
-        ny = dz * inv;
-        nz = -dy * inv;
-      } else if (k === 1) {
-        nx = -dz * inv;
-        ny = 0;
-        nz = dx * inv;
-      } else {
-        nx = dy * inv;
-        ny = -dx * inv;
-        nz = 0;
+function clipTriangleHull(T: Float64Array, t: number, ex: number, ey: number, ez: number): boolean {
+  KS[6] = -1;
+  KS[7] = 1;
+  kStartOut = false;
+  kGetOut = false;
+  const o = t * TRI_STRIDE;
+  const ax = T[o];
+  const ay = T[o + 1];
+  const az = T[o + 2];
+  const bx = T[o + 3];
+  const by = T[o + 4];
+  const bz = T[o + 5];
+  const cx = T[o + 6];
+  const cy = T[o + 7];
+  const cz = T[o + 8];
+  const minx = ax < bx ? (ax < cx ? ax : cx) : bx < cx ? bx : cx;
+  const maxx = ax > bx ? (ax > cx ? ax : cx) : bx > cx ? bx : cx;
+  const miny = ay < by ? (ay < cy ? ay : cy) : by < cy ? by : cy;
+  const maxy = ay > by ? (ay > cy ? ay : cy) : by > cy ? by : cy;
+  const minz = az < bz ? (az < cz ? az : cz) : bz < cz ? bz : cz;
+  const maxz = az > bz ? (az > cz ? az : cz) : bz > cz ? bz : cz;
+  const sx = KS[0];
+  const sy = KS[1];
+  const sz = KS[2];
+  // broad phase: the swept box against the triangle's bounds (with the usual margin) within [0, best]
+  {
+    let tmin = 0;
+    let tmax = KS[12];
+    const dx = KS[3] - sx;
+    const dy = KS[4] - sy;
+    const dz = KS[5] - sz;
+    const bx0 = minx - ex - BROAD_MARGIN - sx;
+    const bx1 = maxx + ex + BROAD_MARGIN - sx;
+    if (dx === 0) {
+      if (bx0 > 0 || bx1 < 0) return false;
+    } else {
+      let t1 = bx0 / dx;
+      let t2 = bx1 / dx;
+      if (t1 > t2) {
+        const q = t1;
+        t1 = t2;
+        t2 = q;
       }
-      const sa = nx * ax + ny * ay + nz * az;
-      const sb = nx * bx + ny * by + nz * bz;
-      const sc = nx * cx + ny * cy + nz * cz;
-      const r = (nx < 0 ? -nx : nx) * ex + (ny < 0 ? -ny : ny) * ey + (nz < 0 ? -nz : nz) * ez;
-      if (dir & 1) {
-        const d = sa > sb ? (sa > sc ? sa : sc) : sb > sc ? sb : sc;
-        if (!clipPlane(nx, ny, nz, d + r, d)) return false;
-      }
-      if (dir & 2) {
-        const d = -(sa < sb ? (sa < sc ? sa : sc) : sb < sc ? sb : sc);
-        if (!clipPlane(-nx, -ny, -nz, d + r, d)) return false;
-      }
+      if (t1 > tmin) tmin = t1;
+      if (t2 < tmax) tmax = t2;
     }
+    const by0 = miny - ey - BROAD_MARGIN - sy;
+    const by1 = maxy + ey + BROAD_MARGIN - sy;
+    if (dy === 0) {
+      if (by0 > 0 || by1 < 0) return false;
+    } else {
+      let t1 = by0 / dy;
+      let t2 = by1 / dy;
+      if (t1 > t2) {
+        const q = t1;
+        t1 = t2;
+        t2 = q;
+      }
+      if (t1 > tmin) tmin = t1;
+      if (t2 < tmax) tmax = t2;
+    }
+    const bz0 = minz - ez - BROAD_MARGIN - sz;
+    const bz1 = maxz + ez + BROAD_MARGIN - sz;
+    if (dz === 0) {
+      if (bz0 > 0 || bz1 < 0) return false;
+    } else {
+      let t1 = bz0 / dz;
+      let t2 = bz1 / dz;
+      if (t1 > t2) {
+        const q = t1;
+        t1 = t2;
+        t2 = q;
+      }
+      if (t1 > tmin) tmin = t1;
+      if (t2 < tmax) tmax = t2;
+    }
+    if (tmin > tmax) return false;
+  }
+  const nx = T[o + 9];
+  const ny = T[o + 10];
+  const nz = T[o + 11];
+  const d = T[o + 12];
+  // the two faces: the one facing the start is exact, the far one is moved back for thin hulls
+  const r = (nx < 0 ? -nx : nx) * ex + (ny < 0 ? -ny : ny) * ey + (nz < 0 ? -nz : nz) * ez;
+  const rf = r < TRI_MIN_THICKNESS ? TRI_MIN_THICKNESS : r;
+  if (nx * sx + ny * sy + nz * sz - d >= 0) {
+    if (!clipPlane(nx, ny, nz, d + r, d) || !clipPlane(-nx, -ny, -nz, rf - d, -d)) return false;
+  } else if (!clipPlane(-nx, -ny, -nz, r - d, -d) || !clipPlane(nx, ny, nz, d + rf, d)) {
+    return false;
+  }
+  // then the axial planes of the triangle bounds
+  return clipAxial(0, minx, maxx, ex, sx) && clipAxial(1, miny, maxy, ey, sy) && clipAxial(2, minz, maxz, ez, sz);
+}
+
+/**
+ * The edge bevel planes of one triangle (see triangleBevels), stored in B at `off`: B[off] = count, then
+ * count x (nx ny nz dist). Continues the clip clipTriangleHull started.
+ */
+function clipBevelPlanes(B: Float64Array, off: number, ex: number, ey: number, ez: number): boolean {
+  const end = off + 1 + B[off] * 4;
+  for (let o = off + 1; o < end; o += 4) {
+    const nx = B[o];
+    const ny = B[o + 1];
+    const nz = B[o + 2];
+    const d = B[o + 3];
+    const r = (nx < 0 ? -nx : nx) * ex + (ny < 0 ? -ny : ny) * ey + (nz < 0 ? -nz : nz) * ez;
+    if (!clipPlane(nx, ny, nz, d + r, d)) return false;
   }
   return true;
 }
 
 /**
- * Bevel data of triangle slot t (verts V, unit normal n) into D (unit edge directions, float32), INV
- * (1 / |unit edge x axis| for the float32 directions) and F (2 bits per edge/axis: 1 = +c supports the
- * triangle through the edge, 2 = -c does; 0 = no bevel: degenerate edge, edge along the axis, or a normal
- * that duplicates an axial or face plane). Same selection rules as the brush bevel builders.
+ * Writes the edge x axis bevel planes of triangle slot t of T to out[o] = count, then count x (nx ny nz
+ * dist); returns how many numbers it wrote (1 + 4 * count, at most TRI_BEVELS_MAX). For edge i (vertex i
+ * -> i+1) and axis a, the unit normal c = unit edge x axis is kept in the direction(s) in which the edge
+ * supports the triangle (within BEVEL_ON_EPSILON), at the triangle's support distance along it. Skipped:
+ * short edges, edges (nearly) along the axis, and normals that duplicate an axial or a face plane. Same
+ * selection rules as the brush bevel builders.
  */
-function computeBevels(V: Float64Array, t: number, nx: number, ny: number, nz: number, D: Float32Array, INV: Float32Array, F: Uint32Array): void {
-  const o = t * 9;
-  let flags = 0;
+function triangleBevels(T: Float64Array, t: number, out: Float64Array, o: number): number {
+  const b = t * TRI_STRIDE;
+  const nx = T[b + 9];
+  const ny = T[b + 10];
+  const nz = T[b + 11];
+  let w = o + 1;
   for (let i = 0; i < 3; i++) {
-    const p = o + i * 3;
-    const q = o + ((i + 1) % 3) * 3;
-    const kv = o + ((i + 2) % 3) * 3;
-    let ex = V[q] - V[p];
-    let ey = V[q + 1] - V[p + 1];
-    let ez = V[q + 2] - V[p + 2];
+    const p = b + i * 3;
+    const q = b + ((i + 1) % 3) * 3;
+    const k = b + ((i + 2) % 3) * 3;
+    let ex = T[q] - T[p];
+    let ey = T[q + 1] - T[p + 1];
+    let ez = T[q + 2] - T[p + 2];
     const len = Math.sqrt(ex * ex + ey * ey + ez * ez);
     if (!(len >= BEVEL_MIN_EDGE)) continue;
-    D[o + i * 3] = ex / len;
-    D[o + i * 3 + 1] = ey / len;
-    D[o + i * 3 + 2] = ez / len;
-    // the float32 direction is what the trace uses
-    ex = D[o + i * 3];
-    ey = D[o + i * 3 + 1];
-    ez = D[o + i * 3 + 2];
-    for (let k = 0; k < 3; k++) {
+    ex /= len;
+    ey /= len;
+    ez /= len;
+    for (let a = 0; a < 3; a++) {
       let cx: number;
       let cy: number;
       let cz: number;
-      if (k === 0) {
+      if (a === 0) {
         cx = 0;
         cy = ez;
         cz = -ey;
-      } else if (k === 1) {
+      } else if (a === 1) {
         cx = -ez;
         cy = 0;
         cz = ex;
@@ -275,27 +342,36 @@ function computeBevels(V: Float64Array, t: number, nx: number, ny: number, nz: n
       }
       const l = Math.sqrt(cx * cx + cy * cy + cz * cz);
       if (l < BEVEL_MIN_CROSS) continue; // edge (nearly) along the axis
-      INV[o + i * 3 + k] = 1 / l;
-      const inv = INV[o + i * 3 + k];
-      cx *= inv;
-      cy *= inv;
-      cz *= inv;
+      cx /= l;
+      cy /= l;
+      cz /= l;
       // axial normals duplicate the axial planes, normals along the triangle normal the face planes
       if (cx > AXIAL_LIMIT || cx < -AXIAL_LIMIT || cy > AXIAL_LIMIT || cy < -AXIAL_LIMIT || cz > AXIAL_LIMIT || cz < -AXIAL_LIMIT) continue;
       const cn = cx * nx + cy * ny + cz * nz;
       if (cn > AXIAL_LIMIT || cn < -AXIAL_LIMIT) continue;
-      const sp = cx * V[p] + cy * V[p + 1] + cz * V[p + 2];
-      const sq = cx * V[q] + cy * V[q + 1] + cz * V[q + 2];
-      const sk = cx * V[kv] + cy * V[kv + 1] + cz * V[kv + 2];
+      const sp = cx * T[p] + cy * T[p + 1] + cz * T[p + 2];
+      const sq = cx * T[q] + cy * T[q + 1] + cz * T[q + 2];
+      const sk = cx * T[k] + cy * T[k + 1] + cz * T[k + 2];
       const eMax = sp > sq ? sp : sq;
       const eMin = sp > sq ? sq : sp;
-      let dir = 0;
-      if (eMin >= sk - BEVEL_ON_EPSILON) dir |= 1;
-      if (eMax <= sk + BEVEL_ON_EPSILON) dir |= 2;
-      flags |= dir << (i * 6 + k * 2);
+      if (eMin >= sk - BEVEL_ON_EPSILON) {
+        out[w] = cx;
+        out[w + 1] = cy;
+        out[w + 2] = cz;
+        out[w + 3] = eMax > sk ? eMax : sk;
+        w += 4;
+      }
+      if (eMax <= sk + BEVEL_ON_EPSILON) {
+        out[w] = -cx;
+        out[w + 1] = -cy;
+        out[w + 2] = -cz;
+        out[w + 3] = -(eMin < sk ? eMin : sk);
+        w += 4;
+      }
     }
   }
-  F[t] = flags >>> 0;
+  out[o] = (w - o - 1) / 4;
+  return w - o;
 }
 
 /**
@@ -336,30 +412,35 @@ function edgeInside(
 }
 
 /**
- * Point trace against triangle slot `t`: the segment kS -> kT against the zero-thickness triangle, two-sided,
- * with the brush rules for the face planes (a hit stops DIST_EPSILON in front of the face that is approached;
- * ending within DIST_EPSILON of it counts; a start exactly on the triangle is startsolid). The contact must
- * project into the triangle, edges included (see projectsInside): unlike a clipped thin brush, whose
- * pulled-in leave fractions let rays through within DIST_EPSILON of its edges, a triangulated surface has no
- * seams for rays. Sets the k* state like clipTriangle.
+ * Point trace against triangle slot `t` of T: the segment KS[0..2] -> KS[3..5] against the zero-thickness
+ * triangle, two-sided, with the brush rules for the face planes (a hit stops DIST_EPSILON in front of the
+ * face that is approached; ending within DIST_EPSILON of it counts; a start exactly on the triangle is
+ * startsolid). The contact must project into the triangle, edges included (see projectsInside): unlike a
+ * clipped thin brush, whose pulled-in leave fractions let rays through within DIST_EPSILON of its edges, a
+ * triangulated surface has no seams for rays. Resets and sets the clip state like clipTriangleHull.
  */
-function clipTriangleRay(V: Float64Array, P: Float64Array, t: number): boolean {
-  const p4 = t * 4;
-  let nx = P[p4];
-  let ny = P[p4 + 1];
-  let nz = P[p4 + 2];
-  let d = P[p4 + 3];
-  let d1 = nx * kSx + ny * kSy + nz * kSz - d;
-  let d2 = nx * kTx + ny * kTy + nz * kTz - d;
-  const o = t * 9;
-  const ax = V[o], ay = V[o + 1], az = V[o + 2];
-  const bx = V[o + 3], by = V[o + 4], bz = V[o + 5];
-  const cx = V[o + 6], cy = V[o + 7], cz = V[o + 8];
+function clipTriangleRay(T: Float64Array, t: number): boolean {
+  KS[6] = -1;
+  KS[7] = 1;
+  kStartOut = false;
+  kGetOut = false;
+  const o = t * TRI_STRIDE;
+  const fnx = T[o + 9];
+  const fny = T[o + 10];
+  const fnz = T[o + 11];
+  let nx = fnx;
+  let ny = fny;
+  let nz = fnz;
+  let d = T[o + 12];
+  let d1 = nx * KS[0] + ny * KS[1] + nz * KS[2] - d;
+  let d2 = nx * KS[3] + ny * KS[4] + nz * KS[5] - d;
+  const ax = T[o], ay = T[o + 1], az = T[o + 2];
+  const bx = T[o + 3], by = T[o + 4], bz = T[o + 5];
+  const cx = T[o + 6], cy = T[o + 7], cz = T[o + 8];
   if (d1 === 0) {
     // starting on the plane: inside (touching) when on the triangle, which then doesn't block
-    if (!projectsInside(ax, ay, az, bx, by, bz, cx, cy, cz, nx, ny, nz, kSx, kSy, kSz)) return false;
-    kStartOut = false;
-    kGetOut = !(d2 === 0 && projectsInside(ax, ay, az, bx, by, bz, cx, cy, cz, nx, ny, nz, kTx, kTy, kTz));
+    if (!projectsInside(ax, ay, az, bx, by, bz, cx, cy, cz, nx, ny, nz, KS[0], KS[1], KS[2])) return false;
+    kGetOut = !(d2 === 0 && projectsInside(ax, ay, az, bx, by, bz, cx, cy, cz, nx, ny, nz, KS[3], KS[4], KS[5]));
     return true;
   }
   if (d1 < 0) {
@@ -376,139 +457,37 @@ function clipTriangleRay(V: Float64Array, P: Float64Array, t: number): boolean {
   if (!(f > -1)) return false;
   // where the segment meets the plane (or its end, when that stops short within DIST_EPSILON)
   const fc = d2 > 0 ? 1 : d1 / (d1 - d2);
-  const px = kSx + (kTx - kSx) * fc;
-  const py = kSy + (kTy - kSy) * fc;
-  const pz = kSz + (kTz - kSz) * fc;
-  if (!projectsInside(ax, ay, az, bx, by, bz, cx, cy, cz, P[p4], P[p4 + 1], P[p4 + 2], px, py, pz)) return false;
+  const px = KS[0] + (KS[3] - KS[0]) * fc;
+  const py = KS[1] + (KS[4] - KS[1]) * fc;
+  const pz = KS[2] + (KS[5] - KS[2]) * fc;
+  if (!projectsInside(ax, ay, az, bx, by, bz, cx, cy, cz, fnx, fny, fnz, px, py, pz)) return false;
   kStartOut = true;
   kGetOut = true;
-  kEnter = f;
-  kLeave = 1;
-  kLnx = nx;
-  kLny = ny;
-  kLnz = nz;
-  kLd = d;
+  KS[6] = f;
+  KS[8] = nx;
+  KS[9] = ny;
+  KS[10] = nz;
+  KS[11] = d;
   return true;
 }
 
-/**
- * Clips the swept box (centre kS -> kT, half extents ex/ey/ez; a point when isPoint) against triangle
- * slot `t` (verts: 9 per slot, plane: nx ny nz d per slot). Returns false when the move can't touch it;
- * otherwise kEnter/kLeave/kStartOut/kGetOut/kL* hold the result, exactly like a brush clip. Boxes clip
- * against the hull planes: both faces, the axial planes and the edge x axis bevels (the separating axes
- * of a box and a triangle, so plane pushing is exact). Points use clipTriangleRay.
- */
-function clipTriangle(
-  V: Float64Array, P: Float64Array, D: Float32Array, INV: Float32Array, F: Uint32Array,
-  t: number, ex: number, ey: number, ez: number, isPoint: boolean,
-): boolean {
-  kEnter = -1;
-  kLeave = 1;
-  kStartOut = false;
-  kGetOut = false;
-  if (isPoint) return clipTriangleRay(V, P, t);
-  const o = t * 9;
-  const ax = V[o];
-  const ay = V[o + 1];
-  const az = V[o + 2];
-  const bx = V[o + 3];
-  const by = V[o + 4];
-  const bz = V[o + 5];
-  const cx = V[o + 6];
-  const cy = V[o + 7];
-  const cz = V[o + 8];
-  const minx = ax < bx ? (ax < cx ? ax : cx) : bx < cx ? bx : cx;
-  const maxx = ax > bx ? (ax > cx ? ax : cx) : bx > cx ? bx : cx;
-  const miny = ay < by ? (ay < cy ? ay : cy) : by < cy ? by : cy;
-  const maxy = ay > by ? (ay > cy ? ay : cy) : by > cy ? by : cy;
-  const minz = az < bz ? (az < cz ? az : cz) : bz < cz ? bz : cz;
-  const maxz = az > bz ? (az > cz ? az : cz) : bz > cz ? bz : cz;
-  // broad phase: the swept box against the triangle's bounds (with the usual margin) within [0, best]
-  {
-    let tmin = 0;
-    let tmax = kBest;
-    const dx = kTx - kSx;
-    const dy = kTy - kSy;
-    const dz = kTz - kSz;
-    const bx0 = minx - ex - BROAD_MARGIN - kSx;
-    const bx1 = maxx + ex + BROAD_MARGIN - kSx;
-    if (dx === 0) {
-      if (bx0 > 0 || bx1 < 0) return false;
-    } else {
-      let t1 = bx0 / dx;
-      let t2 = bx1 / dx;
-      if (t1 > t2) {
-        const q = t1;
-        t1 = t2;
-        t2 = q;
-      }
-      if (t1 > tmin) tmin = t1;
-      if (t2 < tmax) tmax = t2;
-    }
-    const by0 = miny - ey - BROAD_MARGIN - kSy;
-    const by1 = maxy + ey + BROAD_MARGIN - kSy;
-    if (dy === 0) {
-      if (by0 > 0 || by1 < 0) return false;
-    } else {
-      let t1 = by0 / dy;
-      let t2 = by1 / dy;
-      if (t1 > t2) {
-        const q = t1;
-        t1 = t2;
-        t2 = q;
-      }
-      if (t1 > tmin) tmin = t1;
-      if (t2 < tmax) tmax = t2;
-    }
-    const bz0 = minz - ez - BROAD_MARGIN - kSz;
-    const bz1 = maxz + ez + BROAD_MARGIN - kSz;
-    if (dz === 0) {
-      if (bz0 > 0 || bz1 < 0) return false;
-    } else {
-      let t1 = bz0 / dz;
-      let t2 = bz1 / dz;
-      if (t1 > t2) {
-        const q = t1;
-        t1 = t2;
-        t2 = q;
-      }
-      if (t1 > tmin) tmin = t1;
-      if (t2 < tmax) tmax = t2;
-    }
-    if (tmin > tmax) return false;
-  }
-  const p4 = t * 4;
-  const nx = P[p4];
-  const ny = P[p4 + 1];
-  const nz = P[p4 + 2];
-  const d = P[p4 + 3];
-  // the two faces: the one facing the start is exact, the far one is moved back for thin hulls
-  const r = (nx < 0 ? -nx : nx) * ex + (ny < 0 ? -ny : ny) * ey + (nz < 0 ? -nz : nz) * ez;
-  const rf = r < TRI_MIN_THICKNESS ? TRI_MIN_THICKNESS : r;
-  if (nx * kSx + ny * kSy + nz * kSz - d >= 0) {
-    if (!clipPlane(nx, ny, nz, d + r, d) || !clipPlane(-nx, -ny, -nz, rf - d, -d)) return false;
-  } else if (!clipPlane(-nx, -ny, -nz, r - d, -d) || !clipPlane(nx, ny, nz, d + rf, d)) {
-    return false;
-  }
-  // then the axial planes of the triangle bounds and the edge x axis bevels
-  return (
-    clipAxial(0, minx, maxx, ex, kSx) &&
-    clipAxial(1, miny, maxy, ey, kSy) &&
-    clipAxial(2, minz, maxz, ez, kSz) &&
-    clipBevels(D, INV, F, t, ax, ay, az, bx, by, bz, cx, cy, cz, ex, ey, ez)
-  );
-}
+// ------------------------------------------------------------------------------------- triangle set build
+// Runs once per map load on ~200k triangles, i.e. mostly before the JIT has warmed up: every pass is its
+// own small function over typed arrays (one hot loop each, monomorphic), so it is optimized on its own and
+// never deoptimizes on the next pass's code.
 
 interface TriangleSet {
   count: number;
-  verts: Float64Array; // 9 per slot
-  planes: Float64Array; // nx ny nz d per slot
-  bevelDir: Float32Array;
-  bevelInv: Float32Array;
-  bevelFlags: Uint32Array;
+  /** TRI_STRIDE numbers per slot (BVH leaf order). */
+  data: Float64Array;
   contents: Int32Array;
   model: Int32Array;
-  index: Int32Array; // slot -> triangle number
+  /** Slot -> triangle number. */
+  index: Int32Array;
+  /** Triangle number -> slot (-1 = dropped). */
+  slotOf: Int32Array;
+  /** Distinct models of the triangles. */
+  models: Set<number>;
   bvh: Bvh;
 }
 
@@ -516,136 +495,128 @@ function asF64(a: ArrayLike<number>): Float64Array {
   return a instanceof Float64Array ? a : Float64Array.from(a);
 }
 
-function asI32(a: ArrayLike<number>): Int32Array | Uint32Array {
-  return a instanceof Uint32Array || a instanceof Int32Array ? a : Int32Array.from(a);
+/** Indices as a Uint32Array; anything that isn't a non-negative integer becomes an invalid index. */
+function asU32(a: ArrayLike<number>): Uint32Array {
+  if (a instanceof Uint32Array) return a;
+  const out = new Uint32Array(a.length);
+  for (let i = 0; i < a.length; i++) {
+    const v = a[i];
+    out[i] = v >= 0 && v < 0xffffffff && Math.floor(v) === v ? v : 0xffffffff;
+  }
+  return out;
 }
 
-/** A per-triangle attribute as a per-triangle Int32Array (null = the constant applies to all). */
+/** A per-triangle attribute: a per-triangle Int32Array, or null when the constant applies to all. */
 function attrArray(v: number | ArrayLike<number> | undefined, triangles: number, def: number): { arr: Int32Array | null; value: number } {
   if (v === undefined) return { arr: null, value: def };
   if (typeof v === 'number') return { arr: null, value: v | 0 };
-  const arr = v instanceof Int32Array ? v : Int32Array.from({ length: triangles }, (_, i) => (v[i] === undefined ? def : v[i] | 0));
-  return { arr: arr.length >= triangles ? arr : Int32Array.from({ length: triangles }, (_, i) => (i < arr.length ? arr[i] : def)), value: def };
+  if (v instanceof Int32Array && v.length >= triangles) return { arr: v, value: def };
+  const arr = new Int32Array(triangles);
+  for (let i = 0; i < triangles; i++) arr[i] = i < v.length && v[i] !== undefined ? v[i] | 0 : def;
+  return { arr, value: def };
+}
+
+/** Grows b (minx miny minz maxx maxy maxz) to the vertices of P. */
+function vertexBounds(P: Float64Array, b: Float64Array): void {
+  let x0 = b[0], y0 = b[1], z0 = b[2], x1 = b[3], y1 = b[4], z1 = b[5];
+  for (let i = 0, e = P.length - 2; i < e; i += 3) {
+    const x = P[i];
+    const y = P[i + 1];
+    const z = P[i + 2];
+    if (x < x0) x0 = x;
+    if (x > x1) x1 = x;
+    if (y < y0) y0 = y;
+    if (y > y1) y1 = y;
+    if (z < z0) z0 = z;
+    if (z > z1) z1 = z;
+  }
+  b[0] = x0;
+  b[1] = y0;
+  b[2] = z0;
+  b[3] = x1;
+  b[4] = y1;
+  b[5] = z1;
 }
 
 /**
- * Validates the triangles of all soups (bad indices, degenerate or non-finite triangles are dropped) and
- * lays them out in BVH leaf order: vertices, unit plane, attributes. The BVH is a Morton-order tree
- * (buildMortonTree) with node bounds from the triangle vertices. Allocation is kept low on purpose: this
- * runs on ~200k triangles during map load.
+ * Pass 1 over one soup (input order): keeps the valid triangles (indices in range, finite, not degenerate)
+ * and writes each one's soup / triangle number and 30-bit Morton code (of 3x its centroid, on the grid
+ * g[0..2] = origin x3, g[3] = scale). Returns the new kept count.
  */
-function buildTriangleSet(soups: readonly TriangleSoup[]): TriangleSet {
-  const pos = soups.map((s) => asF64(s.positions));
-  const idx = soups.map((s) => asI32(s.indices));
-  let total = 0;
-  // vertex bounds of all soups: the Morton grid
-  let minx = Infinity, miny = Infinity, minz = Infinity;
-  let maxx = -Infinity, maxy = -Infinity, maxz = -Infinity;
-  for (let si = 0; si < soups.length; si++) {
-    total += Math.floor(idx[si].length / 3);
-    const P = pos[si];
-    for (let i = 0, e = P.length - 2; i < e; i += 3) {
-      const x = P[i], y = P[i + 1], z = P[i + 2];
-      if (x < minx) minx = x;
-      if (x > maxx) maxx = x;
-      if (y < miny) miny = y;
-      if (y > maxy) maxy = y;
-      if (z < minz) minz = z;
-      if (z > maxz) maxz = z;
-    }
-  }
-  // cubic Morton cells over the vertex bounds; codes from 3x the centroid (no division)
-  const ext = Math.max(maxx - minx, maxy - miny, maxz - minz);
-  const scale = Number.isFinite(ext) && ext > 0 ? 1023.999 / (3 * ext) : 0;
-  const ox = Number.isFinite(minx) ? 3 * minx : 0;
-  const oy = Number.isFinite(miny) ? 3 * miny : 0;
-  const oz = Number.isFinite(minz) ? 3 * minz : 0;
-
-  // pass 1 (input order): keep good triangles, Morton code per kept triangle
-  const keepSoup = soups.length > 1 ? new Uint16Array(total) : null;
-  const keepTri = new Int32Array(total);
-  const codes = new Uint32Array(total);
+function keepTriangles(
+  P: Float64Array, I: Uint32Array, si: number, n: number, g: Float64Array,
+  keepSoup: Int32Array | null, keepTri: Int32Array, codes: Uint32Array,
+): number {
+  const nv = Math.floor(P.length / 3);
+  const nt = Math.floor(I.length / 3);
   const minCross2 = TRI_MIN_CROSS * TRI_MIN_CROSS;
-  let n = 0;
-  for (let si = 0; si < soups.length; si++) {
-    const P = pos[si];
-    const I = idx[si];
-    const nv = Math.floor(P.length / 3);
-    const nt = Math.floor(I.length / 3);
-    for (let t = 0; t < nt; t++) {
-      const ia = I[t * 3];
-      const ib = I[t * 3 + 1];
-      const ic = I[t * 3 + 2];
-      if (!(ia >= 0 && ia < nv && ib >= 0 && ib < nv && ic >= 0 && ic < nv)) continue;
-      const a3 = ia * 3;
-      const b3 = ib * 3;
-      const c3 = ic * 3;
-      const ax = P[a3], ay = P[a3 + 1], az = P[a3 + 2];
-      const bx = P[b3], by = P[b3 + 1], bz = P[b3 + 2];
-      const cx = P[c3], cy = P[c3 + 1], cz = P[c3 + 2];
-      const e1x = bx - ax, e1y = by - ay, e1z = bz - az;
-      const e2x = cx - ax, e2y = cy - ay, e2z = cz - az;
-      const nx = e1y * e2z - e1z * e2y;
-      const ny = e1z * e2x - e1x * e2z;
-      const nz = e1x * e2y - e1y * e2x;
-      const l2 = nx * nx + ny * ny + nz * nz;
-      if (!(l2 > minCross2 && l2 < Infinity)) continue; // degenerate, NaN or non-finite
-      const qx = ((ax + bx + cx - ox) * scale) | 0;
-      const qy = ((ay + by + cy - oy) * scale) | 0;
-      const qz = ((az + bz + cz - oz) * scale) | 0;
-      codes[n] = ((spreadBits10(qx) << 2) | (spreadBits10(qy) << 1) | spreadBits10(qz)) >>> 0;
-      if (keepSoup) keepSoup[n] = si;
-      keepTri[n] = t;
-      n++;
-    }
+  const ox = g[0];
+  const oy = g[1];
+  const oz = g[2];
+  const scale = g[3];
+  for (let t = 0; t < nt; t++) {
+    const ia = I[t * 3];
+    const ib = I[t * 3 + 1];
+    const ic = I[t * 3 + 2];
+    if (!(ia < nv && ib < nv && ic < nv)) continue;
+    const a3 = ia * 3;
+    const b3 = ib * 3;
+    const c3 = ic * 3;
+    const ax = P[a3], ay = P[a3 + 1], az = P[a3 + 2];
+    const bx = P[b3], by = P[b3 + 1], bz = P[b3 + 2];
+    const cx = P[c3], cy = P[c3 + 1], cz = P[c3 + 2];
+    const e1x = bx - ax, e1y = by - ay, e1z = bz - az;
+    const e2x = cx - ax, e2y = cy - ay, e2z = cz - az;
+    const nx = e1y * e2z - e1z * e2y;
+    const ny = e1z * e2x - e1x * e2z;
+    const nz = e1x * e2y - e1y * e2x;
+    const l2 = nx * nx + ny * ny + nz * nz;
+    if (!(l2 > minCross2 && l2 < Infinity)) continue; // degenerate, NaN or non-finite
+    const qx = ((ax + bx + cx - ox) * scale) | 0;
+    const qy = ((ay + by + cy - oy) * scale) | 0;
+    const qz = ((az + bz + cz - oz) * scale) | 0;
+    codes[n] = ((spreadBits10(qx) << 2) | (spreadBits10(qy) << 1) | spreadBits10(qz)) >>> 0;
+    if (keepSoup !== null) keepSoup[n] = si;
+    keepTri[n] = t;
+    n++;
   }
-  const tree = buildMortonTree(codes, n, TRI_LEAF_MAX);
+  return n;
+}
 
-  // pass 2 (slot order): vertices, planes, attributes
-  const soupBase: number[] = [];
-  let acc = 0;
-  for (const I of idx) {
-    soupBase.push(acc);
-    acc += Math.floor(I.length / 3);
-  }
-  const cAttr = soups.map((s, i) => attrArray(s.contents, Math.floor(idx[i].length / 3), CONTENTS_SOLID));
-  const mAttr = soups.map((s, i) => attrArray(s.model, Math.floor(idx[i].length / 3), 0));
-  const verts = new Float64Array(n * 9);
-  const planes = new Float64Array(n * 4);
-  const bevelDir = new Float32Array(n * 9);
-  const bevelInv = new Float32Array(n * 9);
-  const bevelFlags = new Uint32Array(n);
-  const contents = new Int32Array(n);
-  const model = new Int32Array(n);
-  const index = new Int32Array(n);
-  const order = tree.order;
+/**
+ * Pass 2 (slot = BVH leaf order): the triangle data records (vertices, unit normal, plane distance) and the
+ * slot <-> triangle number maps.
+ */
+function fillTriangleData(
+  order: Int32Array, n: number, keepSoup: Int32Array | null, keepTri: Int32Array,
+  pos: Float64Array[], idx: Uint32Array[], soupBase: Int32Array,
+  data: Float64Array, index: Int32Array, slotOf: Int32Array,
+): void {
   for (let slot = 0; slot < n; slot++) {
     const k = order[slot];
-    const si = keepSoup ? keepSoup[k] : 0;
+    const si = keepSoup === null ? 0 : keepSoup[k];
     const t = keepTri[k];
     const P = pos[si];
     const I = idx[si];
-    index[slot] = soupBase[si] + t;
-    const ca = cAttr[si];
-    contents[slot] = ca.arr ? ca.arr[t] : ca.value;
-    const ma = mAttr[si];
-    model[slot] = ma.arr ? ma.arr[t] : ma.value;
+    const num = soupBase[si] + t;
+    index[slot] = num;
+    slotOf[num] = slot;
     const a3 = I[t * 3] * 3;
     const b3 = I[t * 3 + 1] * 3;
     const c3 = I[t * 3 + 2] * 3;
     const ax = P[a3], ay = P[a3 + 1], az = P[a3 + 2];
     const bx = P[b3], by = P[b3 + 1], bz = P[b3 + 2];
     const cx = P[c3], cy = P[c3 + 1], cz = P[c3 + 2];
-    const o9 = slot * 9;
-    verts[o9] = ax;
-    verts[o9 + 1] = ay;
-    verts[o9 + 2] = az;
-    verts[o9 + 3] = bx;
-    verts[o9 + 4] = by;
-    verts[o9 + 5] = bz;
-    verts[o9 + 6] = cx;
-    verts[o9 + 7] = cy;
-    verts[o9 + 8] = cz;
+    const o = slot * TRI_STRIDE;
+    data[o] = ax;
+    data[o + 1] = ay;
+    data[o + 2] = az;
+    data[o + 3] = bx;
+    data[o + 4] = by;
+    data[o + 5] = bz;
+    data[o + 6] = cx;
+    data[o + 7] = cy;
+    data[o + 8] = cz;
     const e1x = bx - ax, e1y = by - ay, e1z = bz - az;
     const e2x = cx - ax, e2y = cy - ay, e2z = cz - az;
     let nx = e1y * e2z - e1z * e2y;
@@ -655,17 +626,45 @@ function buildTriangleSet(soups: readonly TriangleSoup[]): TriangleSet {
     nx /= len;
     ny /= len;
     nz /= len;
-    const o4 = slot * 4;
-    planes[o4] = nx;
-    planes[o4 + 1] = ny;
-    planes[o4 + 2] = nz;
-    planes[o4 + 3] = (nx * (ax + bx + cx) + ny * (ay + by + cy) + nz * (az + bz + cz)) / 3;
-    computeBevels(verts, slot, nx, ny, nz, bevelDir, bevelInv, bevelFlags);
+    data[o + 9] = nx;
+    data[o + 10] = ny;
+    data[o + 11] = nz;
+    data[o + 12] = (nx * (ax + bx + cx) + ny * (ay + by + cy) + nz * (az + bz + cz)) / 3;
   }
+}
 
-  // node bounds, bottom-up (children follow their parent in the pre-order layout)
-  const nodeCount = tree.nodeCount;
-  const nodeInfo = tree.nodeInfo;
+/** Pass 2 for one per-triangle attribute (contents, model) into `out` (slot order). */
+function fillTriangleAttr(
+  order: Int32Array, n: number, keepSoup: Int32Array | null, keepTri: Int32Array,
+  attrs: { arr: Int32Array | null; value: number }[], out: Int32Array,
+): void {
+  if (n === 0) return;
+  if (keepSoup === null && attrs[0].arr === null) {
+    out.fill(attrs[0].value);
+    return;
+  }
+  for (let slot = 0; slot < n; slot++) {
+    const k = order[slot];
+    const at = attrs[keepSoup === null ? 0 : keepSoup[k]];
+    out[slot] = at.arr === null ? at.value : at.arr[keepTri[k]];
+  }
+}
+
+/** The distinct values of a (each run of equal values counted once). */
+function distinctRuns(a: Int32Array): Set<number> {
+  const out = new Set<number>();
+  let last = NaN;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== last) {
+      last = a[i];
+      out.add(last);
+    }
+  }
+  return out;
+}
+
+/** BVH node bounds from the triangle vertices, bottom-up (children follow their parent in the layout). */
+function triangleNodeBounds(nodeInfo: Int32Array, nodeCount: number, data: Float64Array): Float64Array {
   const nodeBounds = new Float64Array(Math.max(1, nodeCount) * 6);
   for (let node = nodeCount - 1; node >= 0; node--) {
     const a = nodeInfo[node * 2];
@@ -673,14 +672,18 @@ function buildTriangleSet(soups: readonly TriangleSoup[]): TriangleSet {
     const o = node * 6;
     if (b > 0) {
       let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
-      for (let v = a * 9, ve = (a + b) * 9; v < ve; v += 3) {
-        const x = verts[v], y = verts[v + 1], z = verts[v + 2];
-        if (x < x0) x0 = x;
-        if (x > x1) x1 = x;
-        if (y < y0) y0 = y;
-        if (y > y1) y1 = y;
-        if (z < z0) z0 = z;
-        if (z > z1) z1 = z;
+      for (let slot = a; slot < a + b; slot++) {
+        for (let v = slot * TRI_STRIDE, ve = v + 9; v < ve; v += 3) {
+          const x = data[v];
+          const y = data[v + 1];
+          const z = data[v + 2];
+          if (x < x0) x0 = x;
+          if (x > x1) x1 = x;
+          if (y < y0) y0 = y;
+          if (y > y1) y1 = y;
+          if (z < z0) z0 = z;
+          if (z > z1) z1 = z;
+        }
       }
       nodeBounds[o] = x0;
       nodeBounds[o + 1] = y0;
@@ -699,7 +702,50 @@ function buildTriangleSet(soups: readonly TriangleSoup[]): TriangleSet {
       nodeBounds[o + 5] = nodeBounds[l + 5] > nodeBounds[r + 5] ? nodeBounds[l + 5] : nodeBounds[r + 5];
     }
   }
-  return { count: n, verts, planes, bevelDir, bevelInv, bevelFlags, contents, model, index, bvh: { ...tree, nodeBounds } };
+  return nodeBounds;
+}
+
+/**
+ * Validates the triangles of all soups (bad indices, degenerate or non-finite triangles are dropped) and
+ * lays them out in BVH leaf order (TRI_STRIDE records + attributes). The BVH is a Morton-order tree
+ * (buildMortonTree) with node bounds from the triangle vertices. Edge bevels are not computed here: the
+ * world computes them the first time a box reaches a triangle's bevel stage (most never are).
+ */
+function buildTriangleSet(soups: readonly TriangleSoup[]): TriangleSet {
+  const pos = soups.map((s) => asF64(s.positions));
+  const idx = soups.map((s) => asU32(s.indices));
+  const soupBase = new Int32Array(soups.length);
+  let total = 0;
+  for (let si = 0; si < soups.length; si++) {
+    soupBase[si] = total;
+    total += Math.floor(idx[si].length / 3);
+  }
+  // cubic Morton cells over the vertex bounds of all soups; codes from 3x the centroid (no division)
+  const vb = new Float64Array([Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity]);
+  for (const P of pos) vertexBounds(P, vb);
+  const ext = Math.max(vb[3] - vb[0], vb[4] - vb[1], vb[5] - vb[2]);
+  const scale = ext > 0 && ext < Infinity ? 1023.999 / (3 * ext) : 0;
+  const grid = new Float64Array([scale ? 3 * vb[0] : 0, scale ? 3 * vb[1] : 0, scale ? 3 * vb[2] : 0, scale]);
+
+  const keepSoup = soups.length > 1 ? new Int32Array(total) : null;
+  const keepTri = new Int32Array(total);
+  const codes = new Uint32Array(total);
+  let n = 0;
+  for (let si = 0; si < soups.length; si++) n = keepTriangles(pos[si], idx[si], si, n, grid, keepSoup, keepTri, codes);
+  const tree = buildMortonTree(codes, n, TRI_LEAF_MAX);
+
+  const data = new Float64Array(n * TRI_STRIDE);
+  const index = new Int32Array(n);
+  const slotOf = new Int32Array(total).fill(-1);
+  fillTriangleData(tree.order, n, keepSoup, keepTri, pos, idx, soupBase, data, index, slotOf);
+  const contents = new Int32Array(n);
+  const model = new Int32Array(n);
+  const counts = idx.map((I) => Math.floor(I.length / 3));
+  fillTriangleAttr(tree.order, n, keepSoup, keepTri, soups.map((s, i) => attrArray(s.contents, counts[i], CONTENTS_SOLID)), contents);
+  fillTriangleAttr(tree.order, n, keepSoup, keepTri, soups.map((s, i) => attrArray(s.model, counts[i], 0)), model);
+  const models = distinctRuns(model);
+  const nodeBounds = triangleNodeBounds(tree.nodeInfo, tree.nodeCount, data);
+  return { count: n, data, contents, model, index, slotOf, models, bvh: { ...tree, nodeBounds } };
 }
 
 interface Bvh {
@@ -713,7 +759,7 @@ interface Bvh {
 }
 
 /** Binned-SAH BVH over AABBs (bmin/bmax: 3 per item). Depth-first node layout. */
-function buildBvh(count: number, bmin: Float64Array, bmax: Float64Array, leafMax = LEAF_MAX): Bvh {
+function buildBvh(count: number, bmin: Float64Array, bmax: Float64Array): Bvh {
   const order = new Int32Array(count);
   for (let i = 0; i < count; i++) order[i] = i;
   const maxNodes = Math.max(1, 2 * count - 1);
@@ -882,7 +928,7 @@ function buildBvh(count: number, bmin: Float64Array, bmax: Float64Array, leafMax
       }
       const parentArea = halfArea(nmaxx - nminx, nmaxy - nminy, nmaxz - nminz);
       // SAH (traversal cost 1, intersection cost 1): split only if it beats a leaf, or the leaf is too big
-      if (bestSplit >= 0 && n <= leafMax && parentArea > 0 && 1 + bestCost / parentArea >= n) {
+      if (bestSplit >= 0 && n <= LEAF_MAX && parentArea > 0 && 1 + bestCost / parentArea >= n) {
         makeLeaf();
         continue;
       }
@@ -907,7 +953,7 @@ function buildBvh(count: number, bmin: Float64Array, bmax: Float64Array, leafMax
       }
     }
     if (mid < 0) {
-      if (n <= leafMax) {
+      if (n <= LEAF_MAX) {
         makeLeaf();
         continue;
       }
@@ -945,38 +991,38 @@ function halfArea(dx: number, dy: number, dz: number): number {
  */
 function buildMortonTree(codes: Uint32Array, count: number, leafMax: number): Omit<Bvh, 'nodeBounds'> {
   if (count === 0) return { nodeInfo: new Int32Array(2), nodeCount: 0, order: new Int32Array(0), maxDepth: 0 };
-  // LSD radix sort, 3 x 10 bits
-  let keys: Uint32Array = codes;
-  let vals = new Int32Array(count);
+  // LSD radix sort, 3 x 10 bits (codes is clobbered: the passes ping-pong between it and a second buffer)
+  const vals = new Int32Array(count);
   for (let i = 0; i < count; i++) vals[i] = i;
-  let keys2: Uint32Array = new Uint32Array(count);
-  let vals2 = new Int32Array(count);
+  const keys2 = new Uint32Array(count);
+  const vals2 = new Int32Array(count);
   const hist = new Int32Array(1024);
-  for (let shift = 0; shift < 30; shift += 10) {
-    hist.fill(0);
-    for (let i = 0; i < count; i++) hist[(keys[i] >>> shift) & 1023]++;
-    let sum = 0;
-    for (let b = 0; b < 1024; b++) {
-      const c = hist[b];
-      hist[b] = sum;
-      sum += c;
-    }
-    for (let i = 0; i < count; i++) {
-      const k = keys[i];
-      const pos = hist[(k >>> shift) & 1023]++;
-      keys2[pos] = k;
-      vals2[pos] = vals[i];
-    }
-    const tk = keys;
-    keys = keys2;
-    keys2 = tk;
-    const tv = vals;
-    vals = vals2;
-    vals2 = tv;
-  }
-  const order = vals;
-  const sorted = keys;
+  radixPass(codes, vals, keys2, vals2, count, 0, hist);
+  radixPass(keys2, vals2, codes, vals, count, 10, hist);
+  radixPass(codes, vals, keys2, vals2, count, 20, hist);
+  return mortonTopology(keys2, vals2, count, leafMax);
+}
 
+/** One stable counting-sort pass of (keys, vals) into (keys2, vals2) by the 10 key bits at `shift`. */
+function radixPass(keys: Uint32Array, vals: Int32Array, keys2: Uint32Array, vals2: Int32Array, count: number, shift: number, hist: Int32Array): void {
+  hist.fill(0);
+  for (let i = 0; i < count; i++) hist[(keys[i] >>> shift) & 1023]++;
+  let sum = 0;
+  for (let b = 0; b < 1024; b++) {
+    const c = hist[b];
+    hist[b] = sum;
+    sum += c;
+  }
+  for (let i = 0; i < count; i++) {
+    const k = keys[i];
+    const pos = hist[(k >>> shift) & 1023]++;
+    keys2[pos] = k;
+    vals2[pos] = vals[i];
+  }
+}
+
+/** The tree over Morton-sorted items (see buildMortonTree); `order` = item per sorted position. */
+function mortonTopology(sorted: Uint32Array, order: Int32Array, count: number, leafMax: number): Omit<Bvh, 'nodeBounds'> {
   const nodeInfo = new Int32Array((2 * count - 1) * 2);
   // task stack: start, end, parent (-1 = left child / root), depth
   let tasks = new Int32Array(256);
@@ -1103,17 +1149,18 @@ export class CollisionWorld implements TraceWorld {
   private readonly modelSlots = new Map<number, number[]>();
   // ---- triangles (per triangle slot, in triangle-BVH leaf order)
   private readonly triCount: number;
-  private readonly triVerts: Float64Array; // 9 per slot
-  private readonly triBevelDir: Float32Array; // 9 per slot: unit edge directions
-  private readonly triBevelInv: Float32Array; // 9 per slot: edge x axis normalizers
-  private readonly triBevelFlags: Uint32Array; // bevel selection, see computeBevels
-  private readonly triPlanes: Float64Array; // nx ny nz d per slot
+  private readonly triData: Float64Array; // TRI_STRIDE per slot: vertices, unit normal, plane distance
   private readonly triContents: Int32Array;
+  private readonly triActive: Int32Array; // contents, 0 while the triangle's model is disabled
   private readonly triModel: Int32Array;
-  private readonly triEnabled: Uint8Array;
   private readonly triIndex: Int32Array; // slot -> triangle number
   private readonly triSlotOf: Int32Array; // triangle number -> slot (-1 = dropped)
-  private readonly triModels = new Set<number>();
+  private readonly triModels: Set<number>;
+  // edge bevel planes, computed the first time a box gets that far (see addTriangleBevels)
+  private readonly triBevelAt: Int32Array; // offset into triBevels, -1 = not computed yet
+  private triBevels: Float64Array;
+  private triBevelUsed = 0;
+  private triBevelled = 0;
   private readonly triNodeBounds: Float64Array;
   private readonly triNodeInfo: Int32Array;
   private readonly triNodeCount: number;
@@ -1207,27 +1254,15 @@ export class CollisionWorld implements TraceWorld {
     const soups: readonly TriangleSoup[] = !opts.triangles ? [] : Array.isArray(opts.triangles) ? opts.triangles : [opts.triangles as TriangleSoup];
     const ts = buildTriangleSet(soups);
     this.triCount = ts.count;
-    this.triVerts = ts.verts;
-    this.triBevelDir = ts.bevelDir;
-    this.triBevelInv = ts.bevelInv;
-    this.triBevelFlags = ts.bevelFlags;
-    this.triPlanes = ts.planes;
+    this.triData = ts.data;
     this.triContents = ts.contents;
+    this.triActive = ts.contents.slice();
     this.triModel = ts.model;
     this.triIndex = ts.index;
-    this.triEnabled = new Uint8Array(ts.count).fill(1);
-    let numbers = 0;
-    for (const sp of soups) numbers += Math.floor(sp.indices.length / 3);
-    this.triSlotOf = new Int32Array(numbers).fill(-1);
-    let lastModel = NaN;
-    for (let slot = 0; slot < ts.count; slot++) {
-      this.triSlotOf[ts.index[slot]] = slot;
-      const m = ts.model[slot];
-      if (m !== lastModel) {
-        this.triModels.add(m);
-        lastModel = m;
-      }
-    }
+    this.triSlotOf = ts.slotOf;
+    this.triModels = ts.models;
+    this.triBevelAt = new Int32Array(ts.count).fill(-1);
+    this.triBevels = new Float64Array(ts.count > 0 ? 4096 : 0);
     this.triNodeBounds = ts.bvh.nodeBounds;
     this.triNodeInfo = ts.bvh.nodeInfo;
     this.triNodeCount = ts.bvh.nodeCount;
@@ -1238,7 +1273,17 @@ export class CollisionWorld implements TraceWorld {
   }
 
   /** BVH statistics (debugging / perf logging). */
-  stats(): { brushes: number; sides: number; nodes: number; depth: number; triangles: number; triangleNodes: number; triangleDepth: number } {
+  stats(): {
+    brushes: number;
+    sides: number;
+    nodes: number;
+    depth: number;
+    triangles: number;
+    triangleNodes: number;
+    triangleDepth: number;
+    /** Triangles whose edge bevels have been built so far (lazily, by box traces reaching them). */
+    bevelledTriangles: number;
+  } {
     return {
       brushes: this.slotCount,
       sides: this.sideBevel.length,
@@ -1247,6 +1292,7 @@ export class CollisionWorld implements TraceWorld {
       triangles: this.triCount,
       triangleNodes: this.triNodeCount,
       triangleDepth: this.triDepth,
+      bevelledTriangles: this.triBevelled,
     };
   }
 
@@ -1260,7 +1306,9 @@ export class CollisionWorld implements TraceWorld {
     if (slots) for (const slot of slots) this.slotEnabled[slot] = solid ? 1 : 0;
     if (this.triModels.has(model)) {
       const m = this.triModel;
-      for (let slot = 0; slot < this.triCount; slot++) if (m[slot] === model) this.triEnabled[slot] = solid ? 1 : 0;
+      const active = this.triActive;
+      const contents = this.triContents;
+      for (let slot = 0; slot < this.triCount; slot++) if (m[slot] === model) active[slot] = solid ? contents[slot] : 0;
     }
   }
 
@@ -1498,21 +1546,18 @@ export class CollisionWorld implements TraceWorld {
     if (!allsolid && this.triNodeCount > 0) {
       const tNodeBounds = this.triNodeBounds;
       const tNodeInfo = this.triNodeInfo;
-      const tContents = this.triContents;
-      const tEnabled = this.triEnabled;
-      const tVerts = this.triVerts;
-      const tDir = this.triBevelDir;
-      const tInv = this.triBevelInv;
-      const tFlags = this.triBevelFlags;
-      const tPlanes = this.triPlanes;
+      const tActive = this.triActive;
+      const tData = this.triData;
+      const tBevelAt = this.triBevelAt;
+      let tBevels = this.triBevels;
       const tStack = this.triStack;
-      kSx = sx;
-      kSy = sy;
-      kSz = sz;
-      kTx = tx;
-      kTy = ty;
-      kTz = tz;
-      kBest = best;
+      KS[0] = sx;
+      KS[1] = sy;
+      KS[2] = sz;
+      KS[3] = tx;
+      KS[4] = ty;
+      KS[5] = tz;
+      KS[12] = best;
       sp = 0;
       tStack[sp++] = 0;
       triTraverse: while (sp > 0) {
@@ -1569,9 +1614,19 @@ export class CollisionWorld implements TraceWorld {
         }
         const slotEnd = a + b;
         for (let slot = a; slot < slotEnd; slot++) {
-          if ((tContents[slot] & mask) === 0 || tEnabled[slot] === 0) continue;
+          if ((tActive[slot] & mask) === 0) continue;
           // (leaves are small and tight: the triangle's own planes do the culling)
-          if (!clipTriangle(tVerts, tPlanes, tDir, tInv, tFlags, slot, ex, ey, ez, isPoint)) continue;
+          if (isPoint) {
+            if (!clipTriangleRay(tData, slot)) continue;
+          } else {
+            if (!clipTriangleHull(tData, slot, ex, ey, ez)) continue;
+            let off = tBevelAt[slot];
+            if (off < 0) {
+              off = this.addTriangleBevels(slot);
+              tBevels = this.triBevels;
+            }
+            if (!clipBevelPlanes(tBevels, off, ex, ey, ez)) continue;
+          }
           if (!kStartOut) {
             startsolid = true;
             if (solidSlot < 0 && solidTri < 0) solidTri = slot;
@@ -1583,15 +1638,15 @@ export class CollisionWorld implements TraceWorld {
             }
             continue;
           }
-          if (kEnter < kLeave && kEnter > -1 && kEnter < best) {
-            best = kEnter < 0 ? 0 : kEnter;
-            kBest = best;
+          if (KS[6] < KS[7] && KS[6] > -1 && KS[6] < best) {
+            best = KS[6] < 0 ? 0 : KS[6];
+            KS[12] = best;
             hitSlot = -1;
             hitTri = slot;
-            hnx = kLnx;
-            hny = kLny;
-            hnz = kLnz;
-            hd = kLd;
+            hnx = KS[8];
+            hny = KS[9];
+            hnz = KS[10];
+            hd = KS[11];
           }
         }
       }
@@ -1812,14 +1867,16 @@ export class CollisionWorld implements TraceWorld {
     const nodeBounds = this.triNodeBounds;
     const nodeInfo = this.triNodeInfo;
     const stack = this.triStack;
+    const active = this.triActive;
+    const data = this.triData;
     // a zero-length sweep: the triangle hull contains the box iff no plane separates them
-    kBest = 1;
-    kSx = cx;
-    kSy = cy;
-    kSz = cz;
-    kTx = cx;
-    kTy = cy;
-    kTz = cz;
+    KS[12] = 1;
+    KS[0] = cx;
+    KS[1] = cy;
+    KS[2] = cz;
+    KS[3] = cx;
+    KS[4] = cy;
+    KS[5] = cz;
     let sp = 0;
     stack[sp++] = 0;
     while (sp > 0) {
@@ -1839,8 +1896,15 @@ export class CollisionWorld implements TraceWorld {
         continue;
       }
       for (let slot = a, e = a + b; slot < e; slot++) {
-        if ((this.triContents[slot] & mask) === 0 || this.triEnabled[slot] === 0) continue;
-        if (clipTriangle(this.triVerts, this.triPlanes, this.triBevelDir, this.triBevelInv, this.triBevelFlags, slot, ex, ey, ez, isPoint)) return true;
+        if ((active[slot] & mask) === 0) continue;
+        if (isPoint) {
+          if (clipTriangleRay(data, slot)) return true;
+          continue;
+        }
+        if (!clipTriangleHull(data, slot, ex, ey, ez)) continue;
+        let off = this.triBevelAt[slot];
+        if (off < 0) off = this.addTriangleBevels(slot);
+        if (clipBevelPlanes(this.triBevels, off, ex, ey, ez)) return true;
       }
     }
     return false;
@@ -1910,7 +1974,8 @@ export class CollisionWorld implements TraceWorld {
     const stack = new Int32Array(this.triDepth * 2 + 8);
     const nodeBounds = this.triNodeBounds;
     const nodeInfo = this.triNodeInfo;
-    const V = this.triVerts;
+    const T = this.triData;
+    const disabled = this.disabledModels;
     const x0 = mins.x, y0 = mins.y, z0 = mins.z, x1 = maxs.x, y1 = maxs.y, z1 = maxs.z;
     let sp = 0;
     stack[sp++] = 0;
@@ -1931,12 +1996,12 @@ export class CollisionWorld implements TraceWorld {
         continue;
       }
       for (let slot = a, e = a + b; slot < e; slot++) {
-        if (this.triEnabled[slot] === 0) continue;
-        const o = slot * 9;
+        if (disabled.size > 0 && disabled.has(this.triModel[slot])) continue;
+        const v = slot * TRI_STRIDE;
         if (
-          x1 < Math.min(V[o], V[o + 3], V[o + 6]) || x0 > Math.max(V[o], V[o + 3], V[o + 6]) ||
-          y1 < Math.min(V[o + 1], V[o + 4], V[o + 7]) || y0 > Math.max(V[o + 1], V[o + 4], V[o + 7]) ||
-          z1 < Math.min(V[o + 2], V[o + 5], V[o + 8]) || z0 > Math.max(V[o + 2], V[o + 5], V[o + 8])
+          x1 < Math.min(T[v], T[v + 3], T[v + 6]) || x0 > Math.max(T[v], T[v + 3], T[v + 6]) ||
+          y1 < Math.min(T[v + 1], T[v + 4], T[v + 7]) || y0 > Math.max(T[v + 1], T[v + 4], T[v + 7]) ||
+          z1 < Math.min(T[v + 2], T[v + 5], T[v + 8]) || z0 > Math.max(T[v + 2], T[v + 5], T[v + 8])
         )
           continue;
         cb(this.triIndex[slot]);
@@ -1951,19 +2016,21 @@ export class CollisionWorld implements TraceWorld {
   triangle(tri: number): { verts: Float64Array; normal: Vec3; dist: number; contents: number; model: number } | null {
     const slot = tri >= 0 && tri < this.triSlotOf.length ? this.triSlotOf[tri] : -1;
     if (slot < 0) return null;
-    const p = this.triPlanes;
+    const T = this.triData;
+    const o = slot * TRI_STRIDE;
     return {
-      verts: this.triVerts.slice(slot * 9, slot * 9 + 9),
-      normal: v3(p[slot * 4], p[slot * 4 + 1], p[slot * 4 + 2]),
-      dist: p[slot * 4 + 3],
+      verts: T.slice(o, o + 9),
+      normal: v3(T[o + 9], T[o + 10], T[o + 11]),
+      dist: T[o + 12],
       contents: this.triContents[slot],
       model: this.triModel[slot],
     };
   }
 
   /**
-   * Triangle `tri` as a zero-volume Brush (both faces, edge walls, axial and edge bevels; bounds = the
-   * triangle's), for code that works on brushes (boxIntersectsBrush, debug drawing). Null if dropped.
+   * Triangle `tri` as a zero-volume Brush (both faces, edge walls, axial and edge bevels - the planes its
+   * box traces use; bounds = the triangle's), for code that works on brushes (boxIntersectsBrush, debug
+   * drawing). Null if dropped.
    */
   triangleBrush(tri: number): Brush | null {
     const t = this.triangle(tri);
@@ -1991,35 +2058,31 @@ export class CollisionWorld implements TraceWorld {
     const axial = [v3(-1, 0, 0), v3(1, 0, 0), v3(0, -1, 0), v3(0, 1, 0), v3(0, 0, -1), v3(0, 0, 1)];
     const ext = [-mins.x, maxs.x, -mins.y, maxs.y, -mins.z, maxs.z];
     for (let k = 0; k < 6; k++) sides.push({ plane: { normal: axial[k], dist: ext[k] }, bevel: true });
-    // edge x axis bevels (same selection as the trace)
-    for (let i = 0; i < 3; i++) {
-      const p = i * 3;
-      const q = ((i + 1) % 3) * 3;
-      const k = ((i + 2) % 3) * 3;
-      let ex = V[q] - V[p], ey = V[q + 1] - V[p + 1], ez = V[q + 2] - V[p + 2];
-      const el = Math.hypot(ex, ey, ez);
-      if (el < BEVEL_MIN_EDGE) continue;
-      ex /= el;
-      ey /= el;
-      ez /= el;
-      for (const c of [v3(0, ez, -ey), v3(-ez, 0, ex), v3(ey, -ex, 0)]) {
-        const l = Math.hypot(c.x, c.y, c.z);
-        if (l < BEVEL_MIN_CROSS) continue;
-        c.x /= l;
-        c.y /= l;
-        c.z /= l;
-        if (Math.max(Math.abs(c.x), Math.abs(c.y), Math.abs(c.z)) > AXIAL_LIMIT) continue;
-        if (Math.abs(c.x * n.x + c.y * n.y + c.z * n.z) > AXIAL_LIMIT) continue;
-        const sp = c.x * V[p] + c.y * V[p + 1] + c.z * V[p + 2];
-        const sq = c.x * V[q] + c.y * V[q + 1] + c.z * V[q + 2];
-        const sk = c.x * V[k] + c.y * V[k + 1] + c.z * V[k + 2];
-        const eMax = Math.max(sp, sq);
-        const eMin = Math.min(sp, sq);
-        if (eMin >= sk - BEVEL_ON_EPSILON) sides.push({ plane: { normal: v3(c.x, c.y, c.z), dist: Math.max(eMax, sk) }, bevel: true });
-        if (eMax <= sk + BEVEL_ON_EPSILON) sides.push({ plane: { normal: v3(-c.x, -c.y, -c.z), dist: -Math.min(eMin, sk) }, bevel: true });
-      }
+    // edge x axis bevels (the trace's)
+    const B = new Float64Array(TRI_BEVELS_MAX);
+    triangleBevels(this.triData, this.triSlotOf[tri], B, 0);
+    for (let i = 0, o = 1; i < B[0]; i++, o += 4) {
+      sides.push({ plane: { normal: v3(B[o], B[o + 1], B[o + 2]), dist: B[o + 3] }, bevel: true });
     }
     return { sides, contents: t.contents, mins, maxs, model: t.model };
+  }
+
+  /**
+   * Computes the edge bevel planes of triangle slot `slot` into triBevels (growing it) and returns their
+   * offset. Called the first time a box trace reaches that triangle's bevel stage; most triangles never are.
+   */
+  private addTriangleBevels(slot: number): number {
+    let B = this.triBevels;
+    const at = this.triBevelUsed;
+    if (at + TRI_BEVELS_MAX > B.length) {
+      const grown = new Float64Array(Math.max(4096, B.length * 2));
+      grown.set(B.subarray(0, at));
+      this.triBevels = B = grown;
+    }
+    this.triBevelUsed = at + triangleBevels(this.triData, slot, B, at);
+    this.triBevelAt[slot] = at;
+    this.triBevelled++;
+    return at;
   }
 }
 

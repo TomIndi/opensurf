@@ -294,22 +294,52 @@ export interface DisplacementSurface {
  * Returns null when the displacement is malformed (base face isn't a quad, indices out of range).
  */
 export function displacementSurface(bsp: BspFile, index: number): DisplacementSurface | null {
-  const d = bsp.dispInfos[index];
-  if (!d) return null;
-  const face = bsp.faces[d.mapFace];
-  if (!face || face.numEdges !== 4 || d.power < 1 || d.power > 4) return null;
-  const size = (1 << d.power) + 1;
-  if (d.dispVertStart < 0 || d.dispVertStart + size * size > bsp.dispVerts.length) return null;
+  const size = displacementGridSize(bsp, index);
+  if (size === 0) return null;
+  const positions = new Float64Array(size * size * 3);
+  const flip = writeDisplacementGrid(bsp, index, positions, 0);
+  const triangles = new Uint32Array((size - 1) * (size - 1) * 6);
+  writeDisplacementTriangles(size, flip, 0, triangles, 0);
+  return { index, size, positions, triangles };
+}
 
+/**
+ * Vertices per side of displacement `index` ((1 << power) + 1), or 0 when it is malformed (no dispinfo,
+ * base face isn't a quad, power out of range, vertex / edge indices out of range).
+ */
+function displacementGridSize(bsp: BspFile, index: number): number {
+  const d = bsp.dispInfos[index];
+  if (!d) return 0;
+  const face = bsp.faces[d.mapFace];
+  if (!face || face.numEdges !== 4 || d.power < 1 || d.power > 4) return 0;
+  const size = (1 << d.power) + 1;
+  if (d.dispVertStart < 0 || d.dispVertStart + size * size > bsp.dispVerts.length) return 0;
+  for (let i = 0; i < 4; i++) {
+    const se = bsp.surfedges[face.firstEdge + i];
+    if (se === undefined) return 0;
+    const vi = se >= 0 ? bsp.edges[se * 2] : bsp.edges[-se * 2 + 1];
+    if (vi === undefined || vi * 3 + 2 >= bsp.vertices.length) return 0;
+  }
+  return size;
+}
+
+/**
+ * Writes the final vertex grid of displacement `index` (validated by displacementGridSize) to `out` at
+ * number `off`: size*size vertices, xyz, row-major; row r runs from corner0->corner1, column c towards
+ * corner3->corner2. Returns whether its triangles must be flipped to wind counter-clockwise seen from the
+ * surface's front (pass it to writeDisplacementTriangles).
+ */
+function writeDisplacementGrid(bsp: BspFile, index: number, out: Float64Array, off: number): boolean {
+  const d = bsp.dispInfos[index];
+  const face = bsp.faces[d.mapFace];
+  const size = (1 << d.power) + 1;
   // base face corners in surfedge order
   const cx = [0, 0, 0, 0];
   const cy = [0, 0, 0, 0];
   const cz = [0, 0, 0, 0];
   for (let i = 0; i < 4; i++) {
     const se = bsp.surfedges[face.firstEdge + i];
-    if (se === undefined) return null;
     const vi = se >= 0 ? bsp.edges[se * 2] : bsp.edges[-se * 2 + 1];
-    if (vi === undefined || vi * 3 + 2 >= bsp.vertices.length) return null;
     cx[i] = bsp.vertices[vi * 3];
     cy[i] = bsp.vertices[vi * 3 + 1];
     cz[i] = bsp.vertices[vi * 3 + 2];
@@ -331,8 +361,8 @@ export function displacementSurface(bsp: BspFile, index: number): DisplacementSu
   const py = [0, 1, 2, 3].map((k) => cy[(start + k) & 3]);
   const pz = [0, 1, 2, 3].map((k) => cz[(start + k) & 3]);
 
-  const positions = new Float64Array(size * size * 3);
   const inv = 1 / (size - 1);
+  const verts = bsp.dispVerts;
   for (let r = 0; r < size; r++) {
     const t = r * inv;
     // left edge corner0 -> corner1, right edge corner3 -> corner2
@@ -344,18 +374,18 @@ export function displacementSurface(bsp: BspFile, index: number): DisplacementSu
     const rz = pz[3] + (pz[2] - pz[3]) * t;
     for (let c = 0; c < size; c++) {
       const s = c * inv;
-      const v = bsp.dispVerts[d.dispVertStart + r * size + c];
-      const o = (r * size + c) * 3;
-      positions[o] = lx + (rx - lx) * s + v.vec.x * v.dist;
-      positions[o + 1] = ly + (ry - ly) * s + v.vec.y * v.dist;
-      positions[o + 2] = lz + (rz - lz) * s + v.vec.z * v.dist;
+      const v = verts[d.dispVertStart + r * size + c];
+      const o = off + (r * size + c) * 3;
+      out[o] = lx + (rx - lx) * s + v.vec.x * v.dist;
+      out[o + 1] = ly + (ry - ly) * s + v.vec.y * v.dist;
+      out[o + 2] = lz + (rz - lz) * s + v.vec.z * v.dist;
     }
   }
 
-  // Winding: the triangles below share the winding of (v00, v10, v01) on the flat base grid. Make them
+  // Winding: the triangles share the winding of (v00, v10, v01) on the flat base grid. Make them
   // counter-clockwise around the face's front normal.
   const plane = bsp.planes[face.planeNum];
-  const sideSign = face.side ? -1 : 1;
+  const sideSign = 1; // planes[planeNum] already faces the front (vbsp: side = planeNum & 1)
   const fnx = plane.normal.x * sideSign;
   const fny = plane.normal.y * sideSign;
   const fnz = plane.normal.z * sideSign;
@@ -365,36 +395,43 @@ export function displacementSurface(bsp: BspFile, index: number): DisplacementSu
   const vx = px[3] - px[0];
   const vy = py[3] - py[0];
   const vz = pz[3] - pz[0];
-  const flip = (uy * vz - uz * vy) * fnx + (uz * vx - ux * vz) * fny + (ux * vy - uy * vx) * fnz < 0;
+  return (uy * vz - uz * vy) * fnx + (uz * vx - ux * vz) * fny + (ux * vy - uy * vx) * fnz < 0;
+}
 
+/**
+ * Writes the 2 * (size-1)^2 triangles of a size x size displacement grid (Source's alternating diagonals)
+ * as vertex indices + vbase to `out` at number `off`, flipped when `flip` (see writeDisplacementGrid).
+ */
+function writeDisplacementTriangles(size: number, flip: boolean, vbase: number, out: Uint32Array, off: number): void {
   const cells = size - 1;
-  const triangles = new Uint32Array(cells * cells * 6);
-  let t = 0;
-  const emit = (a: number, b: number, c: number): void => {
-    triangles[t++] = a;
-    if (flip) {
-      triangles[t++] = c;
-      triangles[t++] = b;
-    } else {
-      triangles[t++] = b;
-      triangles[t++] = c;
-    }
-  };
+  let t = off;
+  // second/third vertex order: (b, c) or, flipped, (c, b)
+  const j1 = flip ? 2 : 1;
+  const j2 = flip ? 1 : 2;
   for (let r = 0; r < cells; r++) {
     for (let c = 0; c < cells; c++) {
       const i = r * size + c;
+      const v = vbase + i;
       if (i & 1) {
         // diagonal (r, c+1)-(r+1, c)
-        emit(i, i + size, i + 1);
-        emit(i + 1, i + size, i + size + 1);
+        out[t] = v;
+        out[t + j1] = v + size;
+        out[t + j2] = v + 1;
+        out[t + 3] = v + 1;
+        out[t + 3 + j1] = v + size;
+        out[t + 3 + j2] = v + size + 1;
       } else {
         // diagonal (r, c)-(r+1, c+1)
-        emit(i, i + size, i + size + 1);
-        emit(i, i + size + 1, i + 1);
+        out[t] = v;
+        out[t + j1] = v + size;
+        out[t + j2] = v + size + 1;
+        out[t + 3] = v;
+        out[t + 3 + j1] = v + size + 1;
+        out[t + 3 + j2] = v + 1;
       }
+      t += 6;
     }
   }
-  return { index, size, positions, triangles };
 }
 
 /**
@@ -483,34 +520,66 @@ export interface DisplacementTriangles extends TriangleSoup {
 }
 
 /**
+ * Compacts triangles [from, to) of `indices` (vertex indices into P) to start at triangle `t`, dropping
+ * degenerate ones (as the prism builder does), with their contents and displacement; returns the new
+ * triangle count. Its own small function so the JIT optimizes it after a few displacements (map loads run
+ * cold).
+ */
+function keepDisplacementTriangles(
+  P: Float64Array, indices: Uint32Array, from: number, to: number, cont: number, dispIndex: number,
+  contents: Int32Array, disp: Int32Array, t: number,
+): number {
+  for (let i = from; i < to; i++) {
+    const ia = indices[i * 3];
+    const ib = indices[i * 3 + 1];
+    const ic = indices[i * 3 + 2];
+    const a = ia * 3;
+    const b = ib * 3;
+    const c = ic * 3;
+    const e1x = P[b] - P[a], e1y = P[b + 1] - P[a + 1], e1z = P[b + 2] - P[a + 2];
+    const e2x = P[c] - P[a], e2y = P[c + 1] - P[a + 1], e2z = P[c + 2] - P[a + 2];
+    const cx = e1y * e2z - e1z * e2y;
+    const cy = e1z * e2x - e1x * e2z;
+    const cz = e1x * e2y - e1y * e2x;
+    if (!(Math.sqrt(cx * cx + cy * cy + cz * cz) > 1e-6)) continue; // degenerate
+    indices[t * 3] = ia;
+    indices[t * 3 + 1] = ib;
+    indices[t * 3 + 2] = ic;
+    contents[t] = cont;
+    disp[t] = dispIndex;
+    t++;
+  }
+  return t;
+}
+
+/**
  * Displacement collision as native triangles: the same triangles buildDisplacementBrushes turns into
  * prisms (Source's alternating-diagonal tessellation, CCW from the front), as one indexed soup that
  * CollisionWorld collides as two-sided triangles. Displacements flagged "no hull collision" are skipped
- * (players pass through them); degenerate triangles are dropped. Model 0.
+ * (players pass through them); degenerate triangles are dropped. Model 0. Written straight into the
+ * output arrays (this runs on ~200k triangles during map load).
  */
 export function buildDisplacementTriangles(bsp: BspFile, opts: DisplacementTriangleOptions = {}): DisplacementTriangles {
-  const surfs: DisplacementSurface[] = [];
-  const surfContents: number[] = [];
+  const count = bsp.dispInfos.length;
+  const sizes = new Int32Array(count);
   let malformed = 0;
   let skipped = 0;
   let nv = 0;
   let nt = 0;
-  for (let di = 0; di < bsp.dispInfos.length; di++) {
-    const d = bsp.dispInfos[di];
-    const flags = dispFlags(d.minTess);
+  for (let di = 0; di < count; di++) {
+    const flags = dispFlags(bsp.dispInfos[di].minTess);
     if (flags & DISP_FLAG_NO_HULL_COLL || (opts.skipNoPhysics && flags & DISP_FLAG_NO_PHYSICS_COLL)) {
       skipped++;
       continue;
     }
-    const surf = displacementSurface(bsp, di);
-    if (!surf) {
+    const size = displacementGridSize(bsp, di);
+    if (size === 0) {
       malformed++;
       continue;
     }
-    surfs.push(surf);
-    surfContents.push(d.contents !== 0 ? d.contents : CONTENTS_SOLID);
-    nv += surf.positions.length / 3;
-    nt += surf.triangles.length / 3;
+    sizes[di] = size;
+    nv += size * size;
+    nt += 2 * (size - 1) * (size - 1);
   }
   const positions = new Float64Array(nv * 3);
   let indices = new Uint32Array(nt * 3);
@@ -518,34 +587,16 @@ export function buildDisplacementTriangles(bsp: BspFile, opts: DisplacementTrian
   let disp = new Int32Array(nt);
   let vbase = 0;
   let t = 0;
-  let degenerate = 0;
-  for (let k = 0; k < surfs.length; k++) {
-    const surf = surfs[k];
-    const P = surf.positions;
-    positions.set(P, vbase * 3);
-    const T = surf.triangles;
-    for (let i = 0; i < T.length; i += 3) {
-      const a = T[i] * 3;
-      const b = T[i + 1] * 3;
-      const c = T[i + 2] * 3;
-      const e1x = P[b] - P[a], e1y = P[b + 1] - P[a + 1], e1z = P[b + 2] - P[a + 2];
-      const e2x = P[c] - P[a], e2y = P[c + 1] - P[a + 1], e2z = P[c + 2] - P[a + 2];
-      const cx = e1y * e2z - e1z * e2y;
-      const cy = e1z * e2x - e1x * e2z;
-      const cz = e1x * e2y - e1y * e2x;
-      if (!(Math.sqrt(cx * cx + cy * cy + cz * cz) > 1e-6)) {
-        degenerate++;
-        continue;
-      }
-      indices[t * 3] = T[i] + vbase;
-      indices[t * 3 + 1] = T[i + 1] + vbase;
-      indices[t * 3 + 2] = T[i + 2] + vbase;
-      contents[t] = surfContents[k];
-      disp[t] = surf.index;
-      t++;
-    }
-    vbase += P.length / 3;
+  for (let di = 0; di < count; di++) {
+    const size = sizes[di];
+    if (size === 0) continue;
+    const flip = writeDisplacementGrid(bsp, di, positions, vbase * 3);
+    writeDisplacementTriangles(size, flip, vbase, indices, t * 3);
+    const c = bsp.dispInfos[di].contents;
+    t = keepDisplacementTriangles(positions, indices, t, t + 2 * (size - 1) * (size - 1), c !== 0 ? c : CONTENTS_SOLID, di, contents, disp, t);
+    vbase += size * size;
   }
+  const degenerate = nt - t;
   if (t < nt) {
     indices = indices.slice(0, t * 3);
     contents = contents.slice(0, t);
@@ -1023,8 +1074,9 @@ export interface CollectCollisionOptions extends DisplacementBrushOptions {
   /**
    * How displacements collide. 'prisms' (default here, for callers that build `new
    * CollisionWorld(set.brushes)`): thin prism brushes in `brushes`. 'triangles': native two-sided
-   * triangles in `set.triangles` (what loadBspMap uses: ~10x faster to build and ~8x less memory on
-   * displacement-heavy maps). 'none': no displacement collision. createCollisionWorld handles every mode.
+   * triangles in `set.triangles` (what loadBspMap uses: on surf_mesa_fixed's 183k displacement triangles
+   * ~0.2 s and ~37 MB instead of ~3-5 s and ~400 MB). 'none': no displacement collision.
+   * createCollisionWorld handles every mode.
    */
   displacements?: 'prisms' | 'triangles' | 'none';
 }
