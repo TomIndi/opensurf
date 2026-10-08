@@ -4,7 +4,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { registerConvars } from '../src/game/convars';
-import { DUCKED_FLAG, FRAME_STRIDE, ReplaySystem, replayFromKsf, sampleReplay, WR_GHOST_NAME } from '../src/game/replay';
+import { DUCKED_FLAG, FRAME_STRIDE, isTeleportStep, type ReplayData, ReplaySystem, replayFromKsf, sampleReplay, WR_GHOST_NAME } from '../src/game/replay';
 import {
   boardForTickrate,
   createHttpKsfClient,
@@ -232,6 +232,52 @@ describe('KSF replay parser', () => {
     expect(() => parseKsfReplay(buildKsfReplay(frames, [{ frame: 10, type: KSF_ZONE_START, index: 1 }, { frame: 10, type: KSF_ZONE_END, index: 99 }]))).toThrow(/no run/);
   });
 
+  it('stage teleport markers (a frame far from both neighbours) take the next frame\'s position and view', () => {
+    // a staged run: stage 1 along +x at (-15000.., -11500, 400), a stage teleport to (-13312, -15072, -320) with
+    // KSF's marker frame (0, 0, 1000) in between, stage 2 along +x; then a second teleport with a marker that isn't
+    // exactly on the axis (surf_kitsune's (0, -27.41, 7000)); and one plain teleport without a marker
+    const ti = 0.01;
+    const frames: SyntheticKsfFrame[] = [];
+    const move = (x: number, y: number, z: number, yaw: number) => frames.push({ buttons: IN_FORWARD, origin: [x, y, z], angles: [10, yaw, 0], velocity: [900, 0, -50] });
+    for (let k = 0; k < 30; k++) move(-15000 + k * 9, -11500, 400, 91);
+    const marker1 = frames.length;
+    frames.push({ buttons: IN_FORWARD | IN_DUCK, origin: [0, 0, 1000], angles: [0, 0, 0], velocity: [900, 0, -58] });
+    for (let k = 0; k < 30; k++) move(-13312 + k * 9, -15072, -320, 90);
+    const marker2 = frames.length;
+    frames.push({ buttons: IN_FORWARD, origin: [0, -27.41, 7000], angles: [0, 0, 0], velocity: [900, 0, -58] });
+    for (let k = 0; k < 30; k++) move(8192 + k * 9, -512, 6624, 270);
+    const plain = frames.length;
+    for (let k = 0; k < 30; k++) move(-5120 + k * 9, -15072, -5312, 90);
+    const end = frames.length - 1;
+    const p = parseKsfReplay(
+      buildKsfReplay(frames, [
+        { frame: 0, type: KSF_ZONE_START, index: 1 },
+        { frame: marker1 + 2, type: KSF_ZONE_END, index: 2 },
+        { frame: end, type: KSF_ZONE_END, index: 99 },
+      ]),
+      { tickInterval: ti },
+    );
+    expect(p.markers).toEqual([marker1, marker2]);
+    for (const m of [marker1, marker2]) {
+      expect([...p.origins.slice(m * 3, m * 3 + 3)]).toEqual([...p.origins.slice((m + 1) * 3, (m + 2) * 3)]);
+      expect([...p.angles.slice(m * 3, m * 3 + 3)]).toEqual([...p.angles.slice((m + 1) * 3, (m + 2) * 3)]);
+    }
+    // the tick's own buttons and velocity stay
+    expect(p.buttons[marker1]).toBe(IN_FORWARD | IN_DUCK);
+    expect(p.velocities[marker1 * 3 + 2]).toBeCloseTo(-58, 4);
+    // the plain teleport is untouched (it is a real move: the replay snaps over it, see sampleReplay)
+    expect(p.origins[plain * 3]).toBeCloseTo(-5120, 3);
+    expect(p.origins[(plain - 1) * 3]).toBeCloseTo(8192 + 29 * 9, 3);
+    // nothing of the run is near the map origin any more
+    for (let k = 0; k < p.frameCount; k++) expect(Math.abs(p.origins[k * 3]) + Math.abs(p.origins[k * 3 + 1])).toBeGreaterThan(500);
+    // ... and the replay never passes through it: every sample is at one of the two frames around a teleport
+    const data = replayFromKsf(p, 'surf_kitsune');
+    for (let t = 0; t <= p.time; t += ti / 4) {
+      const smp = sampleReplay(data, t)!;
+      expect(Math.abs(smp.origin.x) + Math.abs(smp.origin.y)).toBeGreaterThan(500);
+    }
+  });
+
   const realFile = process.env.SURF_TEST_KSF_REPLAY;
   it.skipIf(!realFile || !existsSync(realFile))('parses a real KSF replay ($SURF_TEST_KSF_REPLAY: surf_utopia_njv 66 tick WR)', () => {
     const p = parseKsfReplay(readFileSync(realFile!), { tickInterval: 0.015, expectedTime: 53.36414337158203 });
@@ -241,6 +287,60 @@ describe('KSF replay parser', () => {
     expect(p.time).toBeCloseTo(53.37, 2);
     expect(p.origins[0]).toBeCloseTo(-13979.8, 1);
     expect(p.origins[2]).toBeCloseTo(12800.03, 1);
+    expect(p.markers).toEqual([]);
+  });
+
+  // a staged map's replay with stage teleport markers, e.g. surf_kitsune's 100 tick WR (not committed: KSF's data)
+  const stagedFile = process.env.SURF_TEST_KSF_REPLAY_STAGED;
+  it.skipIf(!stagedFile || !existsSync(stagedFile))('real staged replay: its stage teleport markers are removed ($SURF_TEST_KSF_REPLAY_STAGED)', () => {
+    const p = parseKsfReplay(readFileSync(stagedFile!), { tickInterval: 0.01 });
+    expect(p.markers.length).toBeGreaterThan(0);
+    const data = replayFromKsf(p, 'staged');
+    for (let k = 0; k < p.frameCount; k++) expect(Math.abs(p.origins[k * 3]) + Math.abs(p.origins[k * 3 + 1])).toBeGreaterThan(100);
+    for (let t = 0; t <= p.time; t += p.tickInterval / 2) {
+      const smp = sampleReplay(data, t)!;
+      expect(Math.abs(smp.origin.x) + Math.abs(smp.origin.y)).toBeGreaterThan(100);
+    }
+  });
+});
+
+describe('replay sampling across teleports', () => {
+  /** Our own replay format: 20 frames along +x (10 units / tick at 100 tick), a teleport of 5000 units, 20 more. */
+  function teleportReplay(): ReplayData {
+    const frames = new Float32Array(40 * FRAME_STRIDE);
+    for (let k = 0; k < 40; k++) {
+      const o = k * FRAME_STRIDE;
+      frames[o] = k < 20 ? k * 10 : 5000 + (k - 20) * 10;
+      frames[o + 1] = 0;
+      frames[o + 2] = 100;
+      frames[o + 4] = k < 20 ? 0 : 180;
+    }
+    return { map: 'surf_t', group: 0, time: 0.39, tickrate: 100, frames, date: 0 };
+  }
+
+  it('snaps to the nearer frame instead of sliding through the map (PB replays and ghosts too)', () => {
+    const r = teleportReplay();
+    expect(isTeleportStep(r, 19)).toBe(true);
+    expect(isTeleportStep(r, 18)).toBe(false);
+    expect(isTeleportStep(r, 39)).toBe(false);
+    // between frames 19 and 20
+    const a = sampleReplay(r, 0.193)!;
+    expect(a.origin.x).toBeCloseTo(190, 3);
+    expect(a.angles.yaw).toBeCloseTo(0, 3);
+    const b = sampleReplay(r, 0.197)!;
+    expect(b.origin.x).toBeCloseTo(5000, 3);
+    expect(b.angles.yaw).toBeCloseTo(180, 3);
+    // the time stays the clock's
+    expect(b.time).toBeCloseTo(0.197, 9);
+    // the speed (from the frames: no stored velocities) never is the teleport distance
+    expect(a.speed).toBeCloseTo(1000, 1);
+    expect(b.speed).toBeCloseTo(1000, 1);
+    // an ordinary step still interpolates
+    expect(sampleReplay(r, 0.055)!.origin.x).toBeCloseTo(55, 3);
+    // the ghost too
+    const sys = new ReplaySystem('surf_t');
+    sys.setPb(r);
+    expect(sys.ghostAt(0.195)!.origin.x === 190 || sys.ghostAt(0.195)!.origin.x === 5000).toBe(true);
   });
 });
 

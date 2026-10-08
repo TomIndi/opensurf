@@ -30,6 +30,13 @@ const GHOST_COLOR: [number, number, number] = [0.25, 0.95, 1.0];
 /** The KSF world record ghost: gold, apart from the cyan PB ghost. */
 export const WR_GHOST_COLOR: [number, number, number] = [1.0, 0.72, 0.18];
 export const WR_GHOST_NAME = 'KSF WR';
+/**
+ * Two consecutive frames farther apart than this (units) are a teleport (stage teleports, the end of a KSF replay):
+ * samples between them snap to the nearer frame instead of sliding through the map. Far above any real per-tick
+ * move (3500 u/s per axis at 64 tick is under 100 units).
+ */
+export const REPLAY_TELEPORT_DISTANCE = 1000;
+const TELEPORT_SQ = REPLAY_TELEPORT_DISTANCE * REPLAY_TELEPORT_DISTANCE;
 const DB_NAME = 'surf';
 const STORE = 'replays';
 const INITIAL_FRAMES = 4096;
@@ -93,9 +100,24 @@ export function replayStartFrame(r: ReplayData): number {
   return n > 0 ? Math.min(s, n - 1) : 0;
 }
 
+/** Squared distance between the positions of frames p and q. */
+function frameDistSq(f: Float32Array, p: number, q: number): number {
+  const dx = f[q * FRAME_STRIDE] - f[p * FRAME_STRIDE];
+  const dy = f[q * FRAME_STRIDE + 1] - f[p * FRAME_STRIDE + 1];
+  const dz = f[q * FRAME_STRIDE + 2] - f[p * FRAME_STRIDE + 2];
+  return dx * dx + dy * dy + dz * dz;
+}
+
+/** Whether frames k and k + 1 are a teleport (REPLAY_TELEPORT_DISTANCE). */
+export function isTeleportStep(r: ReplayData, k: number): boolean {
+  const n = frameCount(r);
+  return k >= 0 && k + 1 < n && frameDistSq(r.frames, k, k + 1) > TELEPORT_SQ;
+}
+
 /**
  * Interpolated replay state at run time `t` seconds (clamped to the replay; negative times reach into the prestrafe
- * frames of a replay that has them). Null for an empty replay.
+ * frames of a replay that has them). Null for an empty replay. Between two frames of a teleport the sample is the
+ * nearer frame (no interpolation through the map).
  */
 export function sampleReplay(r: ReplayData, t: number): ReplaySample | null {
   const n = frameCount(r);
@@ -108,9 +130,16 @@ export function sampleReplay(r: ReplayData, t: number): ReplaySample | null {
   const last = n - 1;
   const finished = pos >= last;
   if (pos > last) pos = last;
-  const i = Math.min(Math.floor(pos), last);
-  const j = Math.min(i + 1, last);
-  const a = (pos - i) || 0;
+  const i0 = Math.min(Math.floor(pos), last);
+  const j0 = Math.min(i0 + 1, last);
+  let i = i0;
+  let j = j0;
+  let a = (pos - i) || 0;
+  if (j > i && frameDistSq(f, i, j) > TELEPORT_SQ) {
+    if (a < 0.5) j = i;
+    else i = j;
+    a = 0;
+  }
   const oi = i * FRAME_STRIDE;
   const oj = j * FRAME_STRIDE;
   const origin = {
@@ -133,12 +162,17 @@ export function sampleReplay(r: ReplayData, t: number): ReplaySample | null {
     };
     speed = Math.sqrt(velocity.x * velocity.x + velocity.y * velocity.y);
   } else {
-    // speed from the surrounding frame pair (the last frame reuses the previous pair)
-    const si = j > i ? i : Math.max(0, i - 1);
-    const sj = j > i ? j : i;
-    if (sj > si) {
-      const dx = f[sj * FRAME_STRIDE] - f[si * FRAME_STRIDE];
-      const dy = f[sj * FRAME_STRIDE + 1] - f[si * FRAME_STRIDE + 1];
+    // speed from the surrounding frame pair (the last frame reuses the previous pair); a teleport pair takes the
+    // pair before it (or after it), never the teleport distance
+    let si = j0 > i0 ? i0 : Math.max(0, i0 - 1);
+    if (si + 1 < n && frameDistSq(f, si, si + 1) > TELEPORT_SQ) {
+      if (si > 0 && frameDistSq(f, si - 1, si) <= TELEPORT_SQ) si--;
+      else if (si + 2 < n && frameDistSq(f, si + 1, si + 2) <= TELEPORT_SQ) si++;
+      else si = -1;
+    }
+    if (si >= 0 && si + 1 < n) {
+      const dx = f[(si + 1) * FRAME_STRIDE] - f[si * FRAME_STRIDE];
+      const dy = f[(si + 1) * FRAME_STRIDE + 1] - f[si * FRAME_STRIDE + 1];
       speed = Math.sqrt(dx * dx + dy * dy) * rate;
     }
   }

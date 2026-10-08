@@ -333,12 +333,14 @@ Key names follow Source: `a`..`z`, `0`..`9`, `space`, `ctrl`, `shift`, `alt`, `t
 ## KSF world records (`src/maps/ksf.ts`, `ksfproxy.ts`, `ksfreplay.ts`)
 
 ksf.surf publishes every map's leaderboards and a replay file of each record. Its API sends no CORS headers, so the
-page goes through the dev / preview server (vite.config.ts `ksfProxy`, header `x-surf-ksf-proxy: 1`):
+page goes through the dev / preview server (`createKsfProxyHandler` in `ksfproxy.ts`, mounted by vite.config.ts and
+unit-tested in `tests/ksf_proxy.test.ts` with an injected fetch; header `x-surf-ksf-proxy: 1`):
 `/__ksf/records/<map>?game=<66t|100t>` → `https://ksf.surf/api/maps/<map>/records/zone/0/0?game=<css|css100t>&mode=0`
 (main course, normal style; ksf.surf's own `game` values are `css` = 66 tick and `css100t` = 100 tick, an unknown value
 silently answers with the 66 tick board) and `/__ksf/replay/<file>?game=...` → `https://ksf.surf/api/replays/<file>`.
 `parseKsfProxyRequest` validates map (`/^[a-z0-9][a-z0-9_.-]{0,63}$/i`, no `..`), file (`/^replay_[a-z0-9_]+\.rec$/i`)
-and board; only URLs built from them are fetched (10 / 15 s timeouts, size caps). Without the proxy (static hosting)
+and board; only URLs built from them are fetched (GET / HEAD only, 10 / 15 s timeouts over the whole transfer, size
+caps, the upstream request aborted when the page goes away; the upstream status passes through). Without the proxy (static hosting)
 `KsfService` reports `unavailable` once per session: no WR anywhere, commands say "KSF world records need the local
 server (npm run dev / npm run preview)". Record lists are cached per map + board, parsed replays per file (memory).
 Built-in maps are never looked up; catalog maps and other `surf_*` maps are.
@@ -351,13 +353,21 @@ int32 frame, type, index at 540 + 524 i — type 3 left a start zone (index 1 = 
 type 1 checkpoint, type 2 reached stage n (staged) / the end (index 99). 100 tick files may lack the run-start event:
 int32 @16 then holds the start frame; the leaderboard time cross-checks it. The tick interval comes from the board and
 is verified from the motion (distance per frame / stored velocity). Frames after the end (and two junk teleport
-frames) are dropped. Coordinates are the map's own: the bot runs the real route on our BSP.
+frames) are dropped. Each stage teleport of a staged map writes one marker frame at a made-up place near the map
+origin ((0, 0, 1000 × n) on surf_kitsune): a frame more than 1500 units from both neighbours takes the next frame's
+position and view (`markers`). Coordinates are the map's own: the bot runs the real route on our BSP. `sampleReplay`
+(all replays, PB ones too) snaps to the nearer frame across a teleport (two frames > 1000 units apart) instead of
+interpolating through the map.
 
 In game: `replayFromKsf` turns it into a `ReplayData` (its own frame rate, `startFrame` = prestrafe, stored
-`velocities`, ducked = `IN_DUCK`). `Game.loadKsfWrReplay` installs it as the session's WR replay; `!wrreplay` spectates
-it with the replay camera/HUD (prestrafe shown as "Start Zone", clock from the run-start event, speed from the stored
-velocity, keys from the stored buttons, official time at the end; jump / `!r` leaves), `surf_ghost_wr` races it as a
-gold "KSF WR" ghost on the main course. The WR shows in the HUD side panel, the pause menu, a chat line on map load,
+`velocities`, ducked = `IN_DUCK`). `Game.loadKsfWrReplay` installs it as the session's WR replay (the WR's, or the
+fastest record with a replay file when the WR has none: `ksfReplayRecord`; it stays installed until the board changes);
+`!wrreplay` spectates it with the replay camera/HUD (prestrafe shown as "Start Zone", clock from the run-start event,
+speed from the stored velocity, keys from the stored buttons, official time at the end; jump / `!r` leaves). While the
+replay downloads the watch is pending: `!wrreplay` / `!replay wr` again cancels it, a PB `!replay` replaces it, and if
+a run started meanwhile the replay is only made ready ("type !wrreplay to watch") instead of taking over the run.
+`surf_ghost_wr` races it as a gold "KSF WR" ghost on the main course (the timer box's "WR" is the KSF WR on the main
+course only; a bonus shows its local best). The WR shows in the HUD side panel, the pause menu, a chat line on map load,
 the finish line (" | +1.234 vs KSF WR") and the map browser's details pane (KSF WR line, Watch WR, a "WR videos" link to
 `https://www.youtube.com/@ksfrecords/search?query=<map>`, credit). Nothing from KSF is stored in the repository.
 
@@ -382,7 +392,8 @@ URL parameters (parsed by `game/debugapi.ts`):
 
 `vite.config.ts` serves `$SURF_TEST_MAPS` / `$SURF_TEST_MAPS_LARGE` at `/__maps/<file>` in dev and preview, plus the
 Drive (`/__drive/<id>`) and KSF (`/__ksf/...`) proxies. `$SURF_TEST_KSF_REPLAY` (a downloaded KSF `.rec`, e.g. the
-surf_utopia_njv 66 tick WR) enables the real-file parser test in `tests/ksf.test.ts`.
+surf_utopia_njv 66 tick WR) enables the real-file parser test in `tests/ksf.test.ts`, `$SURF_TEST_KSF_REPLAY_STAGED`
+(a staged map's 100 tick replay, e.g. surf_kitsune's WR) the stage-teleport-marker test.
 
 `window.__surf` (`SurfDebugApi`, installed by `Game.start()`): `state()` (plain snapshot: game state, map, origin,
 velocity, speed, ground, timer HUD, tick, practice), `loadBuiltin(id)`, `loadUrl(url)`, `loadMap(name)` (resolve once

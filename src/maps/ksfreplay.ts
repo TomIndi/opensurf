@@ -13,7 +13,10 @@
 //                velocity x y z
 //
 // Frames before the run start are the prestrafe in the start zone; a few frames follow the end, then two junk
-// frames (teleports). The tick interval isn't stored: it comes from the board (66 tick 0.015 s, 100 tick 0.01 s)
+// frames (teleports). On staged maps each stage teleport writes one marker frame at a made-up place near the map
+// origin ((0, 0, 1000), (0, 0, 2000), ... (0, -27.4, 7000) on surf_kitsune): a frame far from both neighbours is such
+// a marker and takes the next frame's position and view (otherwise the replay camera and the ghost would flash
+// through the middle of the map at each stage). The tick interval isn't stored: it comes from the board (66 tick 0.015 s, 100 tick 0.01 s)
 // and is checked against the motion in the frames (distance moved per frame / stored velocity). Coordinates are the
 // map's own (KSF runs the same BSPs), so a replay plays on our copy of the map as-is. Everything is validated:
 // garbage (sizes that don't add up, non-finite or absurd numbers inside the run) throws KsfReplayError.
@@ -33,8 +36,8 @@ export const KSF_MAX_FRAMES = 1_440_000;
 /** Coordinates / velocities beyond this are garbage (Source maps span ±16384). */
 const MAX_COORD = 65536;
 const MAX_VELOCITY = 100000;
-/** A move longer than this between two frames is a teleport (end-of-file junk frames). */
-const TELEPORT_DISTANCE = 1500;
+/** A move longer than this between two frames is a teleport (end-of-file junk frames, stage teleport markers). */
+export const KSF_TELEPORT_DISTANCE = 1500;
 
 export interface KsfZoneEvent {
   frame: number;
@@ -60,6 +63,8 @@ export interface ParsedKsfReplay {
   time: number;
   /** Valid zone events, by frame. */
   events: KsfZoneEvent[];
+  /** Teleport marker frames whose position / view were replaced by the next frame's (see the file comment). */
+  markers: number[];
   /** Per frame: Source IN_* button bits. */
   buttons: Int32Array;
   /** Per frame: x, y, z (feet). */
@@ -175,11 +180,24 @@ export function parseKsfReplay(input: ArrayBuffer | Uint8Array, opts: KsfParseOp
     const jump = (k: number) =>
       !finite[k] ||
       Math.hypot(allOrigins[k * 3] - allOrigins[k * 3 - 3], allOrigins[k * 3 + 1] - allOrigins[k * 3 - 2], allOrigins[k * 3 + 2] - allOrigins[k * 3 - 1]) >
-        TELEPORT_DISTANCE;
+        KSF_TELEPORT_DISTANCE;
     let guard = 8;
     while (endFrame > 1 && guard-- > 0 && jump(endFrame)) endFrame--;
   }
   for (let k = 0; k <= endFrame; k++) if (!finite[k]) throw new KsfReplayError(`garbage in frame ${k}`);
+
+  // ---- stage teleport markers: one frame far from both neighbours takes the next frame's origin and angles (its
+  // buttons and velocity stay: they are the tick's own)
+  const dist = (p: number, q: number) =>
+    Math.hypot(allOrigins[q * 3] - allOrigins[p * 3], allOrigins[q * 3 + 1] - allOrigins[p * 3 + 1], allOrigins[q * 3 + 2] - allOrigins[p * 3 + 2]);
+  const markers: number[] = [];
+  for (let k = 1; k < endFrame; k++) {
+    if (dist(k - 1, k) > KSF_TELEPORT_DISTANCE && dist(k, k + 1) > KSF_TELEPORT_DISTANCE) {
+      allOrigins.copyWithin(k * 3, (k + 1) * 3, (k + 2) * 3);
+      allAngles.copyWithin(k * 3, (k + 1) * 3, (k + 2) * 3);
+      markers.push(k);
+    }
+  }
 
   // ---- tick interval: the board's, unless the motion clearly says it is the other known one
   const measured = estimateTickInterval(allOrigins, allVel, endFrame + 1);
@@ -228,6 +246,7 @@ export function parseKsfReplay(input: ArrayBuffer | Uint8Array, opts: KsfParseOp
     startSource,
     time: (endFrame - startFrame) * ti,
     events: events.filter((e) => e.frame <= endFrame),
+    markers,
     buttons: allButtons.slice(0, n),
     origins: allOrigins.slice(0, n * 3),
     angles: allAngles.slice(0, n * 3),

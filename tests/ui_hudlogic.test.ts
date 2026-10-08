@@ -37,6 +37,9 @@ describe('timer panel view', () => {
     expect(timerView(T({ wr: 60 }), false, 52.81).wr).toBe(timerView(T({ wr: 52.81 })).wr);
     expect(timerView(T({ wr: 60 }), false, null).wr).toBe(timerView(T({ wr: 60 })).wr);
     expect(timerView(T({ wr: null }), false, null).wr).toBe('None');
+    // the KSF WR is the main course's: a bonus shows its own local best (or None), never the main course's WR
+    expect(timerView(T({ bonus: 1, wr: 12.5 }), false, 52.81).wr).toBe(timerView(T({ wr: 12.5 })).wr);
+    expect(timerView(T({ bonus: 1, state: 'startzone', wr: null }), false, 58.54).wr).toBe('None');
   });
 
   it('PB/WR text', () => {

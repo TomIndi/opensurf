@@ -6,8 +6,10 @@
 //
 // <board> is "66t" or "100t" (KSF's CS:S 66 tick and 100 tick servers). ksf.surf's own `game` values for them are
 // "css" and "css100t" (an unknown value silently answers with the 66 tick board). Only URLs built here from the
-// validated parts are ever fetched: never anything taken from the request as-is. Pure functions (no DOM, no Node),
-// shared by the Vite config and the browser client (src/maps/ksf.ts).
+// validated parts are ever fetched: never anything taken from the request as-is. No DOM and no Node imports: the
+// validators are shared by the browser client (src/maps/ksf.ts) and the server, and the server's request handler
+// (createKsfProxyHandler, mounted by vite.config.ts) takes Node's request / response structurally and an injectable
+// fetch (unit tests).
 
 /** KSF leaderboard: CS:S 66 tick or 100 tick. */
 export type KsfBoard = '66t' | '100t';
@@ -115,4 +117,133 @@ export function parseKsfProxyRequest(url: string): KsfProxyRoute | KsfProxyError
   }
   if (!isValidKsfReplayFile(name)) return { error: 'invalid replay file name', status: 400 };
   return { kind: 'replay', file: name, board, upstream: ksfReplayUpstreamUrl(name, board) };
+}
+
+// ------------------------------------------------------------------------------------------ the server handler
+
+/** The parts of Node's IncomingMessage the handler reads. */
+export interface KsfProxyIncoming {
+  url?: string;
+  method?: string;
+}
+
+/** The parts of Node's ServerResponse the handler uses. */
+export interface KsfProxyOutgoing {
+  statusCode: number;
+  readonly headersSent: boolean;
+  readonly destroyed: boolean;
+  readonly writableFinished: boolean;
+  setHeader(name: string, value: string): unknown;
+  write(chunk: Uint8Array): boolean;
+  end(data?: string): unknown;
+  destroy(): unknown;
+  on(event: 'close' | 'drain', cb: () => void): unknown;
+  off(event: 'close' | 'drain', cb: () => void): unknown;
+}
+
+export interface KsfProxyOptions {
+  /** Upstream fetch (default: the global fetch). */
+  fetch?: (url: string, init: RequestInit) => Promise<Response>;
+  recordsTimeoutMs?: number;
+  replayTimeoutMs?: number;
+  recordsMaxBytes?: number;
+  replayMaxBytes?: number;
+}
+
+/**
+ * The dev / preview server's /__ksf/ middleware: anything else goes to `next`. Every answer carries the proxy header
+ * (KSF_PROXY_HEADER, how the client tells the proxy from a static host) and no-store. Invalid requests: 400 / 404;
+ * not GET / HEAD: 405. The upstream status, type and body are passed on (a 404 stays a 404), with a timeout over the
+ * whole transfer (502 before the answer started, else the connection is cut), a size cap (a declared length over it:
+ * 502; a body growing past it: cut) and the upstream request aborted when the client goes away.
+ */
+export function createKsfProxyHandler(
+  opts: KsfProxyOptions = {},
+): (req: KsfProxyIncoming, res: KsfProxyOutgoing, next: () => void) => Promise<void> {
+  const fetchFn = opts.fetch ?? ((url: string, init: RequestInit) => fetch(url, init));
+  return async (req, res, next) => {
+    const route = parseKsfProxyRequest(req.url ?? '');
+    if (!route) {
+      next();
+      return;
+    }
+    res.setHeader(KSF_PROXY_HEADER, '1');
+    res.setHeader('Cache-Control', 'no-store');
+    const fail = (status: number, msg: string) => {
+      if (res.headersSent) {
+        res.destroy();
+        return;
+      }
+      res.statusCode = status;
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.end(msg);
+    };
+    if ('error' in route) return fail(route.status, route.error);
+    if (req.method && req.method !== 'GET' && req.method !== 'HEAD') {
+      res.setHeader('Allow', 'GET, HEAD');
+      return fail(405, 'GET only');
+    }
+    const records = route.kind === 'records';
+    const maxBytes = records ? opts.recordsMaxBytes ?? KSF_RECORDS_MAX_BYTES : opts.replayMaxBytes ?? KSF_REPLAY_MAX_BYTES;
+    const timeoutMs = records ? opts.recordsTimeoutMs ?? KSF_RECORDS_TIMEOUT_MS : opts.replayTimeoutMs ?? KSF_REPLAY_TIMEOUT_MS;
+    const ac = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      ac.abort();
+    }, timeoutMs);
+    const onClose = () => {
+      clearTimeout(timer);
+      if (!res.writableFinished) ac.abort();
+    };
+    res.on('close', onClose);
+    try {
+      const up = await fetchFn(route.upstream, {
+        signal: ac.signal,
+        headers: { accept: records ? 'application/json' : 'application/octet-stream', 'user-agent': 'SURF (browser surf remake; local dev server)' },
+      });
+      // (fetch decodes gzip/br: a Content-Length of an encoded body isn't the length passed on)
+      const len = up.headers.get('content-encoding') ? 0 : Number(up.headers.get('content-length')) || 0;
+      if (len > maxBytes) {
+        ac.abort();
+        return fail(502, 'ksf.surf answer too large');
+      }
+      res.statusCode = up.status;
+      res.setHeader('Content-Type', up.headers.get('content-type') ?? (records ? 'application/json' : 'application/octet-stream'));
+      if (len) res.setHeader('Content-Length', String(len));
+      if (!up.body || req.method === 'HEAD') {
+        if (up.body) void up.body.cancel().catch(() => undefined);
+        res.end();
+        return;
+      }
+      let total = 0;
+      for await (const chunk of up.body as unknown as AsyncIterable<Uint8Array>) {
+        total += chunk.byteLength;
+        if (total > maxBytes) {
+          ac.abort();
+          res.destroy();
+          return;
+        }
+        if (!res.write(chunk)) {
+          await new Promise<void>((r) => {
+            const done = () => {
+              res.off('drain', done);
+              res.off('close', done);
+              r();
+            };
+            res.on('drain', done);
+            res.on('close', done);
+          });
+          if (res.destroyed) return;
+        }
+      }
+      res.end();
+    } catch (e) {
+      if (res.destroyed) return;
+      fail(502, timedOut ? 'ksf.surf took too long to answer' : `ksf.surf: ${String((e as Error)?.message ?? e)}`);
+    } finally {
+      clearTimeout(timer);
+      res.off('close', onClose);
+    }
+  };
 }

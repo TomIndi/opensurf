@@ -27,12 +27,13 @@ export function courseText(t: TimerHud): string {
 
 /**
  * The timer box. `ksfWr` (seconds): the map's KSF world record when known - the box's "WR" is the world record
- * then, and the local best (t.wr, the side panel's "Server record") only without KSF data.
+ * then, and the local best (t.wr, the side panel's "Server record") only without KSF data. The KSF WR is the main
+ * course's (KSF's bonus boards aren't read): on a bonus the box shows the bonus's local best.
  */
 export function timerView(t: TimerHud, practice = false, ksfWr: number | null = null): TimerView {
   const course = courseText(t);
   const pb = t.pb !== null && t.pb > 0 ? formatTime(t.pb) : 'None';
-  const best = ksfWr !== null && ksfWr > 0 ? ksfWr : t.wr;
+  const best = t.bonus === 0 && ksfWr !== null && ksfWr > 0 ? ksfWr : t.wr;
   const wr = best !== null && best > 0 ? formatTime(best) : 'None';
   const base = { course, pb, wr };
   switch (t.state) {

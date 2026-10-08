@@ -134,6 +134,14 @@ export function parseKsfRecords(json: unknown): KsfRecord[] {
 }
 
 /**
+ * The record whose replay is "the WR replay" of a leaderboard (rank order): the WR, or when the WR has no replay file
+ * on ksf.surf the fastest record that has one. Null when no record has a replay.
+ */
+export function ksfReplayRecord(records: readonly KsfRecord[]): KsfRecord | null {
+  return records.find((r) => r.file !== null) ?? null;
+}
+
+/**
  * Whether to ask KSF about a map: never for the built-in maps; catalog maps (KSF's own archive) and maps loaded by a
  * surf map name (a dropped surf_x.bsp may be on KSF: an empty answer just means it isn't).
  */

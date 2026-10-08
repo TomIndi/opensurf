@@ -130,15 +130,27 @@ export interface CommandContext {
   ksfWorldRecord?(): Promise<KsfWr>;
   /**
    * Optional: downloads the KSF WR replay of the current map (`onDownload` is called when a download starts, i.e.
-   * it wasn't cached) and spectates it (`spectate` false: only loads it, for the WR ghost).
+   * it wasn't cached) and spectates it (`spectate` false: only loads it, for the WR ghost). A watch stays pending
+   * until the replay is there (see cancelKsfWatch).
    */
   loadKsfWrReplay?(opts: { spectate: boolean; onDownload?: () => void }): Promise<KsfReplayResult>;
+  /** Optional: cancels the pending watch of loadKsfWrReplay (its result is then `cancelled`); true if one was pending. */
+  cancelKsfWatch?(): boolean;
 }
 
 /** What loading the KSF WR replay gave. */
 export type KsfReplayResult =
-  | { ok: true; record: KsfRecord; board: KsfBoard; fallback: boolean; /** The WR had no replay: this is the best record with one. */ notWr: boolean }
-  | { ok: false; message: string };
+  | {
+      ok: true;
+      record: KsfRecord;
+      board: KsfBoard;
+      fallback: boolean;
+      /** The WR had no replay: this is the best record with one. */
+      notWr: boolean;
+      /** A watch whose replay arrived after a run had started: loaded, not watched (it doesn't take over the run). */
+      deferred?: boolean;
+    }
+  | { ok: false; message: string; /** The watch was cancelled while the replay downloaded (already reported). */ cancelled?: boolean };
 
 // ------------------------------------------------------------------------------------------ chat helpers
 
@@ -634,10 +646,15 @@ function watchKsfWr(ctx: CommandContext, s: CommandSession): void {
       (r) => {
         if (ctx.session !== s) return;
         if (!r.ok) {
-          reply(ctx, seg(r.message, 'lightred'));
+          if (!r.cancelled) reply(ctx, seg(r.message, 'lightred'));
           return;
         }
         const rec = r.record;
+        if (r.deferred) {
+          // a run started while it downloaded: don't take it over
+          reply(ctx, seg(r.notWr ? `KSF #${rec.rank} replay` : 'KSF WR replay', 'gold'), seg(' ready - type '), seg('!wrreplay', 'gold'), seg(' to watch.'));
+          return;
+        }
         reply(
           ctx,
           seg('Watching the '),
@@ -653,6 +670,13 @@ function watchKsfWr(ctx: CommandContext, s: CommandSession): void {
       },
       (e: Error) => reply(ctx, seg(`Couldn't load the KSF WR replay: ${e?.message ?? e}`, 'lightred')),
     );
+}
+
+/** !wrreplay / !replay wr while the WR replay is still downloading: cancels that watch. True if there was one. */
+function cancelKsfWatch(ctx: CommandContext): boolean {
+  if (!ctx.cancelKsfWatch?.()) return false;
+  reply(ctx, seg('Stopped loading the KSF WR replay.', 'grey'));
+  return true;
 }
 
 /** !wrghost: toggles surf_ghost_wr; turning it on downloads the WR replay (when there is a map). */
@@ -930,7 +954,7 @@ export const CHAT_COMMANDS: readonly ChatCommand[] = [
       }
       const a0 = (args[0] ?? '').toLowerCase();
       if (a0 === 'wr' || a0 === 'ksf') {
-        watchKsfWr(ctx, s!);
+        if (!cancelKsfWatch(ctx)) watchKsfWr(ctx, s!);
         return;
       }
       const g = args[0] !== undefined ? parseIntArg(args[0]) : null;
@@ -960,14 +984,14 @@ export const CHAT_COMMANDS: readonly ChatCommand[] = [
   {
     names: ['wrreplay', 'ksfreplay', 'wrbot'],
     usage: '!wrreplay',
-    help: 'Watch the KSF world record replay of this map (again to stop).',
+    help: 'Watch the KSF world record replay of this map (again to stop, or to cancel while it downloads).',
     map: true,
     run: (ctx, _a, s) => {
       if (ctx.spectating) {
         ctx.stopSpectate();
         return;
       }
-      watchKsfWr(ctx, s!);
+      if (!cancelKsfWatch(ctx)) watchKsfWr(ctx, s!);
     },
   },
   {

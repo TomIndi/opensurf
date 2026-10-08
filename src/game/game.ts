@@ -27,12 +27,12 @@
 // (LoadProgress.loadId / mapName) so the loading screen can tell loads apart.
 import { QAngle, angleDiff, angleVectors, normalizeAngle, qa } from '../core/angles';
 import { conPrint, console_, Cvar, FCVAR_CHEAT, FCVAR_REPLICATED } from '../core/cvars';
-import { Vec3, v3, v3clone, v3copy } from '../core/vec3';
+import { Vec3, v3, v3clone, v3copy, v3dist } from '../core/vec3';
 import { BUILTIN_MAPS } from '../map/builtin/list';
 import { FogDef, LoadedMap, ZoneDef, ZoneSource } from '../map/types';
 import { CatalogEntry, getCatalogEntry, loadCatalog } from '../maps/catalog';
 import { extractMapArchive, fetchCatalogMap } from '../maps/downloader';
-import { boardLabel, getKsfService, isKsfEligibleMap, type KsfBoard, type KsfRecord, type KsfService, type KsfWr } from '../maps/ksf';
+import { boardLabel, getKsfService, isKsfEligibleMap, type KsfBoard, type KsfRecord, ksfReplayRecord, type KsfService, type KsfWr } from '../maps/ksf';
 import type { CollisionWorld } from '../physics/collision';
 import { categorizePosition, playerMove, unstuckPlayer } from '../physics/movement';
 import {
@@ -94,7 +94,7 @@ import { installDebugApi, parseUrlOptions } from './debugapi';
 import { EntitySystem } from './entities';
 import { createHudState, horizontalSpeed, turnFromYawDelta, updateHudState } from './hud';
 import { InputDevice, InputState, KeyDispatcher, readMouseSettings, registerButtonCommands } from './input';
-import { ReplayData, ReplaySystem, replayFromKsf, sampleReplay } from './replay';
+import { REPLAY_TELEPORT_DISTANCE, ReplayData, ReplaySystem, replayFromKsf, sampleReplay } from './replay';
 import { formatSplitDelta, SurfTimer } from './timer';
 import { ZoneEditor, getEditorDebugBoxes, installZoneEditor, registerZoneCommands } from './zoneeditor';
 import { resolveZones } from './zoneresolve';
@@ -431,6 +431,8 @@ export class Session implements TimerHost, CommandSession {
   /** The KSF replay installed as the WR replay (s.replay.setWrReplay). */
   ksfReplay: { file: string; record: KsfRecord; data: ReplayData } | null = null;
   ksfReplayPending: { file: string; promise: Promise<ReplayData> } | null = null;
+  /** Runs started on this map so far (ranked or practice): a pending !wrreplay doesn't take over a newer run. */
+  runStarts = 0;
   private readonly game: Game;
 
   constructor(game: Game, map: LoadedMap, tier: number | null) {
@@ -449,6 +451,9 @@ export class Session implements TimerHost, CommandSession {
     this.entities = new EntitySystem(this);
     const timer = new SurfTimer(this);
     timer.onRunFinish = (ev) => game.emitEvent('runfinished', ev);
+    timer.onRunStart = () => {
+      this.runStarts++;
+    };
     timer.finishExtras = (group, time) => game.ksfFinishSegments(this, group, time);
     this.timer = timer;
     this.replay = new ReplaySystem(map.name);
@@ -608,6 +613,11 @@ export class Game implements GameApi, CommandContext {
   private debugShown = false;
   private ghostShown = false;
   private spec: SpectateState | null = null;
+  /**
+   * The !wrreplay waiting for its download (one at a time). Spectating starts when the replay is there unless the
+   * watch was cancelled (!wrreplay again, a PB replay, another map) or a run started meanwhile.
+   */
+  private ksfWatch: { session: Session; runStarts: number } | null = null;
   private readonly specVel = v3();
   private readonly fwd = v3();
   private readonly eye = v3();
@@ -1255,6 +1265,8 @@ export class Game implements GameApi, CommandContext {
     if (!s.replay.spectate(group)) return false;
     const label = group > 0 ? `PB Replay (Bonus ${group})` : 'PB Replay';
     this.spec = { kind: 'pb', label, group, start: this.now, finishedAt: null, lastYaw: NaN };
+    // watching the PB replay replaces a KSF WR replay still downloading
+    this.ksfWatch = null;
     // only a new jump press leaves the replay (not a jump key that was already held)
     this.input.buttons.jump.clearImpulses();
     this.ghostShown = true; // force a setGhosts([]) next frame
@@ -1304,9 +1316,10 @@ export class Game implements GameApi, CommandContext {
     s.ksfWr = res;
     s.ksfTickrate = tick;
     s.ksfHud = res.status === 'ok' ? { time: res.wr.time, name: res.wr.name, board: boardLabel(res.board) } : null;
-    // a different WR (another board after a tickrate change): its replay is another one
-    const file = res.status === 'ok' ? res.wr.file : null;
-    if (s.ksfReplay && s.ksfReplay.file !== file) {
+    // the installed WR replay stays while it is still the one loadKsfWrReplay would pick (the WR's, or the fastest
+    // record with a replay when the WR has none); another board (tickrate change) or no records drop it
+    const pick = res.status === 'ok' ? ksfReplayRecord(res.records) : null;
+    if (s.ksfReplay && s.ksfReplay.file !== pick?.file) {
       s.ksfReplay = null;
       s.replay.setWrReplay(null);
     }
@@ -1345,28 +1358,60 @@ export class Game implements GameApi, CommandContext {
     });
   }
 
+  /** A !wrreplay is waiting for its download on this map (Watch WR clicks are ignored meanwhile). */
+  get ksfWatchPending(): boolean {
+    return this.ksfWatch !== null && this.ksfWatch.session === this._session;
+  }
+
+  /** CommandContext.cancelKsfWatch: forgets the pending !wrreplay (the download carries on, cached); true if any. */
+  cancelKsfWatch(): boolean {
+    const had = this.ksfWatchPending;
+    this.ksfWatch = null;
+    return had;
+  }
+
   /**
    * CommandContext.loadKsfWrReplay: downloads (once) the KSF WR replay of the current map, installs it as the WR
    * replay (ghost) and with `spectate` watches it. A WR without a replay file falls back to the fastest record
-   * that has one.
+   * that has one. A watch is pending while the replay downloads (ksfWatchPending): when it arrives, spectating
+   * starts only if the watch wasn't cancelled meanwhile (`cancelled`) and no run started since the request (else the
+   * replay is just ready: `deferred`, it doesn't take over the run).
    */
   async loadKsfWrReplay(opts: { spectate: boolean; onDownload?: () => void }): Promise<KsfReplayResult> {
     const s = this._session;
     if (!s) return { ok: false, message: 'No map loaded.' };
-    const res = await this.ksfFor(s);
-    if (res.status === 'unavailable') return { ok: false, message: res.message };
-    if (res.status === 'error') return { ok: false, message: `Couldn't get the KSF records (${res.message}).` };
-    if (res.status === 'none') return { ok: false, message: `No KSF records on ${s.map.name} yet.` };
-    const rec = res.wr.file ? res.wr : res.records.find((r) => r.file);
-    if (!rec) return { ok: false, message: `The KSF records of ${s.map.name} have no replays.` };
-    const data = await this.ksfReplayData(s, res.board, rec, opts.onDownload);
-    if (this._session !== s) return { ok: false, message: 'The map changed.' };
-    const notWr = rec !== res.wr;
-    if (opts.spectate) {
+    const watch = opts.spectate ? { session: s, runStarts: s.runStarts } : null;
+    if (watch) this.ksfWatch = watch;
+    // (a cancelled watch ends quietly, whatever happened to the download: the cancel was already answered)
+    const cancelled = () => watch !== null && this.ksfWatch !== watch;
+    const cancelledResult: KsfReplayResult = { ok: false, cancelled: true, message: 'The KSF WR replay was cancelled.' };
+    try {
+      const res = await this.ksfFor(s);
+      if (cancelled()) return cancelledResult;
+      if (res.status === 'unavailable') return { ok: false, message: res.message };
+      if (res.status === 'error') return { ok: false, message: `Couldn't get the KSF records (${res.message}).` };
+      if (res.status === 'none') return { ok: false, message: `No KSF records on ${s.map.name} yet.` };
+      const rec = ksfReplayRecord(res.records);
+      if (!rec) return { ok: false, message: `The KSF records of ${s.map.name} have no replays.` };
+      let data: ReplayData;
+      try {
+        data = await this.ksfReplayData(s, res.board, rec, opts.onDownload);
+      } catch (e) {
+        if (cancelled()) return cancelledResult;
+        throw e;
+      }
+      if (this._session !== s) return { ok: false, message: 'The map changed.' };
+      const notWr = rec !== res.wr;
+      const loaded = { ok: true as const, record: rec, board: res.board, fallback: res.fallback, notWr };
+      if (!watch) return loaded;
+      if (cancelled()) return cancelledResult;
+      if (s.runStarts !== watch.runStarts) return { ...loaded, deferred: true };
       const label = `${notWr ? `KSF #${rec.rank}` : 'KSF WR'} · ${rec.name} (${boardLabel(res.board)})`;
       if (!this.startWrSpectate(data, label)) return { ok: false, message: "The KSF replay couldn't be played." };
+      return loaded;
+    } finally {
+      if (watch && this.ksfWatch === watch) this.ksfWatch = null;
     }
-    return { ok: true, record: rec, board: res.board, fallback: res.fallback, notWr };
   }
 
   /** The replay of a KSF record as ReplayData, installed as the session's WR replay (one download per file). */
@@ -1377,9 +1422,9 @@ export class Game implements GameApi, CommandContext {
     if (!this.ksf.hasReplay(rec)) onDownload?.();
     const promise = this.ksf.replay(rec, board).then((parsed) => {
       const data = replayFromKsf(parsed, s.map.name, { time: rec.time, date: rec.date * 1000 });
-      // (a tickrate change meanwhile may have picked another record: only the current WR's replay is installed)
-      const cur = s.ksfWr?.status === 'ok' ? s.ksfWr.records : null;
-      if (!s.ksfReplay && cur?.includes(rec)) {
+      // (a tickrate change meanwhile may have picked another record: only the current WR replay is installed)
+      const cur = s.ksfWr?.status === 'ok' ? ksfReplayRecord(s.ksfWr.records) : null;
+      if (!s.ksfReplay && cur?.file === file) {
         s.ksfReplay = { file, record: rec, data };
         s.replay.setWrReplay(data);
       }
@@ -1395,7 +1440,8 @@ export class Game implements GameApi, CommandContext {
 
   /** GameApi.watchKsfWr: the map browser's "Watch WR" (the !wrreplay command, without toggling it off). */
   watchKsfWr(): void {
-    if (!this._session || this.spec?.kind === 'wr') return;
+    // (already watching it, or already loading it: a second click changes nothing)
+    if (!this._session || this.spec?.kind === 'wr' || this.ksfWatchPending) return;
     if (this.spec) this.stopSpectate();
     runChatCommand(this, 'wrreplay', []);
   }
@@ -1777,10 +1823,13 @@ export class Game implements GameApi, CommandContext {
         const dtr = 1 / (data.tickrate > 0 ? data.tickrate : 100);
         const a = sampleReplay(data, v.time - dtr);
         if (a && b && b.time > a.time) {
-          const k = 1 / (b.time - a.time);
-          this.specVel.x = (b.origin.x - a.origin.x) * k;
-          this.specVel.y = (b.origin.y - a.origin.y) * k;
-          this.specVel.z = (b.origin.z - a.origin.z) * k;
+          // (across a teleport the velocity from before it stays)
+          if (v3dist(a.origin, b.origin) <= REPLAY_TELEPORT_DISTANCE) {
+            const k = 1 / (b.time - a.time);
+            this.specVel.x = (b.origin.x - a.origin.x) * k;
+            this.specVel.y = (b.origin.y - a.origin.y) * k;
+            this.specVel.z = (b.origin.z - a.origin.z) * k;
+          }
         } else {
           this.specVel.x = this.specVel.y = this.specVel.z = 0;
         }

@@ -35,8 +35,8 @@ own baked lightmaps.
 On catalog maps the game shows the KSF world record from [ksf.surf](https://ksf.surf) (fetched on demand through the
 local dev / preview server, never re-hosted): in the HUD side panel, the pause menu, a chat line when the map loads,
 your finish line ("+1.234 vs KSF WR") and the map browser. `!wr` lists the WR and the top 5, `!wrreplay` (or
-`!replay wr`) downloads the record's replay and lets you watch the real WR run on your copy of the map, and
-`!wrghost` races it as a ghost. 100 tick (the default) reads KSF's 100 tick board, other tickrates the 66 tick one.
+`!replay wr`) downloads the record's replay and lets you watch the real WR run on your copy of the map (type it again
+to cancel while it downloads; a run you start meanwhile isn't interrupted), and `!wrghost` races it as a ghost. 100 tick (the default) reads KSF's 100 tick board, other tickrates the 66 tick one.
 The map browser also links each map's record videos on YouTube (@ksfrecords). World records need `npm run dev` /
 `npm run preview`; the static site works without them.
 

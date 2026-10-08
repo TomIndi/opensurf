@@ -15,6 +15,8 @@ class FakeKsf implements KsfClient {
   lists = new Map<string, KsfRecord[]>();
   files = new Map<string, Uint8Array>();
   unavailable = false;
+  /** While set, replay downloads wait for it (a slow download). */
+  replayGate: Promise<void> | null = null;
   async fetchRecords(map: string, board: KsfBoard): Promise<KsfRecord[]> {
     this.calls.push(`records ${map} ${board}`);
     if (this.unavailable) throw new KsfUnavailableError();
@@ -23,6 +25,7 @@ class FakeKsf implements KsfClient {
   async fetchReplay(file: string, board: KsfBoard): Promise<ArrayBuffer> {
     this.calls.push(`replay ${file} ${board}`);
     if (this.unavailable) throw new KsfUnavailableError();
+    if (this.replayGate) await this.replayGate;
     const f = this.files.get(file);
     if (!f) throw new Error('no such replay');
     return f.slice().buffer;
@@ -85,6 +88,19 @@ async function urlGame(fake: FakeKsf): Promise<TestGame> {
   await flush();
   return t;
 }
+
+/** Makes the fake's replay downloads wait until the returned function is called. */
+function slowDownloads(fake: FakeKsf): () => void {
+  let release!: () => void;
+  fake.replayGate = new Promise<void>((r) => (release = r));
+  return () => {
+    fake.replayGate = null;
+    release();
+  };
+}
+
+const lastGhosts = () => t.renderer.ghosts[t.renderer.ghosts.length - 1] ?? [];
+const replayDownloads = (fake: FakeKsf) => fake.calls.filter((c) => c.startsWith('replay')).length;
 
 async function flush(): Promise<void> {
   for (let i = 0; i < 12; i++) await new Promise((r) => setTimeout(r, 0));
@@ -204,6 +220,175 @@ describe('KSF world records in game', () => {
     expect(t.game.spectating).toBe(true);
     expect(tail(2)).toContain('Watching the KSF #2 by tester');
     expect(t.ui.lastText()).toContain('has no replay on ksf.surf');
+  });
+
+  it('a WR without a replay file: the fallback replay stays the WR ghost through !wr', async () => {
+    const fake = fakeWithRecords();
+    fake.lists.set(`${MAP}|100t`, [rec(1, 2.9, 'noreplay', null), rec(2, 3.00412, 'tester', FILE100), rec(3, 3.2, 'third', null)]);
+    t = await urlGame(fake);
+    t.game.say('/wrghost');
+    await flush();
+    expect(t.ui.lastText()).toContain('KSF WR ghost enabled: tester');
+    const installed = t.game.session!.replay.getWrReplay();
+    expect(installed).not.toBeNull();
+    t.ui.chats.length = 0;
+    t.game.say('/wr');
+    await flush();
+    expect(texts()[0]).toContain('KSF WR on surf_ksftest (100 tick): 00:02.900 by noreplay');
+    // still the same replay, and it races the run
+    expect(t.game.session!.replay.getWrReplay()).toBe(installed);
+    t.game.executeCommand('+forward');
+    t.game.runTicks(150);
+    t.game.frame(1000);
+    expect(t.game.getHud().timer.state).toBe('running');
+    expect(lastGhosts().some((g) => g.id === 'ksf:wr')).toBe(true);
+    t.game.executeCommand('-forward');
+    expect(replayDownloads(fake)).toBe(1);
+  });
+
+  it('a tickrate change (another board) swaps the WR ghost\'s replay', async () => {
+    const fake = fakeWithRecords();
+    t = await urlGame(fake);
+    t.game.say('/wrghost');
+    await flush();
+    const r100 = t.game.session!.replay.getWrReplay();
+    expect(r100!.tickrate).toBeCloseTo(100, 6);
+    t.game.executeCommand('tickrate 64');
+    await flush();
+    const r66 = t.game.session!.replay.getWrReplay();
+    expect(r66).not.toBe(r100);
+    expect(r66!.tickrate).toBeCloseTo(1 / 0.015, 6);
+    expect(fake.calls).toContain(`replay ${FILE66} 66t`);
+  });
+
+  it('a !wrreplay still downloading starts watching when it arrives (in the start zone)', async () => {
+    const fake = fakeWithRecords();
+    t = await urlGame(fake);
+    const release = slowDownloads(fake);
+    t.game.say('/wrreplay');
+    await flush();
+    expect(t.ui.lastText()).toBe('[Surf] Downloading the KSF WR replay of surf_ksftest…');
+    expect(t.game.spectating).toBe(false);
+    release();
+    await flush();
+    expect(t.game.spectating).toBe(true);
+    expect(t.ui.lastText()).toContain('Watching the KSF WR by tester');
+  });
+
+  it('a !wrreplay still downloading doesn\'t take over a run started meanwhile', async () => {
+    const fake = fakeWithRecords();
+    t = await urlGame(fake);
+    const release = slowDownloads(fake);
+    t.game.say('/wrreplay');
+    await flush();
+    t.game.executeCommand('+forward');
+    t.game.runTicks(100);
+    expect(t.game.getHud().timer.state).toBe('running');
+    release();
+    await flush();
+    expect(t.game.spectating).toBe(false);
+    expect(t.game.getHud().timer.state).toBe('running');
+    expect(t.ui.lastText()).toBe('[Surf] KSF WR replay ready - type !wrreplay to watch.');
+    expect(texts().join('\n')).not.toContain('Watching the KSF WR');
+    t.game.runTicks(10);
+    expect(t.game.getHud().timer.state).toBe('running');
+    t.game.executeCommand('-forward');
+    // ready: !wrreplay now watches at once, without another download
+    t.game.say('/wrreplay');
+    await flush();
+    expect(t.game.spectating).toBe(true);
+    expect(replayDownloads(fake)).toBe(1);
+  });
+
+  it('a run already going when !wrreplay was typed is left like with a cached replay (it was asked for)', async () => {
+    const fake = fakeWithRecords();
+    t = await urlGame(fake);
+    t.game.executeCommand('+forward');
+    t.game.runTicks(100);
+    expect(t.game.getHud().timer.state).toBe('running');
+    const release = slowDownloads(fake);
+    t.game.say('/wrreplay');
+    await flush();
+    t.game.runTicks(10);
+    release();
+    await flush();
+    t.game.executeCommand('-forward');
+    expect(t.game.spectating).toBe(true);
+  });
+
+  it('!wrreplay (or !replay wr) again while it downloads cancels it; a double Watch WR click watches once', async () => {
+    const fake = fakeWithRecords();
+    t = await urlGame(fake);
+    let release = slowDownloads(fake);
+    t.game.say('/wrreplay');
+    await flush();
+    t.game.say('/wrreplay');
+    expect(t.ui.lastText()).toBe('[Surf] Stopped loading the KSF WR replay.');
+    release();
+    await flush();
+    expect(t.game.spectating).toBe(false);
+    expect(texts().join('\n')).not.toContain('Watching the KSF WR');
+    expect(t.ui.lastText()).toBe('[Surf] Stopped loading the KSF WR replay.');
+    // the download was kept
+    t.game.say('/ksfreplay');
+    await flush();
+    expect(t.game.spectating).toBe(true);
+    expect(replayDownloads(fake)).toBe(1);
+    t.game.say('/r');
+
+    // !replay wr: the same toggle (on the other board, so it downloads again)
+    t.game.executeCommand('tickrate 64');
+    await flush();
+    release = slowDownloads(fake);
+    t.game.say('/replay wr');
+    await flush();
+    t.game.say('/replay wr');
+    expect(t.ui.lastText()).toBe('[Surf] Stopped loading the KSF WR replay.');
+    release();
+    await flush();
+    expect(t.game.spectating).toBe(false);
+
+    // the map browser's Watch WR clicked twice while it loads: one watch, not cancelled
+    t.game.executeCommand('tickrate 100');
+    await flush();
+    fake.files.set('replay_css100t_77_0_9_1700000000.rec', fake.files.get(FILE100)!);
+    fake.lists.set(`${MAP}|100t`, [rec(1, 3.00412, 'tester', FILE100)]);
+    t.game.disconnect();
+    t = await urlGame(fake);
+    const n = texts().length;
+    release = slowDownloads(fake);
+    (t.game as unknown as { ksf: KsfService }).ksf = new KsfService(fake); // (a fresh cache: it downloads again)
+    t.game.watchKsfWr();
+    await flush();
+    t.game.watchKsfWr();
+    await flush();
+    release();
+    await flush();
+    expect(t.game.spectating).toBe(true);
+    const out = texts().slice(n);
+    expect(out.filter((l) => l.includes('Watching the KSF WR')).length).toBe(1);
+    expect(out.join('\n')).not.toContain('Stopped loading');
+  });
+
+  it('watching the PB replay while the WR replay downloads cancels the WR watch', async () => {
+    const fake = fakeWithRecords();
+    t = await urlGame(fake);
+    // a PB to watch
+    t.game.executeCommand('+forward');
+    t.game.runTicks(800);
+    t.game.executeCommand('-forward');
+    expect(texts().some((l) => l.includes(' finished surf_ksftest in '))).toBe(true);
+    t.game.say('/r');
+    const release = slowDownloads(fake);
+    t.game.say('/wrreplay');
+    await flush();
+    t.game.say('/replay');
+    expect(t.game.spectating).toBe(true);
+    release();
+    await flush();
+    t.game.frame(1000);
+    expect(t.game.getHud().spectating).toBe('PB Replay');
+    expect(texts().join('\n')).not.toContain('Watching the KSF WR');
   });
 
   it('!wrghost races the WR replay during a run (gold "KSF WR" ghost), next to the PB ghost', async () => {
