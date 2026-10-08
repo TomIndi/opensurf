@@ -10,7 +10,7 @@ import { mapNameEl, tierPill } from './mapui';
 import { formatTime, formatTimeShort, mapTypeName, prettyMapName, tierName } from './format';
 import { icon } from './icons';
 import { comparePopularity, filterMaps, type MapFilterOptions, type MapSort, type MapTypeFilter, tierCounts } from './mapfilter';
-import { mapThumbSvg } from './thumbs';
+import { mapThumbSvg, setMapArt } from './thumbs';
 import { VirtualList } from './virtual';
 
 export type BrowserTab = 'featured' | 'all' | 'builtin' | 'local';
@@ -463,7 +463,7 @@ export class MapBrowser {
     }
     const isCached = this.cached.has(e.name.toLowerCase());
     const thumb = h('div.details-thumb');
-    thumb.innerHTML = mapThumbSvg(e.name);
+    setMapArt(thumb, e.name);
     thumb.appendChild(h('div.details-thumb-name', null, h('div.pretty', { text: prettyMapName(e.name) })));
     const playBtn = h('button.btn.btn-primary.btn-lg.details-play', { attrs: { type: 'button' } }, icon('play'), isCached ? 'Play' : 'Download & Play');
     playBtn.addEventListener('click', () => this.playEntry(e));
@@ -521,7 +521,7 @@ export class MapBrowser {
   /** A map card (featured grids, home strip). */
   card(e: CatalogEntry): HTMLElement {
     const thumb = h('div.thumb');
-    thumb.innerHTML = mapThumbSvg(e.name);
+    setMapArt(thumb, e.name);
     const isCached = this.cached.has(e.name.toLowerCase());
     const card = h(
       'button.map-card',

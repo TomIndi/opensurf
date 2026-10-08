@@ -183,3 +183,30 @@ export function mapThumbSvg(name: string): string {
   parts.push(`<rect width="${W}" height="${H}" fill="url(#${id}v)"/>`);
   return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid slice" xmlns="http://www.w3.org/2000/svg" class="thumb-svg" aria-hidden="true">${parts.join('')}</svg>`;
 }
+
+/**
+ * KSF's in-game screenshot of a map: ksf.surf has one for almost every KSF map (926 of the catalog's 932). Loaded
+ * from KSF on demand, never re-hosted.
+ */
+export function mapScreenshotUrl(name: string): string {
+  return `https://ksf.surf/images/${encodeURIComponent(name.toLowerCase())}.jpg`;
+}
+
+/**
+ * Fills `el` with a map's picture: the generated art right away, and KSF's real screenshot fading in over it once
+ * it has loaded (lazily: only for pictures on screen). Without a screenshot (or offline) the art stays.
+ */
+export function setMapArt(el: HTMLElement, name: string): void {
+  el.innerHTML = mapThumbSvg(name);
+  if (typeof document === 'undefined' || !name) return;
+  const img = document.createElement('img');
+  img.className = 'thumb-shot';
+  img.alt = '';
+  img.loading = 'lazy';
+  img.decoding = 'async';
+  img.referrerPolicy = 'no-referrer';
+  img.addEventListener('load', () => img.classList.add('loaded'));
+  img.addEventListener('error', () => img.remove());
+  img.src = mapScreenshotUrl(name);
+  el.appendChild(img);
+}
