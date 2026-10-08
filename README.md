@@ -11,15 +11,18 @@ npm install
 npm run dev        # http://localhost:5173
 ```
 
-`npm run build` produces a static site in `dist/` (any static host works; a GitHub Pages workflow is
-included — enable Pages with "GitHub Actions" as the source).
+Play through `npm run dev` or `npm run build && npm run preview`: the local server also downloads the catalog
+maps for the game (Google Drive refuses downloads requested straight from a web page). The static site in `dist/`
+(a GitHub Pages workflow is included — enable Pages with "GitHub Actions" as the source) plays the built-in maps
+and any map file you drop on it, but can't download catalog maps by itself.
 
 ### Maps
 
 * **All ~930 KSF surf maps** (surf_utopia, surf_kitsune, surf_mesa, surf_beginner, …) are listed in the
   map browser with their KSF tier. Picking one downloads the original archive on demand from the public
-  KSF map archive linked from [OuiSURF/Surf_Maps](https://github.com/OuiSURF/Surf_Maps), extracts the
-  `.bsp` in the browser and caches it locally (IndexedDB) — nothing is re-hosted.
+  KSF map archive linked from [OuiSURF/Surf_Maps](https://github.com/OuiSURF/Surf_Maps) (through the local
+  dev / preview server), extracts the `.bsp` in the browser and caches it locally (IndexedDB) — nothing is
+  re-hosted.
 * Drop your own `.bsp`, `.bsp.bz2`, `.rar` or `.zip` onto the menu to play any Source surf map.
 * Built-in original maps load instantly (no download) — good for a first run.
 

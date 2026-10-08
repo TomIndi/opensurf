@@ -366,9 +366,10 @@ builds, never stuck or in solid); (e) chat/console (messagemode, `!help`, silent
 (g) complete runs of every built-in map through the real input pipeline, steered by the map's autopilot
 (`src/map/builtin/autopilot.ts` pressing +commands and setting view angles each tick): the timer finishes, the PB is
 saved, `!replay` spectates the replay and the PB ghost shows on the next attempt; (h, opt-in `E2E_DOWNLOAD=1`, needs
-the network) the catalog download path: `?map=surf_kitsune` with the browser's requests to drive.usercontent.google.com
-answered through Playwright routing by the real file and real response headers fetched in Node (so the browser's CORS
-check, streamed download, unrar wasm and IndexedDB cache run for real; behind an HTTPS proxy run with
+the network) the catalog download path: `?map=surf_kitsune` fetched through the local server's Drive proxy
+(`/__drive/<id>`, answered through Playwright routing by the real file fetched in Node; the page must never ask Drive
+directly, which refuses cross-site downloads from pages) so the streamed download, unrar wasm and IndexedDB cache run
+for real; behind an HTTPS proxy run with
 `NODE_USE_ENV_PROXY=1` and `NODE_EXTRA_CA_CERTS`; `E2E_DOWNLOAD_ARCHIVE` names a local copy served when Node can't reach
 Drive, always with `E2E_DOWNLOAD_OFFLINE=1`): the map plays, and a
 reload loads it "from cache" without touching Drive. `E2E_PORT` pins the dev server port.
@@ -382,7 +383,7 @@ running on the tree (or the browser tests in `npm test`, which do the same) can'
 ## Data flow
 
 ```
-Drive (.rar) ─► maps/downloader (unrar wasm, IndexedDB cache) ─► bsp/loadmap ─► LoadedMap ─► game ─► renderer
+Drive (.rar) ─► dev/preview server /__drive/<id> (vite.config.ts) ─► maps/downloader (unrar wasm, IndexedDB cache) ─► bsp/loadmap ─► LoadedMap ─► game ─► renderer
                                                                    ▲   ▲                               ▲
                                    maps/zones (SurfTimer presets) ─┘   │           built-in maps ──────┘
       player's CS:S / CS:GO VPKs ─► maps/gamecontent (stock textures) ─┘

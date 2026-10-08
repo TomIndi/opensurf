@@ -1,5 +1,6 @@
 import { createReadStream, existsSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
+import { Readable } from 'node:stream';
 import { defineConfig, type Plugin } from 'vite';
 
 /**
@@ -34,9 +35,55 @@ function testMaps(): Plugin {
   };
 }
 
+/**
+ * Dev/preview: downloads catalog maps from Google Drive at /__drive/<fileId> (src/maps/downloader.ts). Drive
+ * answers a web page's cross-site download with 403 and no CORS header, so the browser can't fetch the archives
+ * itself; from the local server it is a plain download, streamed through.
+ */
+function driveProxy(): Plugin {
+  const handler = async (req: { url?: string }, res: any, next: () => void) => {
+    const m = /\/__drive\/([A-Za-z0-9_-]{10,128})(?:[?#]|$)/.exec(req.url ?? '');
+    if (!m) return next();
+    res.setHeader('x-surf-drive-proxy', '1');
+    res.setHeader('Cache-Control', 'no-store');
+    let up: Response;
+    try {
+      up = await fetch(`https://drive.usercontent.google.com/download?id=${m[1]}&export=download&confirm=t`);
+    } catch (e) {
+      res.statusCode = 502;
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.end(String((e as Error)?.message ?? e));
+      return;
+    }
+    res.statusCode = up.status;
+    res.setHeader('Content-Type', up.headers.get('content-type') ?? 'application/octet-stream');
+    const len = up.headers.get('content-length');
+    if (len) res.setHeader('Content-Length', len);
+    if (!up.body) {
+      res.end();
+      return;
+    }
+    const body = Readable.fromWeb(up.body as any);
+    body.on('error', () => res.destroy());
+    res.on('close', () => {
+      if (!res.writableFinished) body.destroy();
+    });
+    body.pipe(res);
+  };
+  return {
+    name: 'surf-drive-proxy',
+    configureServer(server) {
+      server.middlewares.use(handler);
+    },
+    configurePreviewServer(server) {
+      server.middlewares.use(handler);
+    },
+  };
+}
+
 export default defineConfig({
   base: './',
-  plugins: [testMaps()],
+  plugins: [driveProxy(), testMaps()],
   build: {
     target: 'es2022',
     chunkSizeWarningLimit: 4000,

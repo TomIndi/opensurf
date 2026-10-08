@@ -18,10 +18,10 @@
 //   g  complete runs of every built-in map through the real game (input -> usercmd -> movement -> triggers ->
 //      timer) steered by the map's autopilot: the timer finishes, the PB is recorded, the replay is saved and
 //      can be spectated (!replay), and the PB ghost shows on the next attempt
-//   h  (opt-in, E2E_DOWNLOAD=1: needs the network) the catalog download path: ?map=surf_kitsune with requests to
-//      drive.usercontent.google.com answered (via Playwright routing) by the real file and real response headers
-//      fetched in Node, so the browser's CORS check, streamed download, unrar wasm and IndexedDB cache run for real;
-//      the map plays, and a reload loads it from the cache without touching Drive
+//   h  (opt-in, E2E_DOWNLOAD=1: needs the network) the catalog download path: ?map=surf_kitsune fetched through
+//      the local server's Drive proxy (/__drive/<id>, answered via Playwright routing by the real file fetched in
+//      Node; Drive refuses direct cross-site downloads from pages), so the streamed download, unrar wasm and
+//      IndexedDB cache run for real; the map plays, and a reload loads it from the cache without touching Drive
 //
 // Environment:
 //   SURF_TEST_MAPS        directory of .bsp files for c/d/f (those scenarios are skipped without it)
@@ -882,10 +882,10 @@ async function fetchDriveInNode(url, origin) {
 }
 
 /**
- * The catalog download path in the real browser (opt-in: E2E_DOWNLOAD=1). Requests to drive.usercontent.google.com
- * are routed through Playwright and answered with the real file and the real response headers (fetched in Node), so
- * the browser runs its own CORS check, the streamed download with progress, the unrar wasm extraction and the
- * IndexedDB cache. ?map=surf_kitsune must play; a reload must load it from the cache without touching Drive.
+ * The catalog download path in the real browser (opt-in: E2E_DOWNLOAD=1). The local server's Drive proxy
+ * (/__drive/<id>) is routed through Playwright and answered with the real file (fetched in Node), so the streamed
+ * download with progress, the unrar wasm extraction and the IndexedDB cache run for real. ?map=surf_kitsune must
+ * play; a reload must load it from the cache without touching Drive.
  */
 async function scenarioH(browser) {
   const r = { driveRequests: [] };
@@ -913,17 +913,29 @@ async function scenarioH(browser) {
       },
     });
   });
-  let answer = null;
+  // Drive refuses cross-site downloads from web pages (403, no CORS header): the game fetches the archive through
+  // the dev server's proxy (vite.config.ts /__drive/<id>), which downloads it in Node. Here the proxy's answer is
+  // the file fetched in Node (or the local copy), and direct browser requests to Drive are recorded and refused.
+  r.directDriveRequests = [];
   await page.route('https://drive.usercontent.google.com/**', async (route) => {
+    r.directDriveRequests.push(route.request().url());
+    await route.abort('failed');
+  });
+  let answer = null;
+  await page.route('**/__drive/**', async (route) => {
     const req = route.request();
     r.driveRequests.push(req.url());
+    const id = decodeURIComponent(new URL(req.url()).pathname.split('/__drive/')[1] ?? '');
     try {
-      answer ??= await fetchDriveInNode(req.url(), req.headers()['origin'] ?? base.replace(/\/$/, ''));
+      answer ??= await fetchDriveInNode(`https://drive.usercontent.google.com/download?id=${id}&export=download&confirm=t`, base.replace(/\/$/, ''));
       r.source = answer.source;
       r.status = answer.status;
-      r.corsHeader = answer.headers['access-control-allow-origin'] ?? null;
       r.bytes = answer.body.length;
-      await route.fulfill({ status: answer.status, headers: answer.headers, body: answer.body });
+      await route.fulfill({
+        status: answer.status,
+        headers: { 'content-type': answer.headers['content-type'] ?? 'application/octet-stream', 'content-length': String(answer.body.length), 'x-surf-drive-proxy': '1' },
+        body: answer.body,
+      });
     } catch (e) {
       r.fetchError = String(e?.message ?? e);
       await route.abort('failed');
@@ -948,10 +960,10 @@ async function scenarioH(browser) {
   r.firstLoadMs = Date.now() - t0;
   const p1 = await progressOf();
   r.firstMessages = [...new Set(p1.map((p) => `${p.phase}: ${p.message.replace(/[\d.]+ \/ [\d.]+ MB/, 'n / m MB')}`))];
-  log(`first load ${r.firstLoadMs} ms via ${r.source}: ${r.bytes} bytes, HTTP ${r.status}, access-control-allow-origin ${r.corsHeader}`);
-  check(r.driveRequests.length === 1, 'the map is downloaded from Google Drive once', r.driveRequests);
-  check(r.driveRequests[0]?.includes(`id=${KITSUNE_DRIVE_ID}`), 'the catalog entry\'s Drive id is requested', r.driveRequests[0]);
-  check(!!r.corsHeader, 'the Drive response carries access-control-allow-origin (the browser accepted it)', r.corsHeader);
+  log(`first load ${r.firstLoadMs} ms via ${r.source}: ${r.bytes} bytes, HTTP ${r.status}`);
+  check(r.driveRequests.length === 1, 'the map is downloaded from Google Drive once (through the local server)', r.driveRequests);
+  check(r.driveRequests[0]?.includes(`/__drive/${KITSUNE_DRIVE_ID}`), 'the catalog entry\'s Drive id is requested', r.driveRequests[0]);
+  check(r.directDriveRequests.length === 0, 'the page never asks Google Drive directly (Drive refuses those)', r.directDriveRequests);
   const dl = p1.filter((p) => p.phase === 'download' && /^Downloading/.test(p.message));
   check(dl.length > 0 && dl.at(-1).total === r.bytes, 'the download streams with progress against content-length', dl.at(-1));
   check(p1.some((p) => p.phase === 'extract'), 'the archive is extracted (unrar wasm)');

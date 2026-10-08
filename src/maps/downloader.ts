@@ -1,5 +1,5 @@
-// Downloads KSF surf maps straight from the public Google Drive archive (CORS-enabled download
-// endpoint), extracts the BSP from .rar/.zip/.bz2 archives in the browser and caches the BSP in
+// Downloads KSF surf maps from the public Google Drive archive (through the dev / preview server's proxy:
+// Drive refuses cross-site downloads from web pages), extracts the BSP from .rar/.zip/.bz2 archives in the browser and caches the BSP in
 // IndexedDB so each map is downloaded only once.
 import { unzipSync } from 'fflate';
 import { bunzip2 } from '../bsp/bz2';
@@ -11,6 +11,15 @@ const STORE = 'bsp';
 
 export function driveDownloadUrl(driveId: string): string {
   return `https://drive.usercontent.google.com/download?id=${encodeURIComponent(driveId)}&export=download&confirm=t`;
+}
+
+/**
+ * The same file through the dev / preview server's Drive proxy (vite.config.ts). Drive answers a web page's
+ * cross-site download with 403 and no CORS header, so the browser can't fetch the archives itself; the local
+ * server can. Proxy answers carry an `x-surf-drive-proxy` header.
+ */
+export function driveProxyUrl(driveId: string): string {
+  return `./__drive/${encodeURIComponent(driveId)}`;
 }
 
 export function driveViewUrl(driveId: string): string {
@@ -94,13 +103,30 @@ export async function deleteCachedMap(name: string): Promise<void> {
 const MB = 1024 * 1024;
 const fmtMB = (n: number) => (n / MB).toFixed(1);
 
-async function download(url: string, onProgress?: (p: LoadProgress) => void, signal?: AbortSignal): Promise<ArrayBuffer> {
-  let res: Response;
+const NO_DIRECT_DOWNLOAD =
+  'Google Drive blocks map downloads straight from a web page. Run the game with `npm run dev` or `npm run preview` ' +
+  '(the local server downloads the maps for it), or download the map yourself and drop the file on the menu.';
+
+/** The local server's Drive proxy when there is one, else Drive itself. */
+async function openDrive(driveId: string, signal?: AbortSignal): Promise<Response> {
   try {
-    res = await fetch(url, { signal, mode: 'cors', credentials: 'omit' });
+    const res = await fetch(driveProxyUrl(driveId), { signal });
+    if (res.headers.get('x-surf-drive-proxy')) return res;
   } catch (e) {
     if ((e as Error).name === 'AbortError') throw e;
-    throw new Error(`Network error while downloading the map (${(e as Error).message}).`);
+  }
+  try {
+    return await fetch(driveDownloadUrl(driveId), { signal, mode: 'cors', credentials: 'omit' });
+  } catch (e) {
+    if ((e as Error).name === 'AbortError') throw e;
+    throw new Error(NO_DIRECT_DOWNLOAD);
+  }
+}
+
+async function download(driveId: string, onProgress?: (p: LoadProgress) => void, signal?: AbortSignal): Promise<ArrayBuffer> {
+  const res = await openDrive(driveId, signal);
+  if (res.status === 502 && res.headers.get('x-surf-drive-proxy')) {
+    throw new Error(`The local server could not reach Google Drive: ${(await res.text()).slice(0, 200)}`);
   }
   if (!res.ok) throw new Error(`Google Drive answered HTTP ${res.status}. The file may be rate-limited; try again later.`);
   const type = res.headers.get('content-type') ?? '';
@@ -234,7 +260,7 @@ export async function fetchCatalogMap(
     return { name: entry.name, bsp: cached };
   }
   onProgress?.({ phase: 'download', message: 'Contacting Google Drive…' });
-  const archive = await download(driveDownloadUrl(entry.driveId), onProgress, signal);
+  const archive = await download(entry.driveId, onProgress, signal);
   if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
   onProgress?.({ phase: 'extract', message: 'Extracting map…' });
   await new Promise((r) => setTimeout(r, 0));
