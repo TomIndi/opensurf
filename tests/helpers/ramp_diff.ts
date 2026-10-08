@@ -263,6 +263,14 @@ export interface SeamRunParams {
   /** height of the contact corner above the plane and the velocity component along the normal at the start */
   h: number;
   vn: number;
+  /**
+   * The start state of a tick while sliding on the ramp: the last move clipped the velocity parallel to the ramp
+   * and FinishGravity then took half a tick of gravity off v.z (Source splits gravity around the move). Without it
+   * (vn 0) the state is a teleport's: only half a tick of gravity reaches the first move, at 100 tick that is 0.025
+   * units towards the ramp - less than the DIST_EPSILON hover - so the hull ends inside the epsilon shell (as in
+   * Source: a move that stops short of a face is no hit), a state sliding never produces.
+   */
+  slide?: boolean;
   key: 'into' | 'none' | 'away' | 'fwd';
   dt: number;
   ticks: number;
@@ -272,7 +280,7 @@ export interface SeamRunParams {
  * Surfs a ramp from a start state and returns the tick of the first one-tick collapse of the horizontal speed
  * (>= 35%) and the traces of that tick, or null when the speed holds for `ticks` ticks.
  */
-export function surfRun(world: CollisionWorld, p: SeamRunParams, lw?: LogWorld): { tick: number; pos: V3 } | null {
+export function surfRun(world: TraceWorld, p: SeamRunParams, lw?: LogWorld): { tick: number; pos: V3 } | null {
   const vars = defaultMoveVars();
   const [nx, ny, nz] = p.n;
   // hull corner touching the plane, relative to the feet origin
@@ -287,6 +295,7 @@ export function surfRun(world: CollisionWorld, p: SeamRunParams, lw?: LogWorld):
   ps.velocity.x = vx + nx * p.vn;
   ps.velocity.y = vy + ny * p.vn;
   ps.velocity.z = vz + nz * p.vn;
+  if (p.slide) ps.velocity.z -= 0.5 * vars.gravity * p.dt;
   const yawDeg = (Math.atan2(p.dir[1], p.dir[0]) * 180) / Math.PI;
   if (lw) lw.tick = -1;
   categorizePosition(ps, lw ?? world, vars);

@@ -8,12 +8,30 @@
 // plane normal. Bevel planes are used for box traces only. A trace starting inside a brush reports
 // startsolid (touching counts as inside) and that brush does not block it; one that never leaves
 // reports allsolid with fraction 0 and endpos = start.
+// Which brushes a sweep touches is decided exactly like Source: a brush is skipped as soon as the box is
+// in front of one of its (pushed) planes at both ends of the move (d1 > 0 && d2 > 0) - DIST_EPSILON only
+// pulls a hit back, it never makes a brush bigger. (Quake 3's rule, d1 > 0 && (d2 >= epsilon || d2 >= d1),
+// counts a move that ends within the epsilon of a face as touching that brush and then reports whichever face
+// was entered last: every brush grows by DIST_EPSILON. A ramp's next brush whose face sits a few hundredths
+// of a unit proud of the ramp - surf maps are full of them, e.g. the end cap on surf_utopia_njv's ramp into
+// the box, 0.016 proud - then is a step the hull hovering DIST_EPSILON above the ramp runs into, and the
+// player stops dead on that brush's end face while CS:S / CS:GO slide straight across.)
 //
 // Properties the movement code can rely on (all covered by tests/collision.test.ts):
 //  - A hit leaves endpos exactly DIST_EPSILON off the hit plane (pushed out by the box), measured along
 //    its normal; plane is the brush side's ORIGINAL plane (not expanded). fraction 1 => endpos === end.
-//  - Sliding parallel to a surface from that position never re-hits it, and adjacent brushes sharing
-//    the same plane (ramp seams) are never hit (see CLIP_NOISE).
+//  - A move that ends within DIST_EPSILON of a face without reaching it is not a hit (Source): the box can
+//    end anywhere in (0, DIST_EPSILON) off a surface (a soft landing, a step), and the next move into it
+//    stops at fraction 0 there.
+//  - Sliding parallel to a surface from on or inside its epsilon shell never re-hits it, and the next
+//    brush along a ramp is not hit unless its face really sticks out above the hull: coplanar seams,
+//    and faces proud by less than the hover height, are passed.
+//  - As in Source, an entering face's fraction is clamped at 0: a box that starts within DIST_EPSILON of a
+//    face and moves into it is stopped at fraction 0. When every face a brush is entered through is like
+//    that (the box starts inside all their epsilon shells), Source's choice of the reported face and brush
+//    comes down to side and BSP order; here it is the face the box really crosses last (where it would
+//    really enter the brush - e.g. a ramp's next brush's top rather than its end face or edge bevel), and
+//    of several brushes hit at 0 the one it really enters first.
 //  - Like Source, sweeping past a brush corner shallower than DIST_EPSILON is not a hit ("corner
 //    shaving"), so a trace stopped by one brush can end inside a grazed neighbour by at most
 //    DIST_EPSILON. The next trace then reports startsolid; Source's CheckStuck (unstuckPlayer) handles it.
@@ -59,15 +77,6 @@ import { Brush, BrushSide, CONTENTS_SOLID, DIST_EPSILON, MASK_ALL, TraceResult, 
  * Purely a culling margin: the exact result comes from the planes.
  */
 const BROAD_MARGIN = 1.0;
-/**
- * Float noise allowance for the "clearly in front of this plane" test. A box that ended a previous
- * move DIST_EPSILON off a surface and now slides parallel to it has d1 ~= d2 ~= DIST_EPSILON; rounding
- * could make d2 a hair below DIST_EPSILON while d1 - d2 is ~1e-15, which turns
- * (d1 - eps) / (d1 - d2) into an arbitrary fraction and stops the player mid-ramp (a "ramp bug").
- * Treating anything within 1e-6 of the epsilon shell as outside removes that failure mode while being
- * five orders of magnitude below anything observable.
- */
-const CLIP_NOISE = 1e-6;
 /** Boxes with extents smaller than this (length^2 < 1e-6) are traced as rays (like Source's Ray_t). */
 const POINT_EXTENT_SQ = 1e-6;
 const LEAF_MAX = 4;
@@ -120,16 +129,19 @@ const TRI_MIN_CROSS = 1e-6;
 //   KS[0..2]  start box centre         KS[3..5]  end box centre
 //   KS[6]     enter fraction           KS[7]     leave fraction
 //   KS[8..10] leading plane normal     KS[11]    leading plane distance (unexpanded)
-//   KS[12]    the trace's best fraction so far: a triangle entered at or after it can't change the result
-const KS = new Float64Array(13);
+//   KS[12]    the trace's best fraction so far: a triangle entered after it can't change the result
+//   KS[13]    of the entering planes whose epsilon shell the move starts in: the latest real crossing
+//             d1 / (d1 - d2); KS[14..17] that plane (normal, unexpanded distance)
+const KS = new Float64Array(18);
 /**
- * Initial enter fraction ("no entering plane yet"). Like Source's "never updated" sentinel (unlike Quake 3's
- * -1), every entering plane counts, however far before the start its pulled-back crossing lies: a box that starts within DIST_EPSILON of
- * a face and moves into it is stopped at fraction 0. With -1, moves into a face shorter than
- * DIST_EPSILON - gap passed unchecked, so a player sliding along a slightly slanted wall (a step or a ground
- * snap closing the gap each tick) crept into it and ended up stuck in solid. A finite sentinel (not -Infinity)
- * keeps ignoring the float noise of a move parallel to a face within DIST_EPSILON of it (d1 - d2 ~ 1e-15
- * gives f ~ -1e13), which must not stop a slide.
+ * Initial enter fraction ("no entering plane yet", Source's "never updated" sentinel). Every entering plane
+ * counts, however far before the start its pulled-back crossing lies: as in Source that fraction is clamped to
+ * 0, so a box that starts within DIST_EPSILON of a face and moves into it is stopped at fraction 0 however small
+ * the move (which face is reported then: see CollisionWorld.traceBox). With Quake 3's -1 instead, moves into a
+ * face shorter than DIST_EPSILON - gap passed unchecked and a player sliding along a slightly slanted wall crept
+ * into it; ignoring crossings pulled back by more than ~1e4 moves did the same to a player walking into a steep
+ * displacement slope while friction slowed them down: each tick ended a little closer inside the slope's epsilon
+ * shell (no hit: it stopped short), until a move of 2e-6 units crossed it and ended in solid.
  */
 const NEVER_UPDATED = -9999;
 let kStartOut = false;
@@ -153,12 +165,25 @@ function clipPlane(nx: number, ny: number, nz: number, dist: number, support: nu
   if (d2 > 0) kGetOut = true;
   if (d1 > 0) {
     kStartOut = true;
-    if (d2 >= DIST_EPSILON - CLIP_NOISE || d2 >= d1) return false;
+    // in front of this plane at both ends: the move never touches the hull (Source)
+    if (d2 > 0) return false;
   } else if (d2 <= 0) {
     return true;
   }
   if (d1 > d2) {
-    const f = (d1 - DIST_EPSILON) / (d1 - d2);
+    let f = (d1 - DIST_EPSILON) / (d1 - d2);
+    if (f <= 0) {
+      // starts inside this plane's epsilon shell: enters at 0 (Source); keep the plane really crossed last
+      f = 0;
+      const t = d1 / (d1 - d2);
+      if (t > KS[13]) {
+        KS[13] = t;
+        KS[14] = nx;
+        KS[15] = ny;
+        KS[16] = nz;
+        KS[17] = support;
+      }
+    }
     if (f > KS[6]) {
       KS[6] = f;
       KS[8] = nx;
@@ -166,7 +191,7 @@ function clipPlane(nx: number, ny: number, nz: number, dist: number, support: nu
       KS[10] = nz;
       KS[11] = support;
       // (an entering plane means the start is outside: no startsolid either)
-      if (f >= KS[12]) return false;
+      if (f > KS[12] || (f === KS[12] && f > 0)) return false;
     }
   } else {
     const f = (d1 + DIST_EPSILON) / (d1 - d2);
@@ -204,6 +229,7 @@ function clipAxial(axis: number, lo: number, hi: number, e: number, s: number): 
 function clipTriangleHull(T: Float64Array, t: number, ex: number, ey: number, ez: number): boolean {
   KS[6] = NEVER_UPDATED;
   KS[7] = 1;
+  KS[13] = -1;
   kStartOut = false;
   kGetOut = false;
   const o = t * TRI_STRIDE;
@@ -429,14 +455,15 @@ function edgeInside(
 /**
  * Point trace against triangle slot `t` of T: the segment KS[0..2] -> KS[3..5] against the zero-thickness
  * triangle, two-sided, with the brush rules for the face planes (a hit stops DIST_EPSILON in front of the
- * face that is approached; ending within DIST_EPSILON of it counts; a start exactly on the triangle is
- * startsolid). The contact must project into the triangle, edges included (see projectsInside): unlike a
- * clipped thin brush, whose pulled-in leave fractions let rays through within DIST_EPSILON of its edges, a
- * triangulated surface has no seams for rays. Resets and sets the clip state like clipTriangleHull.
+ * face that is crossed; ending short of it is no hit; a start exactly on the triangle is startsolid). The
+ * contact must project into the triangle, edges included (see projectsInside): unlike a clipped thin brush,
+ * whose pulled-in leave fractions let rays through within DIST_EPSILON of its edges, a triangulated surface
+ * has no seams for rays. Resets and sets the clip state like clipTriangleHull.
  */
 function clipTriangleRay(T: Float64Array, t: number): boolean {
   KS[6] = NEVER_UPDATED;
   KS[7] = 1;
+  KS[13] = -1;
   kStartOut = false;
   kGetOut = false;
   const o = t * TRI_STRIDE;
@@ -467,18 +494,19 @@ function clipTriangleRay(T: Float64Array, t: number): boolean {
     d1 = -d1;
     d2 = -d2;
   }
-  if (d2 >= DIST_EPSILON - CLIP_NOISE || d2 >= d1) return false;
+  // d1 > 0 here: the segment must reach the plane (Source)
+  if (d2 > 0) return false;
   const f = (d1 - DIST_EPSILON) / (d1 - d2);
-  if (!(f > NEVER_UPDATED)) return false;
-  // where the segment meets the plane (or its end, when that stops short within DIST_EPSILON)
-  const fc = d2 > 0 ? 1 : d1 / (d1 - d2);
+  // where the segment meets the plane
+  const fc = d1 / (d1 - d2);
   const px = KS[0] + (KS[3] - KS[0]) * fc;
   const py = KS[1] + (KS[4] - KS[1]) * fc;
   const pz = KS[2] + (KS[5] - KS[2]) * fc;
   if (!projectsInside(ax, ay, az, bx, by, bz, cx, cy, cz, fnx, fny, fnz, px, py, pz)) return false;
   kStartOut = true;
   kGetOut = true;
-  KS[6] = f;
+  KS[6] = f < 0 ? 0 : f;
+  KS[13] = fc;
   KS[8] = nx;
   KS[9] = ny;
   KS[10] = nz;
@@ -1922,6 +1950,8 @@ export class CollisionWorld implements TraceWorld {
     const stack = this.stack;
 
     let best = 1;
+    // for a hit at fraction 0: the real (not pulled back) crossing of the face it reports (see below)
+    let bestIn = -1;
     let hitSlot = -1;
     let hitSide = -1;
     let solidSlot = -1;
@@ -2030,6 +2060,9 @@ export class CollisionWorld implements TraceWorld {
         let startout = false;
         let getout = false;
         let lead = -1;
+        // of the entering faces whose epsilon shell the box starts in: the one it really crosses last (and when)
+        let inT = -1;
+        let inLead = -1;
         let missed = false;
         const sEnd = slotSideStart[slot + 1];
         for (let s = slotSideStart[slot]; s < sEnd; s++) {
@@ -2046,8 +2079,9 @@ export class CollisionWorld implements TraceWorld {
           if (d2 > 0) getout = true;
           if (d1 > 0) {
             startout = true;
-            // completely in front of this face for the whole move: no contact with this brush
-            if (d2 >= DIST_EPSILON - CLIP_NOISE || d2 >= d1) {
+            // in front of this face at both ends of the move: no contact with this brush (Source; see the
+            // file comment - ending within DIST_EPSILON of the face doesn't count)
+            if (d2 > 0) {
               missed = true;
               break;
             }
@@ -2055,8 +2089,17 @@ export class CollisionWorld implements TraceWorld {
             continue; // behind this face for the whole move
           }
           if (d1 > d2) {
-            // entering
-            const f = (d1 - DIST_EPSILON) / (d1 - d2);
+            // entering; like Source, a pulled-back crossing behind the start (the box starts inside this face's
+            // epsilon shell) counts as 0
+            let f = (d1 - DIST_EPSILON) / (d1 - d2);
+            if (f <= 0) {
+              f = 0;
+              const t = d1 / (d1 - d2);
+              if (t > inT) {
+                inT = t;
+                inLead = s;
+              }
+            }
             if (f > enterfrac) {
               enterfrac = f;
               lead = s;
@@ -2079,10 +2122,23 @@ export class CollisionWorld implements TraceWorld {
           }
           continue;
         }
-        if (enterfrac < leavefrac && enterfrac > NEVER_UPDATED && enterfrac < best) {
-          best = enterfrac < 0 ? 0 : enterfrac;
-          hitSlot = slot;
-          hitSide = lead;
+        // A hit at 0 - every face the move enters has its pulled-back crossing behind the start - is where Source
+        // leaves it to chance: all those fractions clamp to 0, so the first such side in the brush's list leads
+        // and the first such brush in the BSP walk is the hit. Here the contact is the face the box really
+        // crosses last (where it would really enter the brush: a ramp's next brush's top, not the end face or edge
+        // bevel whose shell it also starts in, which would stop it dead), and of brushes hit at 0 the one entered
+        // first. Fractions above 0 are Source's.
+        if (enterfrac < leavefrac && enterfrac > NEVER_UPDATED) {
+          if (enterfrac < best) {
+            best = enterfrac;
+            bestIn = enterfrac === 0 ? inT : -1;
+            hitSlot = slot;
+            hitSide = enterfrac === 0 ? inLead : lead;
+          } else if (enterfrac === 0 && best === 0 && inT < bestIn) {
+            bestIn = inT;
+            hitSlot = slot;
+            hitSide = inLead;
+          }
         }
       }
     }
@@ -2137,6 +2193,8 @@ export class CollisionWorld implements TraceWorld {
         let startout = false;
         let getout = false;
         let lead = -1;
+        let inT = -1;
+        let inLead = -1;
         let missed = false;
         for (let s = 0; s < np; s++) {
           const p4 = s * 4;
@@ -2149,7 +2207,7 @@ export class CollisionWorld implements TraceWorld {
           if (d2 > 0) getout = true;
           if (d1 > 0) {
             startout = true;
-            if (d2 >= DIST_EPSILON - CLIP_NOISE || d2 >= d1) {
+            if (d2 > 0) {
               missed = true;
               break;
             }
@@ -2157,7 +2215,15 @@ export class CollisionWorld implements TraceWorld {
             continue;
           }
           if (d1 > d2) {
-            const f = (d1 - DIST_EPSILON) / (d1 - d2);
+            let f = (d1 - DIST_EPSILON) / (d1 - d2);
+            if (f <= 0) {
+              f = 0;
+              const t = d1 / (d1 - d2);
+              if (t > inT) {
+                inT = t;
+                inLead = s;
+              }
+            }
             if (f > enterfrac) {
               enterfrac = f;
               lead = s;
@@ -2178,11 +2244,14 @@ export class CollisionWorld implements TraceWorld {
           }
           continue;
         }
-        if (enterfrac < leavefrac && enterfrac > NEVER_UPDATED && enterfrac < best) {
-          best = enterfrac < 0 ? 0 : enterfrac;
-          hitSlot = rb.slot;
-          hitSide = lead;
-          hitPlanes = P;
+        if (enterfrac < leavefrac && enterfrac > NEVER_UPDATED) {
+          if (enterfrac < best || (enterfrac === 0 && best === 0 && inT < bestIn)) {
+            bestIn = enterfrac === 0 ? inT : -1;
+            best = enterfrac;
+            hitSlot = rb.slot;
+            hitSide = enterfrac === 0 ? inLead : lead;
+            hitPlanes = P;
+          }
         }
       }
     }
@@ -2289,15 +2358,24 @@ export class CollisionWorld implements TraceWorld {
             }
             continue;
           }
-          if (KS[6] < KS[7] && KS[6] > NEVER_UPDATED && KS[6] < best) {
-            best = KS[6] < 0 ? 0 : KS[6];
+          if (KS[6] < KS[7] && KS[6] > NEVER_UPDATED && (KS[6] < best || (KS[6] === 0 && best === 0 && KS[13] < bestIn))) {
+            best = KS[6];
             KS[12] = best;
             hitSlot = -1;
             hitTri = slot;
-            hnx = KS[8];
-            hny = KS[9];
-            hnz = KS[10];
-            hd = KS[11];
+            if (KS[6] === 0 && !isPoint) {
+              bestIn = KS[13];
+              hnx = KS[14];
+              hny = KS[15];
+              hnz = KS[16];
+              hd = KS[17];
+            } else {
+              bestIn = KS[6] === 0 ? KS[13] : -1;
+              hnx = KS[8];
+              hny = KS[9];
+              hnz = KS[10];
+              hd = KS[11];
+            }
           }
         }
       }

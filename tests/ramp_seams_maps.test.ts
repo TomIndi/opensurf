@@ -11,9 +11,11 @@
 // cyan/orange diamond frame (surf_utopia_njv, x -4142..-6144 at z ~2100-2700, both sides of the centre wall). The
 // main ramp brush ends at x = -6112 against a 32-unit end cap whose sloped face lies 0.0161 units off the ramp's
 // plane (proud on the y > 0 side, recessed on the y < 0 side) - less than DIST_EPSILON. A surfer hovers DIST_EPSILON
-// above the ramp, i.e. inside the cap's epsilon shell, and the box trace then stops on the cap's vertical end face:
-// horizontal speed drops to ~0 at x = -6096. Every KSF replay slides across that seam at full speed (3440 u/s,
-// hovering 0.031 above the ramp, 0.015 above the cap).
+// above the ramp, i.e. inside the cap's epsilon shell, and the box trace (Quake 3's "missed" test, which counted a
+// move ending within DIST_EPSILON of the cap's face as touching the cap) then stopped on the cap's vertical end face:
+// horizontal speed dropped to ~0 at x = -6096. Every KSF replay slides across that seam at full speed (3440 u/s,
+// hovering 0.031 above the ramp, 0.015 above the cap), as Source's rule (in front of a face at both ends of the move
+// = the brush is never touched) says. Synthetic versions of these checks: ramp_seams.test.ts.
 //
 //  1. Replay differential: for every frame of every replay, our movement continues from the replay's state with the
 //     replay's commands for 30 ticks; no window may be stopped at a ramp SEAM (helpers/ramp_diff.ts) while the real
@@ -133,7 +135,8 @@ describe.skipIf(SETS.length === 0)('ramp seams vs KSF replays (SURF_TEST_MAPS + 
           for (const yaw of [-4, 0, 4])
             for (const key of ['into', 'none', 'away', 'fwd'] as const)
               for (const start of [
-                { h: 0.03125, vn: 0 },
+                // sliding (see SeamRunParams.slide) and landing
+                { h: 0.03125, vn: 0, slide: true },
                 { h: 2, vn: -150 },
               ])
                 for (const dt of [0.01, 0.015]) {
@@ -149,6 +152,7 @@ describe.skipIf(SETS.length === 0)('ramp seams vs KSF replays (SURF_TEST_MAPS + 
                     yaw,
                     h: start.h,
                     vn: start.vn,
+                    slide: start.slide,
                     key,
                     dt,
                     ticks: Math.ceil((lead + 150) / (speed * 0.5) / dt),

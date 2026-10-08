@@ -408,6 +408,16 @@ Box traces follow Source's brush clipping rules (DIST_EPSILON pull-back, startso
 enter fraction starts at a "never updated" sentinel (-9999, as in Source; Quake 3 used -1): a box that starts within
 DIST_EPSILON of a face and moves into it is stopped at fraction 0 however small the move. With -1, moves shorter than
 `DIST_EPSILON - gap` passed unchecked and a player sliding along a slightly slanted wall could creep into it.
+Which brushes a sweep touches is Source's rule too (`CM_ClipBoxToBrush`): a brush is skipped when the box is in front
+of one of its planes at both ends of the move (`d1 > 0 && d2 > 0`), so a move that ends within DIST_EPSILON of a face
+without reaching it is no hit, and entering fractions are clamped at 0. When a move starts inside the epsilon shells of
+every face it enters (a hit at 0), Source's reported face and brush come down to side and BSP order; here it is the face
+the box really crosses last (`d1 / (d1 - d2)`: where it would really enter the brush - the next ramp brush's top rather
+than its end face or edge bevel) and the brush it really enters first. Quake 3's "missed" test
+(`d2 >= epsilon || d2 >= d1`) grew every brush by DIST_EPSILON: the next brush along a ramp whose face sits less than
+DIST_EPSILON proud of it (surf_utopia_njv's ramp into the box: 0.016) became a step the hull hovering DIST_EPSILON above
+the ramp ran into. `tests/ramp_seams.test.ts` (synthetic, from that map's planes) and the opt-in
+`tests/ramp_seams_maps.test.ts` (real maps + KSF world-record replays) cover it.
 Displacements collide as two-sided triangles (see `docs/CONTRACT_CHANGES.md`).
 
 ## Automation & debugging
