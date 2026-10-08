@@ -3,8 +3,10 @@
 // (!r, !s, !b, !back, !stop, !saveloc, !tele, !prac, !noclip, !pb, !top, !wrb, !stages, !rank, !bonuses, !mi,
 // !replay, !ghost, !hide, !showkeys, !speed, !zones, !end, !help, !fov, !sens), with SurfTimer's aliases (!start =
 // !r, !teleport / !stuck = !back, !btop = !wrb, !wrcp / !cpr / !srcp / !stagetop = !stages, !mrank / !prank =
-// !rank). KSF world records (ksf.surf, through the local server: maps/ksf.ts): !wr (the WR and top 5; without KSF
-// data the local top like !top), !wrreplay / !ksfreplay / !replay wr (watch the WR replay), !wrghost (race it).
+// !rank). !undo (!undorestart / !unrestart, console surf_undo, bound to G) brings back the run an accidental !r
+// restarted (game/undo.ts): !r keeps a snapshot of a run in progress and says how to undo it. KSF world records
+// (ksf.surf, through the local server: maps/ksf.ts): !wr (the WR and top 5; without KSF data the local top like
+// !top), !wrreplay / !ksfreplay / !replay wr (watch the WR replay), !wrghost (race it).
 // Chat commands are also console commands as sm_<name>, like SourceMod registers them. An unknown command gets a
 // "Did you mean" only for a near miss (one typo in short names, two in longer ones).
 //
@@ -36,13 +38,15 @@ import {
   VIEW_OFFSET_DUCK,
   VIEW_OFFSET_STAND,
 } from '../physics/playertypes';
-import type { ChatColor, ChatSegment, GameState, SoundApi, TimerState, UiApi } from './api';
+import type { ChatColor, ChatSegment, GameState, SoundApi, TimerHud, TimerState, UiApi } from './api';
 import { addConfigProvider, loadSavedConfig, scheduleConfigSave } from './binds';
 import type { IEntitySystem, IReplaySystem, ISurfTimer, RunRecord } from './contracts';
+import type { PlayerEntSnapshot } from './entities';
 import { boardLabel, formatKsfTime, KSF_NEEDS_SERVER, type KsfBoard, type KsfRecord, type KsfWr } from '../maps/ksf';
 import { deleteCfg, execCfg, listCfgs, normalizeCfgName, readCfg, writeCfg } from './cfgstore';
 import { currentTickrate, getCompletions, getStageBest, tickLabel } from './records';
-import { formatRunTime } from './timer';
+import { formatRunTime, type TimerRunSnapshot } from './timer';
+import { UNDO_CHAT_NAMES, UNDO_CONSOLE_COMMAND, undoKey } from './undo';
 import { getZoneReport } from './zoneresolve';
 import { showZonesHelp } from './zoneeditor';
 import type { ZoneEditor } from './zoneeditor';
@@ -64,6 +68,14 @@ export interface TimerExtras {
   interruptRun(): boolean;
   /** Ticks per second the records/replays of this session belong to. */
   tickrate(): number;
+  /** !undo: a run is in progress that a restart would throw away (ranked, practice with time, stage practice). */
+  hasRunInProgress(): boolean;
+  /** !undo: the run in progress (clock, splits, stage, stats, zone contacts, replay recording). */
+  snapshotRun(): TimerRunSnapshot;
+  /** !undo: carries on a snapshotRun() (false when the zones changed since). */
+  restoreRun(snap: TimerRunSnapshot): boolean;
+  /** Bumped whenever new timing starts (an !undo snapshot from before is stale). */
+  readonly runGeneration: number;
 }
 export type GameTimer = ISurfTimer & Partial<TimerExtras>;
 
@@ -73,6 +85,9 @@ export interface EntityExtras {
   fireInput(target: string, input: string, param?: string, delay?: number): void;
   resetPlayerState(): void;
   playerClassname: string;
+  /** !undo: the player's map-logic state (targetname, classname, health, damage filter) and trigger contacts. */
+  snapshotPlayer(): PlayerEntSnapshot;
+  restorePlayer(snap: PlayerEntSnapshot): void;
 }
 export type GameEntities = IEntitySystem & Partial<EntityExtras>;
 
@@ -120,8 +135,8 @@ export interface CommandContext {
   getViewAngles(): QAngle;
   /** Watch the PB replay of a course. False if there is none. */
   startSpectate(group: number): boolean;
-  /** Stop watching (respawns at the course start). */
-  stopSpectate(): void;
+  /** Stop watching (respawns at the course start; `respawn` false leaves the player where it is). */
+  stopSpectate(respawn?: boolean): void;
   setNoclip(on: boolean): void;
   killPlayer(reason: string): void;
   /** Map names for `map` completion and `maps` (built-in ids + catalog). */
@@ -136,6 +151,16 @@ export interface CommandContext {
   loadKsfWrReplay?(opts: { spectate: boolean; onDownload?: () => void }): Promise<KsfReplayResult>;
   /** Optional: cancels the pending watch of loadKsfWrReplay (its result is then `cancelled`); true if one was pending. */
   cancelKsfWatch?(): boolean;
+  /**
+   * Optional (!r, before it restarts): keeps a snapshot of the run in progress for !undo. True when one was taken
+   * (no run in progress keeps the earlier snapshot, if any).
+   */
+  keepRunForUndo?(): boolean;
+  /**
+   * Optional (!undo): brings back the run an accidental !r restarted, exactly as it was (the time in between counts
+   * like a pause). The timer HUD of the restored run, or null when there is nothing to undo.
+   */
+  undoRestart?(): TimerHud | null;
 }
 
 /** What loading the KSF WR replay gave. */
@@ -721,12 +746,19 @@ function toggleWrGhost(ctx: CommandContext): void {
 }
 
 const HELP_LINES: ReadonlyArray<ReadonlyArray<[string, string]>> = [
-  [['!r', 'restart'], ['!s <n>', 'stage'], ['!b <n>', 'bonus'], ['!back', 'stage start'], ['!stop', 'stop timer'], ['!end', 'end zone']],
+  [['!r', 'restart'], ['!undo', 'undo !r (G)'], ['!s <n>', 'stage'], ['!b <n>', 'bonus'], ['!back', 'stage start'], ['!stop', 'stop timer'], ['!end', 'end zone']],
   [['!saveloc', 'save'], ['!tele [n]', 'saveloc teleport'], ['!prac', 'practice'], ['!noclip', 'noclip']],
   [['!pb', 'personal best'], ['!top', 'top times'], ['!rank', ''], ['!wrb <n>', 'bonus top'], ['!wrcp', 'stage times'], ['!bonuses', ''], ['!mi', 'map info'], ['!replay', 'watch PB']],
   [['!wr', 'KSF world record'], ['!wrreplay', 'watch the KSF WR'], ['!wrghost', 'race the KSF WR']],
   [['!ghost', ''], ['!hide', ''], ['!showkeys', ''], ['!speed', ''], ['!fov <n>', ''], ['!sens <n>', ''], ['!zones', '']],
 ];
+
+/** After an !r that kept the run: "Restarted. Press G (or type !undo) to go back to your run." */
+function undoHint(ctx: CommandContext): void {
+  const key = undoKey();
+  if (key) reply(ctx, seg('Restarted. Press '), seg(key.toUpperCase(), 'gold'), seg(' (or type '), seg('!undo', 'lightblue'), seg(') to go back to your run.'));
+  else reply(ctx, seg('Restarted. Type '), seg('!undo', 'lightblue'), seg(' to go back to your run.'));
+}
 
 function showHelp(ctx: CommandContext): void {
   reply(ctx, seg('Chat commands ', 'lightblue'), seg('(also as console commands sm_<name>):', 'grey'));
@@ -749,11 +781,38 @@ export const CHAT_COMMANDS: readonly ChatCommand[] = [
   {
     names: ['r', 'restart', 'start'],
     usage: '!r',
-    help: 'Restart the map (main course start).',
+    help: 'Restart the map (main course start). !undo brings back the run it restarted.',
     map: true,
     run: (ctx, _a, s) => {
+      // (watching a replay, !r just leaves it: "Jump or !r to stop")
+      const kept = !ctx.spectating && (ctx.keepRunForUndo?.() ?? false);
       if (ctx.spectating) ctx.stopSpectate();
       s!.timer.restart(0);
+      if (kept) undoHint(ctx);
+    },
+  },
+  {
+    names: [...UNDO_CHAT_NAMES],
+    usage: '!undo',
+    help: 'Undo an accidental !r: back to the run it restarted (same place, speed and time). Bound to G.',
+    map: false,
+    run: (ctx) => {
+      const hud = ctx.session ? (ctx.undoRestart?.() ?? null) : null;
+      if (!hud) {
+        reply(ctx, seg('Nothing to undo.', 'lightred'));
+        return;
+      }
+      const where: ChatSegment[] = [];
+      if (hud.bonus > 0) where.push(seg(`Bonus ${hud.bonus}`, 'gold'), seg(' · ', 'grey'));
+      if (hud.mapType === 'staged' && hud.stage > 0) where.push(seg(`Stage ${hud.stage}`, 'lightblue'), seg(' · ', 'grey'));
+      else if (hud.checkpoint > 0) where.push(seg(`CP ${hud.checkpoint}`, 'lightblue'), seg(' · ', 'grey'));
+      reply(
+        ctx,
+        seg('Back to your run: '),
+        ...where,
+        seg(formatRunTime(hud.time), 'lime'),
+        ...(ctx.session?.timer.inPractice ? [seg(' (practice)', 'grey')] : []),
+      );
     },
   },
   {
@@ -1503,6 +1562,9 @@ export function registerGameCommands(ctx: CommandContext): void {
   };
   reg('getpos', 'Print your eye position and view as a setpos/setang command.', getpos(false));
   reg('getpos_exact', 'Print your origin and view as a setpos_exact/setang_exact command.', getpos(true));
+  reg(UNDO_CONSOLE_COMMAND, 'Undo an accidental restart (!r): back to the run it restarted, like !undo (bound to G).', () => {
+    runChatCommand(c(), UNDO_CHAT_NAMES[0], []);
+  });
   reg(
     'ent_fire',
     'ent_fire <target> <input> [parameter] [delay] : fire an input on map entities (cheat).',

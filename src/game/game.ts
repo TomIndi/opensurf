@@ -20,6 +20,10 @@
 // stopped — run paused, it won't count"). The debug API's pause() is the same freeze (deterministic stepping
 // with runTicks).
 //
+// !undo (an accidental !r, game/undo.ts): !r keeps a snapshot of the run in progress (Session.undo) that !undo puts
+// back exactly - player, view, timer run (same clock: the time in between counts like a pause), trigger contacts,
+// replay recording - until a new run starts, another !r, a map change or the undo itself.
+//
 // Map changes: `map <name>` checks the name first (built-in list, else the catalog) and only prints
 // "map load failed: <name> not found" for an unknown one. While a new map downloads and parses, the current
 // session is kept aside (not simulated); it is dropped when the new map is ready, or comes back (with the
@@ -96,6 +100,7 @@ import { createHudState, horizontalSpeed, turnFromYawDelta, updateHudState } fro
 import { InputDevice, InputState, KeyDispatcher, readMouseSettings, registerButtonCommands } from './input';
 import { REPLAY_TELEPORT_DISTANCE, ReplayData, ReplaySystem, replayFromKsf, sampleReplay } from './replay';
 import { formatSplitDelta, SurfTimer } from './timer';
+import { assignDeep, deepClone, RunUndoSnapshot } from './undo';
 import { ZoneEditor, getEditorDebugBoxes, installZoneEditor, registerZoneCommands } from './zoneeditor';
 import { resolveZones } from './zoneresolve';
 
@@ -433,6 +438,8 @@ export class Session implements TimerHost, CommandSession {
   ksfReplayPending: { file: string; promise: Promise<ReplayData> } | null = null;
   /** Runs started on this map so far (ranked or practice): a pending !wrreplay doesn't take over a newer run. */
   runStarts = 0;
+  /** The run the latest !r restarted, for !undo (null: nothing to undo). */
+  undo: RunUndoSnapshot | null = null;
   private readonly game: Game;
 
   constructor(game: Game, map: LoadedMap, tier: number | null) {
@@ -989,6 +996,7 @@ export class Game implements GameApi, CommandContext {
     if (!s) return;
     if (this.spec) this.stopSpectate();
     if (this.suspended) this.dropSuspended(); // (never both: a session only exists while nothing is suspended)
+    s.undo = null; // (a map change ends what !undo could bring back, even one that fails and comes back)
     this.suspended = { session: s, state: this._state === 'paused' ? 'paused' : 'playing', request: s.request };
     this._session = null;
     installZoneEditor(null);
@@ -1273,7 +1281,7 @@ export class Game implements GameApi, CommandContext {
     return true;
   }
 
-  stopSpectate(): void {
+  stopSpectate(respawn = true): void {
     const s = this._session;
     if (!this.spec || !s) {
       this.spec = null;
@@ -1285,7 +1293,71 @@ export class Game implements GameApi, CommandContext {
     for (const k of Object.values(this.input.buttons)) k.clearImpulses();
     this.acc = 0;
     // back into the game at the course start, like re-joining a team on a surf server
-    s.timer.restart(group);
+    if (respawn) s.timer.restart(group);
+  }
+
+  // ================================================================ !undo (an accidental !r)
+
+  /**
+   * CommandContext.keepRunForUndo: !r calls it before restarting. When a run is in progress (a ranked run, a practice
+   * run with time on the clock, stage practice) it keeps a snapshot for !undo, replacing an older one, and returns
+   * true. Without a run in progress (or while watching a replay) nothing is taken and an earlier snapshot stays: a
+   * second press of R in the start zone doesn't lose the run the first one restarted.
+   */
+  keepRunForUndo(): boolean {
+    const s = this._session;
+    if (!s || this.spec) return false;
+    const t = s.timer;
+    if (typeof t.snapshotRun !== 'function' || typeof t.restoreRun !== 'function' || typeof t.hasRunInProgress !== 'function') return false;
+    if (!t.hasRunInProgress()) return false;
+    const ents = s.entities;
+    s.undo = {
+      player: deepClone(s.player),
+      view: { pitch: this.input.view.pitch, yaw: this.input.view.yaw, roll: this.input.view.roll },
+      lastCmdYaw: s.lastCmdYaw,
+      lastJumped: s.lastJumped,
+      stepDistance: s.stepDistance,
+      timer: t.snapshotRun(),
+      entities: typeof ents.snapshotPlayer === 'function' ? ents.snapshotPlayer() : null,
+      generation: t.runGeneration ?? 0,
+      practiceReason: null,
+    };
+    return true;
+  }
+
+  /**
+   * CommandContext.undoRestart (!undo, surf_undo): puts the run the latest !r restarted back exactly as it was - the
+   * whole PlayerState (position, velocity, base velocity, view, duck, ground / water state, map-driven gravity and
+   * speed), the view, the player's map-logic name and trigger contacts (no StartTouch / EndTouch storm), and the
+   * timer run on the same clock (the time in between counts like a pause: a ranked run stays ranked, practice stays
+   * practice; splits, stage, stats; the replay recording carries on). Consumes the snapshot. Returns the restored
+   * run's timer HUD, or null when there is nothing to undo (no snapshot, a new run started since, the zones changed).
+   */
+  undoRestart(): TimerHud | null {
+    const s = this._session;
+    const snap = s?.undo ?? null;
+    if (!s || !snap) return null;
+    s.undo = null;
+    const t = s.timer;
+    if (typeof t.restoreRun !== 'function' || (t.runGeneration ?? 0) !== snap.generation) return null;
+    if (!t.restoreRun(snap.timer)) return null;
+    // (watching a replay meanwhile: leave it without the respawn)
+    if (this.spec) this.stopSpectate(false);
+    const ps = s.player;
+    assignDeep(ps, snap.player);
+    // no interpolation from the start zone: the camera is simply back
+    v3copy(s.prevOrigin, ps.origin);
+    s.prevViewOffset = ps.viewOffsetZ;
+    this.input.setAngles(snap.view.pitch, snap.view.yaw, snap.view.roll);
+    s.lastCmdYaw = snap.lastCmdYaw;
+    s.lastJumped = snap.lastJumped;
+    s.stepDistance = snap.stepDistance;
+    if (snap.entities && typeof s.entities.restorePlayer === 'function') s.entities.restorePlayer(snap.entities);
+    // a server cvar changed after the restart: like that change mid-run, a ranked run can't count any more
+    if (snap.practiceReason && (t.timerState ?? t.getHud().state) === 'running') t.enterPractice(snap.practiceReason);
+    // (a !wrreplay still downloading doesn't take over the run that came back)
+    s.runStarts++;
+    return t.getHud();
   }
 
   // ================================================================ KSF world records
@@ -1505,6 +1577,9 @@ export class Game implements GameApi, CommandContext {
         const t = this._session.timer;
         const st = t.timerState ?? t.getHud().state;
         if (st === 'running') t.enterPractice(`${c.name} changed`);
+        // ... nor the run an !undo would bring back
+        const undo = this._session.undo;
+        if (undo && !undo.practiceReason) undo.practiceReason = `${c.name} changed`;
       }
     }
   }

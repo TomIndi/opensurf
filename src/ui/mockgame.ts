@@ -27,6 +27,7 @@ export const DEFAULT_BINDS: Record<string, string> = {
   u: 'messagemode2',
   r: 'say !r',
   t: 'say !back',
+  g: 'say !undo',
   mouse4: 'say !saveloc',
   mouse5: 'say !tele',
   f2: 'say !prac',

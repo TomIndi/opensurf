@@ -29,6 +29,9 @@
 //    were cleared/imported elsewhere), interruptRun() (the game stopped simulating mid-run: the run becomes
 //    practice), dispose() on map unload. SurfTimer servers spawn joining players in the start zone: call
 //    restart(0) after setZones() on map load.
+//  - !undo (an accidental !r): hasRunInProgress() / snapshotRun() before restart(), restoreRun(snap) later (the
+//    run goes on from the same clock, like after a pause; the caller restores the player); runGeneration changes
+//    when new timing starts (the snapshot is stale then).
 //  - finish messages say "Rank 1/1": SurfTimer ranks players on a map, and a local server has one player.
 import { QAngle, qa } from '../core/angles';
 import { console_ } from '../core/cvars';
@@ -135,6 +138,82 @@ interface Spawn {
   angles: QAngle;
 }
 
+/** Duck-typed extras of game/replay.ts ReplaySystem: the recording in progress for !undo. */
+interface ReplayUndoExtras {
+  snapshotRecording?: () => unknown;
+  restoreRecording?: (snap: never) => boolean;
+}
+
+/** The run state SurfTimer.snapshotRun keeps (every field a run in progress depends on). */
+interface RunFields {
+  state: TimerState;
+  group: number;
+  practice: boolean;
+  practiceReason: string;
+  stagePrac: { stage: number; armed: boolean } | null;
+  runTicks: number;
+  runTime: number;
+  clockBase: number;
+  clockBaseTicks: number;
+  clockInterval: number;
+  finishedTime: number;
+  stage: number;
+  stageStartTicks: number;
+  stageStartTime: number;
+  checkpoint: number;
+  stageSplits: number[];
+  checkpointSplits: number[];
+  lastSplitDelta: number | null;
+  lastSplitTime: number;
+  lastSplitLabel: string;
+  validated: boolean;
+  finishedInStart: boolean;
+  jumps: number;
+  strafes: number;
+  lastStrafeSign: number;
+  syncGood: number;
+  syncTotal: number;
+  speedSum: number;
+  speedTicks: number;
+  maxSpeed: number;
+  inAntiJump: boolean;
+  inAntiDuck: boolean;
+  seenDest: Set<number>;
+  stageDest: Map<number, Spawn>;
+}
+
+/**
+ * A run in progress as SurfTimer.snapshotRun took it (for !undo after an accidental !r). Opaque to the core: give
+ * it back to restoreRun.
+ */
+export interface TimerRunSnapshot {
+  /** The zone set it belongs to (restoreRun refuses a snapshot from before a zone change). */
+  readonly zoneSet: readonly unknown[];
+  /** Zone contact flags, aligned with zoneSet. */
+  readonly inside: readonly boolean[];
+  /** runGeneration when it was taken. */
+  readonly generation: number;
+  /** The replay recording so far (null when the run wasn't recorded: practice). */
+  readonly replay: unknown;
+  /** The run's own state (a deep copy). */
+  readonly fields: Readonly<RunFields>;
+}
+
+function cloneSpawn(s: Spawn): Spawn {
+  return { origin: v3clone(s.origin), angles: { ...s.angles } };
+}
+
+function cloneRunFields(f: RunFields): RunFields {
+  return {
+    ...f,
+    stagePrac: f.stagePrac ? { ...f.stagePrac } : null,
+    stageSplits: f.stageSplits.slice(),
+    checkpointSplits: f.checkpointSplits.slice(),
+    seenDest: new Set(f.seenDest),
+    stageDest: new Map([...f.stageDest].map(([k, v]) => [k, cloneSpawn(v)])),
+  };
+}
+
 /** A map destination players are teleported to, and how many trigger_teleports aim at it. */
 interface SpawnDest {
   origin: Vec3;
@@ -238,6 +317,8 @@ export class SurfTimer implements ISurfTimer {
   private stageDest = new Map<number, Spawn>();
   private unsubscribeTeleports: (() => void) | null = null;
   private disposed = false;
+  /** Bumped whenever new timing starts (see runGeneration). */
+  private runGen = 0;
 
   private readonly boxMins = v3();
   private readonly boxMaxs = v3();
@@ -467,6 +548,7 @@ export class SurfTimer implements ISurfTimer {
     this.practiceReason = 'stage';
     this.state = 'practice';
     this.stage = n;
+    this.runGen++;
     // SurfTimer stage practice: the stage is timed from leaving its zone to reaching the next stage
     this.stagePrac = { stage: n, armed: false };
     this.armStagePractice(n);
@@ -562,6 +644,131 @@ export class SurfTimer implements ISurfTimer {
       this.state = 'practice';
       this.cancelRecording();
     }
+  }
+
+  // ---------------------------------------------------------------- !undo (an accidental !r)
+
+  /**
+   * Bumped whenever new timing starts: a run leaving a start zone, !s N stage practice. An !undo snapshot taken
+   * before that is stale (the player has moved on to another run).
+   */
+  get runGeneration(): number {
+    return this.runGen;
+  }
+
+  /**
+   * A run is in progress that a restart would throw away: a ranked run, a practice run with time on the clock, or
+   * stage practice (even still waiting in the stage's zone).
+   */
+  hasRunInProgress(): boolean {
+    if (this.state === 'running') return true;
+    return this.state === 'practice' && (this.runTime > 0 || this.stagePrac !== null);
+  }
+
+  /**
+   * Everything the run in progress depends on (state, course, stage / checkpoint, run and stage clocks, splits,
+   * stage practice, practice flag + reason, validator, stats, stage heuristics, zone contacts) plus a copy of its
+   * replay recording, so restoreRun can carry it on exactly. Take it before restart().
+   */
+  snapshotRun(): TimerRunSnapshot {
+    const rep = this.replay as (IReplaySystem & ReplayUndoExtras) | null;
+    return {
+      zoneSet: this.zones,
+      inside: this.zones.map((z) => z.inside),
+      generation: this.runGen,
+      replay: this.recording && rep && typeof rep.snapshotRecording === 'function' ? (rep.snapshotRecording() ?? null) : null,
+      fields: cloneRunFields({
+        state: this.state,
+        group: this.group,
+        practice: this.practice,
+        practiceReason: this.practiceReason,
+        stagePrac: this.stagePrac,
+        runTicks: this.runTicks,
+        runTime: this.runTime,
+        clockBase: this.clockBase,
+        clockBaseTicks: this.clockBaseTicks,
+        clockInterval: this.clockInterval,
+        finishedTime: this.finishedTime,
+        stage: this.stage,
+        stageStartTicks: this.stageStartTicks,
+        stageStartTime: this.stageStartTime,
+        checkpoint: this.checkpoint,
+        stageSplits: this.stageSplits,
+        checkpointSplits: this.checkpointSplits,
+        lastSplitDelta: this.lastSplitDelta,
+        lastSplitTime: this.lastSplitTime,
+        lastSplitLabel: this.lastSplitLabel,
+        validated: this.validated,
+        finishedInStart: this.finishedInStart,
+        jumps: this.jumps,
+        strafes: this.strafes,
+        lastStrafeSign: this.lastStrafeSign,
+        syncGood: this.syncGood,
+        syncTotal: this.syncTotal,
+        speedSum: this.speedSum,
+        speedTicks: this.speedTicks,
+        maxSpeed: this.maxSpeed,
+        inAntiJump: this.inAntiJump,
+        inAntiDuck: this.inAntiDuck,
+        seenDest: this.seenDest,
+        stageDest: this.stageDest,
+      }),
+    };
+  }
+
+  /**
+   * Carries on a run from snapshotRun() as if the time in between had been a pause: same clock, splits, stage,
+   * stats and practice state, the replay recording continues (a ranked run stays ranked). The zone contacts are
+   * the snapshot's (the caller puts the player back exactly where it was), so no zone event fires. False when the
+   * zones changed since the snapshot (it belongs to the old zone set) or the timer was disposed.
+   */
+  restoreRun(snap: TimerRunSnapshot): boolean {
+    if (this.disposed || snap.zoneSet !== this.zones || snap.inside.length !== this.zones.length) return false;
+    if (this.recording) {
+      this.recording = false;
+      this.replay?.cancelRecording();
+    }
+    const f = cloneRunFields(snap.fields as RunFields);
+    this.state = f.state;
+    this.group = f.group;
+    this.practice = f.practice;
+    this.practiceReason = f.practiceReason;
+    this.stagePrac = f.stagePrac;
+    this.runTicks = f.runTicks;
+    this.runTime = f.runTime;
+    this.clockBase = f.clockBase;
+    this.clockBaseTicks = f.clockBaseTicks;
+    this.clockInterval = f.clockInterval;
+    this.finishedTime = f.finishedTime;
+    this.stage = f.stage;
+    this.stageStartTicks = f.stageStartTicks;
+    this.stageStartTime = f.stageStartTime;
+    this.checkpoint = f.checkpoint;
+    this.stageSplits = f.stageSplits;
+    this.checkpointSplits = f.checkpointSplits;
+    this.lastSplitDelta = f.lastSplitDelta;
+    this.lastSplitTime = f.lastSplitTime;
+    this.lastSplitLabel = f.lastSplitLabel;
+    this.validated = f.validated;
+    this.finishedInStart = f.finishedInStart;
+    this.jumps = f.jumps;
+    this.strafes = f.strafes;
+    this.lastStrafeSign = f.lastStrafeSign;
+    this.syncGood = f.syncGood;
+    this.syncTotal = f.syncTotal;
+    this.speedSum = f.speedSum;
+    this.speedTicks = f.speedTicks;
+    this.maxSpeed = f.maxSpeed;
+    this.inAntiJump = f.inAntiJump;
+    this.inAntiDuck = f.inAntiDuck;
+    this.seenDest = f.seenDest;
+    this.stageDest = f.stageDest;
+    for (let i = 0; i < this.zones.length; i++) this.zones[i].inside = snap.inside[i];
+    const rep = this.replay as (IReplaySystem & ReplayUndoExtras) | null;
+    if (snap.replay && rep && typeof rep.restoreRecording === 'function') this.recording = rep.restoreRecording(snap.replay as never);
+    this.pbCache.clear();
+    this.teleportGen++;
+    return true;
   }
 
   // ---------------------------------------------------------------- HUD / records
@@ -809,6 +1016,7 @@ export class SurfTimer implements ISurfTimer {
     if (!this.practice && this.zoneDefs.some((d) => d.type === 'end' && d.group === z.group)) this.capSpeed(cap);
     this.resetRunData();
     this.state = this.practice ? 'practice' : 'running';
+    this.runGen++;
     this.stage = this.isStagedGroup(this.group) ? 1 : 0;
     this.stageSplits[1] = 0;
     this.seenDest = new Set(this.startDest);

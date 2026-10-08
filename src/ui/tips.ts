@@ -5,6 +5,7 @@ export const SURF_TIPS: string[] = [
   'Gain speed in the air by turning your mouse smoothly in the same direction you strafe.',
   'Land on ramps as high as possible and keep your crosshair slightly above the horizon to carry speed.',
   'Press R (or type !r) to restart the map. T (!back) restarts only the current stage.',
+  'Hit R by mistake mid-run? Press G (or type !undo) to go back to your run, clock and all.',
   'Use !saveloc (Mouse4) and !tele (Mouse5) to practise a hard section — the timer switches to practice mode.',
   'Type !s 3 to jump to stage 3 on staged maps, and !b 1 for bonus 1.',
   'Your CS:GO sensitivity carries over: sensitivity and m_yaw use exactly the same units.',

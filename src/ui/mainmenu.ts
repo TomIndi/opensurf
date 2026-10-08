@@ -27,6 +27,7 @@ export const DEFAULT_BINDS_HELP: [string, string][] = [
   ['SHIFT', 'Walk'],
   ['R', 'Restart map (!r)'],
   ['T', 'Restart stage (!back)'],
+  ['G', 'Undo an accidental restart (!undo)'],
   ['MOUSE 4 / 5', 'Save location / teleport (!saveloc / !tele)'],
   ['F2', 'Practice mode (!prac)'],
   ['Y / U', 'Chat / team chat'],
@@ -37,6 +38,7 @@ export const DEFAULT_BINDS_HELP: [string, string][] = [
 
 export const CHAT_COMMANDS_HELP: [string, string][] = [
   ['!r  !restart', 'Restart the map'],
+  ['!undo', 'Undo an accidental !r: back to your run'],
   ['!s <n>  !stage <n>', 'Go to stage n'],
   ['!b <n>  !bonus <n>', 'Go to bonus n'],
   ['!back  !stuck', 'Restart the current stage'],

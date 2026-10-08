@@ -55,6 +55,7 @@ from your own zones (`!zones` / `zone_*` console commands).
 | Ctrl / Shift | duck / walk |
 | R | `!r` restart |
 | T | `!back` restart stage |
+| G | `!undo` undo an accidental restart (back to your run) |
 | Mouse4 / Mouse5 | `!saveloc` / `!tele` (practice) |
 | Y / U | chat |
 | `` ` `` | developer console |
@@ -63,8 +64,12 @@ from your own zones (`!zones` / `zone_*` console commands).
 Sensitivity uses CS:GO units (`sensitivity`, `m_yaw 0.022`), so your CS:GO sensitivity carries over.
 `bind`, `alias`, `cl_crosshair*` and most familiar console commands work.
 
-Chat commands: `!r`, `!s <n>`, `!b <n>`, `!back`, `!saveloc`, `!tele`, `!prac`, `!noclip`, `!pb`, `!top`,
+Chat commands: `!r`, `!undo`, `!s <n>`, `!b <n>`, `!back`, `!saveloc`, `!tele`, `!prac`, `!noclip`, `!pb`, `!top`,
 `!replay`, `!ghost`, `!wr`, `!wrreplay`, `!wrghost`, `!hide`, `!showkeys`, `!zones`, `!help`.
+
+Hit R when you meant T? Press G (`!undo`, console `surf_undo`): you are back exactly where you were — position,
+speed, view, stage, splits and the run clock (the restart counts like a pause, so a ranked run stays ranked and its
+replay stays whole). It works until you start a new run.
 
 ESC pauses the game (the world and the timer freeze; the run still counts when you resume).
 

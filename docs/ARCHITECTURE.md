@@ -38,7 +38,7 @@ Run: `npm run dev`.
 | materials | `src/bsp/{pakfile,vtf,vmt,materials}.ts`, `tests/materials.test.ts` | materials |
 | BSP render geometry + loader | `src/bsp/{geometry,lightmap,displacement,loadmap,props}.ts`, `tests/geometry.test.ts` | bsp-render |
 | renderer | `src/render/**` | renderer |
-| game core | `src/game/{game,convars,binds,input,commands,debugapi,hud}.ts`, `tests/gamecore*.test.ts` | game-core |
+| game core | `src/game/{game,convars,binds,input,commands,debugapi,hud,undo}.ts`, `tests/gamecore*.test.ts` | game-core |
 | game world | `src/game/{entities,timer,zoneresolve,replay,zoneeditor,records}.ts`, `tests/gameworld*.test.ts` | game-world |
 | UI + audio | `src/ui/**`, `src/audio/**`, `src/styles/**`, `index.html` | ui |
 | built-in maps | `src/map/builtin/**`, `tests/builtin.test.ts` | builtin-maps |
@@ -306,14 +306,15 @@ netcode (`rate`, `cl_updaterate`, `cl_cmdrate`, `cl_interp*`), `snd_*`, `voice_*
 
 ## Commands
 
-Console (Source names): `map <name>`, `disconnect`, `retry`, `noclip`, `kill`, `setpos x y z`, `setang p y r`,
+Console (Source names): `map <name>`, `disconnect`, `retry`, `noclip`, `kill`, `surf_undo`, `setpos x y z`, `setang p y r`,
 `getpos`, `bind <key> "<cmd>"`, `unbind`, `unbindall`, `binddefaults`, `alias`, `echo`, `clear`, `cvarlist`, `find`,
 `help`, `toggle <cvar> [a b ...]`, `incrementvar`, `say`, `say_team`, `toggleconsole`, `messagemode`,
 `messagemode2`, `quit`, `status`, `host_writeconfig`, `+forward/-forward` etc. `exec <name>` runs a stored cfg
 (localStorage `surf.cfg.<name>`, written by `cfg_save <name> "<cmds>"` or the settings' .cfg import; `cfg_list`,
 `cfg_delete`); `autoexec` runs at startup after the saved config (`src/game/cfgstore.ts`).
 
-Chat (SourceMod/SurfTimer style, also accept `/cmd` silently): `!r` `!restart`, `!s` `!stage [n]`, `!b` `!bonus [n]`,
+Chat (SourceMod/SurfTimer style, also accept `/cmd` silently): `!r` `!restart`, `!undo` (`!undorestart`,
+`!unrestart`), `!s` `!stage [n]`, `!b` `!bonus [n]`,
 `!back`/`!stuck` (restart current stage), `!saveloc`/`!cp`, `!tele`/`!tp`, `!prac`/`!practice`, `!noclip`,
 `!pb`, `!top`, `!rank`/`!mrank`/`!prank` (Rank 1/1, PB, completions), `!stages`/`!wrcp`/`!cpr`/`!srcp`/`!stagetop`
 (stage records), `!mi`/`!tier`, `!replay`, `!ghost`, `!hide`, `!showkeys`, `!speed`, `!zones` (zone editor),
@@ -323,10 +324,31 @@ Chat (SourceMod/SurfTimer style, also accept `/cmd` silently): `!r` `!restart`, 
 near miss. Reaching stage N+1 prints the completed stage's own time vs its stage best ("Player finished Stage 2 in
 00:12.345 (PB -0.123)", also the HUD split flash) before the run split; the end zone completes the last stage.
 
+Undo restart (`src/game/undo.ts`; R = `!r` sits next to T = `!back`): when `!r` (any alias, the R key, the pause
+menu's Restart) restarts a run in progress (timer `running`, `practice` with time on the clock, or `!s N` stage
+practice) the game first keeps a snapshot in `Session.undo` (`Game.keepRunForUndo`): the whole PlayerState, the input
+view, the session's per-tick bookkeeping (last usercmd yaw, last jump, footsteps), `SurfTimer.snapshotRun()` (state,
+course, stage / checkpoint, run and stage clocks, splits, stage practice, practice + reason, validator, stats,
+stage heuristics, zone contact flags, plus `ReplaySystem.snapshotRecording()`: the frames so far) and
+`EntitySystem.snapshotPlayer()` (targetname, classname, health, damage filter, trigger / button / door contacts),
+then says "[Surf] Restarted. Press G (or type !undo) to go back to your run." (the key actually bound to the undo,
+else only `!undo`). `!undo` / `surf_undo` (`Game.undoRestart`) puts it all back: no interpolation smear, the zone
+flags and trigger contacts are the snapshot's (no StartTouch / EndTouch storm: triggers still overlapping only Touch
+on the next tick, the contacts of the restart period are dropped silently like a timer teleport), the run clock
+carries on from the same time (the restart counts like a pause: ranked stays ranked, practice stays practice), and
+the replay recording continues, so a finished run saves its complete replay. A server/physics cvar changed meanwhile
+turns a ranked run into practice. The snapshot ends when new timing starts (`SurfTimer.runGeneration`: a run leaves
+a start zone, `!s N`), another `!r` mid-run replaces it, the zones or the map change, or an undo uses it; `!r`
+without a run in progress (pressing R twice) keeps it. Only `!r` takes one (not `!back`, `!s`, `!b`, `!tele`,
+deaths or fail teleports). The world itself (movers, map logic, the simulation clock) keeps going during the restart.
+Nothing to undo: one chat line "[Surf] Nothing to undo."
+
 Default binds (CS:GO + surf conventions): `w +forward`, `s +back`, `a +moveleft`, `d +moveright`,
 `space +jump`, `mwheeldown +jump`, `mwheelup +jump`, `ctrl +duck`, `shift +speed`, `e +use`, `tab +showscores`,
-`` ` `` `toggleconsole`, `y messagemode`, `u messagemode2`, `r "say !r"`, `t "say !back"`, `mouse4 "say !saveloc"`,
-`mouse5 "say !tele"`, `escape` menu, `f2 "say !prac"`.
+`` ` `` `toggleconsole`, `y messagemode`, `u messagemode2`, `r "say !r"`, `t "say !back"`, `g "say !undo"`,
+`mouse4 "say !saveloc"`, `mouse5 "say !tele"`, `escape` menu, `f2 "say !prac"`. The saved config records the default
+binds version it was written with (`bind_defaults_version`); loading a config from before a default was added binds
+that key unless the config binds it to something else (an older config gets G = `!undo`).
 Key names follow Source: `a`..`z`, `0`..`9`, `space`, `ctrl`, `shift`, `alt`, `tab`, `enter`, `escape`,
 `backspace`, `uparrow`…, `f1`..`f12`, `mouse1`..`mouse5`, `mwheelup`, `mwheeldown`, `kp_*`, `semicolon`, `` ` ``.
 

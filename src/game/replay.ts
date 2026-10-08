@@ -14,6 +14,9 @@
 // (its own tick interval, so no resampling) with the start-zone prestrafe kept before run time 0 (`startFrame`) and
 // the stored velocities (`velocities`, for the spectate speedometer). The WR replay is kept apart from the PBs
 // (setWrReplay): it can be spectated (spectateData) and raced as a second ghost (wrGhostAt).
+//
+// snapshotRecording / restoreRecording copy the recording in progress out and back (!undo of an accidental !r: the
+// run's replay carries on from the frames it had).
 import { QAngle, angleDiff } from '../core/angles';
 import { console_ } from '../core/cvars';
 import { Vec3 } from '../core/vec3';
@@ -341,6 +344,16 @@ interface Recording {
   tickrate: number;
 }
 
+/** A copy of a recording in progress (ReplaySystem.snapshotRecording): what !undo puts back after an accidental !r. */
+export interface RecordingSnapshot {
+  readonly group: number;
+  readonly tickrate: number;
+  /** Frames recorded so far. */
+  readonly count: number;
+  /** count * FRAME_STRIDE floats (a copy: the live buffer is reused by the next attempt). */
+  readonly frames: Float32Array;
+}
+
 function cvarNum(name: string, fallback: number): number {
   const c = console_.getCvar(name);
   return c && Number.isFinite(c.num) ? c.num : fallback;
@@ -461,6 +474,33 @@ export class ReplaySystem implements IReplaySystem {
   cancelRecording(): void {
     if (this.rec) this.spare = this.rec.buf;
     this.rec = null;
+  }
+
+  /** A copy of the recording in progress (frames so far), or null when nothing is being recorded. */
+  snapshotRecording(): RecordingSnapshot | null {
+    const r = this.rec;
+    if (!r) return null;
+    return { group: r.group, tickrate: r.tickrate, count: r.count, frames: r.buf.slice(0, r.count * FRAME_STRIDE) };
+  }
+
+  /**
+   * Carries on recording from a snapshot (replacing any recording in progress): the next recordTick appends frame
+   * `snap.count`, so a run that finishes later saves its complete replay. False for a malformed snapshot.
+   */
+  restoreRecording(snap: RecordingSnapshot): boolean {
+    const used = snap.count * FRAME_STRIDE;
+    if (!(snap.count >= 0) || snap.frames.length < used) return false;
+    let buf = this.rec?.buf ?? this.spare;
+    this.spare = null;
+    if (!buf || buf.length < used + FRAME_STRIDE) {
+      let cap = INITIAL_FRAMES * FRAME_STRIDE;
+      while (cap < used + FRAME_STRIDE) cap *= 2;
+      buf = new Float32Array(cap);
+    }
+    buf.set(snap.frames.subarray(0, used));
+    this.rec = { group: snap.group, buf, count: snap.count, tickrate: snap.tickrate };
+    this.activeGroup = snap.group;
+    return true;
   }
 
   /** Loads the PB replay of map/group at the tickrate (default: the current one) from IndexedDB. */

@@ -32,6 +32,7 @@ export const BIND_GROUPS: { group: string; items: BindAction[] }[] = [
     items: [
       { label: 'Restart map  (!r)', command: 'say !r' },
       { label: 'Restart stage  (!back)', command: 'say !back' },
+      { label: 'Undo restart  (!undo)', command: 'say !undo' },
       { label: 'Save location  (!saveloc)', command: 'say !saveloc' },
       { label: 'Teleport to save  (!tele)', command: 'say !tele' },
       { label: 'Practice mode  (!prac)', command: 'say !prac' },
@@ -61,7 +62,7 @@ export function normalizeCommand(cmd: string): string {
 }
 
 /** Default bind keys first (in the order of the CS:GO surf defaults), so a newly added key never jumps ahead of them. */
-const PRIMARY_KEYS = ['w', 's', 'a', 'd', 'space', 'mwheeldown', 'mwheelup', 'ctrl', 'shift', 'e', 'tab', '`', 'y', 'u', 'r', 't', 'mouse4', 'mouse5', 'f2'];
+const PRIMARY_KEYS = ['w', 's', 'a', 'd', 'space', 'mwheeldown', 'mwheelup', 'ctrl', 'shift', 'e', 'tab', '`', 'y', 'u', 'r', 't', 'g', 'mouse4', 'mouse5', 'f2'];
 
 /** Groups key -> command into command -> keys (keys in a stable, friendly order). */
 export function keysByCommand(binds: Map<string, string>): Map<string, string[]> {

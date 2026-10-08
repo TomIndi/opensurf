@@ -184,6 +184,7 @@ describe('bind table', () => {
       u: 'messagemode2',
       r: 'say !r',
       t: 'say !back',
+      g: 'say !undo',
       mouse4: 'say !saveloc',
       mouse5: 'say !tele',
       f2: 'say !prac',
@@ -284,6 +285,29 @@ describe('config persistence', () => {
     expect(binds.get('k')).toBe('say hi; echo there');
     expect(binds.get('mwheelup')).toBeUndefined();
     expect(binds.get('mwheeldown')).toBe('+jump');
+  });
+
+  it('binds a default added later (G = !undo) on top of a config saved before it, unless the config uses the key', () => {
+    // saved by an older version: unbindall + its binds, no bind_defaults_version line, no g
+    store.m.set('surf.config.v1', 'sensitivity "2"\nunbindall\nbind "w" "+forward"\nbind "r" "say !r"');
+    binds.resetToDefaults();
+    expect(loadSavedConfig()).toBe(true);
+    expect(binds.get('g')).toBe('say !undo');
+    expect(binds.get('t')).toBeUndefined(); // (an older default the config doesn't have stays unbound)
+    expect(binds.get('r')).toBe('say !r');
+    // an older config that binds g to something else keeps it
+    store.m.set('surf.config.v1', 'unbindall\nbind "g" "+use"');
+    binds.resetToDefaults();
+    loadSavedConfig();
+    expect(binds.get('g')).toBe('+use');
+    // saved by this version: the key the player unbound stays unbound
+    execute('unbind g');
+    writeConfig();
+    expect(loadArchivedConfig()).toContain('bind_defaults_version 2');
+    binds.resetToDefaults();
+    loadSavedConfig();
+    expect(binds.get('g')).toBeUndefined();
+    expect(binds.size).toBe(0);
   });
 
   it('skips unknown commands in a config silently', () => {
