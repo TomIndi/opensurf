@@ -114,6 +114,8 @@ export class MockGame implements GameApi {
       noclip: false,
       spectating: null,
       now: 0,
+      // a made-up KSF world record (the harness has no server to ask ksf.surf)
+      ksfWr: { time: 76.512, name: 'harness', board: '100 tick' },
     };
     this.registerFallbackCommands();
   }

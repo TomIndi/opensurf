@@ -2,6 +2,14 @@ import { createReadStream, existsSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { Readable } from 'node:stream';
 import { defineConfig, type Plugin } from 'vite';
+import {
+  KSF_PROXY_HEADER,
+  KSF_RECORDS_MAX_BYTES,
+  KSF_RECORDS_TIMEOUT_MS,
+  KSF_REPLAY_MAX_BYTES,
+  KSF_REPLAY_TIMEOUT_MS,
+  parseKsfProxyRequest,
+} from './src/maps/ksfproxy.js';
 
 /**
  * Dev/preview only: serves BSP files from $SURF_TEST_MAPS at /__maps/<name>.bsp so automated
@@ -81,9 +89,97 @@ function driveProxy(): Plugin {
   };
 }
 
+/**
+ * Dev/preview: KSF world records (src/maps/ksf.ts). ksf.surf's API sends no CORS headers, so the page asks the local
+ * server: /__ksf/records/<map>?game=<66t|100t> (the main course leaderboard, JSON) and /__ksf/replay/<file>?game=...
+ * (a record's replay). Only URLs built from the validated map / file / board (src/maps/ksfproxy.ts) are fetched,
+ * with a timeout and a size cap; nothing is stored.
+ */
+function ksfProxy(): Plugin {
+  const handler = async (req: { url?: string; method?: string }, res: any, next: () => void) => {
+    const route = parseKsfProxyRequest(req.url ?? '');
+    if (!route) return next();
+    res.setHeader(KSF_PROXY_HEADER, '1');
+    res.setHeader('Cache-Control', 'no-store');
+    const fail = (status: number, msg: string) => {
+      if (res.headersSent) {
+        res.destroy();
+        return;
+      }
+      res.statusCode = status;
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.end(msg);
+    };
+    if ('error' in route) return fail(route.status, route.error);
+    if (req.method && req.method !== 'GET' && req.method !== 'HEAD') return fail(405, 'GET only');
+    const records = route.kind === 'records';
+    const maxBytes = records ? KSF_RECORDS_MAX_BYTES : KSF_REPLAY_MAX_BYTES;
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), records ? KSF_RECORDS_TIMEOUT_MS : KSF_REPLAY_TIMEOUT_MS);
+    res.on('close', () => {
+      clearTimeout(timer);
+      if (!res.writableFinished) ac.abort();
+    });
+    try {
+      const up = await fetch(route.upstream, {
+        signal: ac.signal,
+        headers: { accept: records ? 'application/json' : 'application/octet-stream', 'user-agent': 'SURF (browser surf remake; local dev server)' },
+      });
+      // (fetch decodes gzip/br: a Content-Length of an encoded body isn't the length passed on)
+      const len = up.headers.get('content-encoding') ? 0 : Number(up.headers.get('content-length')) || 0;
+      if (len > maxBytes) {
+        ac.abort();
+        return fail(502, 'ksf.surf answer too large');
+      }
+      res.statusCode = up.status;
+      res.setHeader('Content-Type', up.headers.get('content-type') ?? (records ? 'application/json' : 'application/octet-stream'));
+      if (len) res.setHeader('Content-Length', String(len));
+      if (!up.body || req.method === 'HEAD') {
+        res.end();
+        return;
+      }
+      let total = 0;
+      for await (const chunk of up.body as unknown as AsyncIterable<Uint8Array>) {
+        total += chunk.byteLength;
+        if (total > maxBytes) {
+          ac.abort();
+          res.destroy();
+          return;
+        }
+        if (!res.write(chunk)) {
+          await new Promise<void>((r) => {
+            const done = () => {
+              res.off('drain', done);
+              res.off('close', done);
+              r();
+            };
+            res.on('drain', done);
+            res.on('close', done);
+          });
+          if (res.destroyed) return;
+        }
+      }
+      res.end();
+    } catch (e) {
+      fail(502, ac.signal.aborted ? 'ksf.surf took too long to answer' : String((e as Error)?.message ?? e));
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  return {
+    name: 'surf-ksf-proxy',
+    configureServer(server) {
+      server.middlewares.use(handler);
+    },
+    configurePreviewServer(server) {
+      server.middlewares.use(handler);
+    },
+  };
+}
+
 export default defineConfig({
   base: './',
-  plugins: [driveProxy(), testMaps()],
+  plugins: [driveProxy(), ksfProxy(), testMaps()],
   build: {
     target: 'es2022',
     chunkSizeWarningLimit: 4000,

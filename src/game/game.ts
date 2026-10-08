@@ -32,6 +32,7 @@ import { BUILTIN_MAPS } from '../map/builtin/list';
 import { FogDef, LoadedMap, ZoneDef, ZoneSource } from '../map/types';
 import { CatalogEntry, getCatalogEntry, loadCatalog } from '../maps/catalog';
 import { extractMapArchive, fetchCatalogMap } from '../maps/downloader';
+import { boardLabel, getKsfService, isKsfEligibleMap, type KsfBoard, type KsfRecord, type KsfService, type KsfWr } from '../maps/ksf';
 import type { CollisionWorld } from '../physics/collision';
 import { categorizePosition, playerMove, unstuckPlayer } from '../physics/movement';
 import {
@@ -57,6 +58,7 @@ import {
   GameState,
   GhostState,
   HudState,
+  KsfWrHud,
   LoadProgress,
   RenderSettings,
   RendererApi,
@@ -78,8 +80,11 @@ import {
   GameTimer,
   Saveloc,
   handleSay,
+  KsfReplayResult,
+  ksfWrSegments,
   playerName,
   registerGameCommands,
+  runChatCommand,
   welcomeMessage,
   zoneSourceText,
 } from './commands';
@@ -89,8 +94,8 @@ import { installDebugApi, parseUrlOptions } from './debugapi';
 import { EntitySystem } from './entities';
 import { createHudState, horizontalSpeed, turnFromYawDelta, updateHudState } from './hud';
 import { InputDevice, InputState, KeyDispatcher, readMouseSettings, registerButtonCommands } from './input';
-import { ReplaySystem, sampleReplay } from './replay';
-import { SurfTimer } from './timer';
+import { ReplayData, ReplaySystem, replayFromKsf, sampleReplay } from './replay';
+import { formatSplitDelta, SurfTimer } from './timer';
 import { ZoneEditor, getEditorDebugBoxes, installZoneEditor, registerZoneCommands } from './zoneeditor';
 import { resolveZones } from './zoneresolve';
 
@@ -418,6 +423,14 @@ export class Session implements TimerHost, CommandSession {
   ghostGroup = 0;
   /** How this map was loaded (`retry` reloads it). */
   request: LoadRequest | null = null;
+  /** The KSF world record of the map (for the tickrate `ksfTickrate`), once known. */
+  ksfWr: KsfWr | null = null;
+  ksfTickrate = 0;
+  /** HUD view of ksfWr (replaced, never mutated). */
+  ksfHud: KsfWrHud | null = null;
+  /** The KSF replay installed as the WR replay (s.replay.setWrReplay). */
+  ksfReplay: { file: string; record: KsfRecord; data: ReplayData } | null = null;
+  ksfReplayPending: { file: string; promise: Promise<ReplayData> } | null = null;
   private readonly game: Game;
 
   constructor(game: Game, map: LoadedMap, tier: number | null) {
@@ -436,6 +449,7 @@ export class Session implements TimerHost, CommandSession {
     this.entities = new EntitySystem(this);
     const timer = new SurfTimer(this);
     timer.onRunFinish = (ev) => game.emitEvent('runfinished', ev);
+    timer.finishExtras = (group, time) => game.ksfFinishSegments(this, group, time);
     this.timer = timer;
     this.replay = new ReplaySystem(map.name);
     timer.setReplay(this.replay);
@@ -520,6 +534,8 @@ export interface GameDeps {
   loaders?: Partial<MapLoaders>;
   /** No pointer lock needed, never pause when it is lost (automated tests). Default: the ?autotest=1 URL flag. */
   autotest?: boolean;
+  /** KSF world records (tests inject a fake client). Default: the shared service (maps/ksf.ts). */
+  ksf?: KsfService;
 }
 
 /** The session kept aside while another map loads (it comes back if that load fails). */
@@ -531,6 +547,10 @@ interface SuspendedSession {
 }
 
 interface SpectateState {
+  /** Your PB replay, or the KSF world record. */
+  kind: 'pb' | 'wr';
+  /** Banner / showpos name ("PB Replay", "KSF WR · name (66 tick)"). */
+  label: string;
   group: number;
   /** Real time (s) at which replay time 0 is shown. */
   start: number;
@@ -545,6 +565,7 @@ export class Game implements GameApi, CommandContext {
   readonly sound: SoundApi;
   readonly canvas: HTMLCanvasElement;
   readonly loaders: MapLoaders;
+  readonly ksf: KsfService;
   readonly input = new InputState();
   readonly dispatcher = new KeyDispatcher();
   private device: InputDevice | null = null;
@@ -583,6 +604,7 @@ export class Game implements GameApi, CommandContext {
   private readonly hud: HudState = createHudState();
   private readonly view: ViewState = { origin: v3(), angles: qa(), fov: 90, time: 0 };
   private readonly debugBoxes: { mins: Vec3; maxs: Vec3; color: [number, number, number] }[] = [];
+  private readonly ghostList: GhostState[] = [];
   private debugShown = false;
   private ghostShown = false;
   private spec: SpectateState | null = null;
@@ -597,6 +619,7 @@ export class Game implements GameApi, CommandContext {
     this.sound = deps.sound;
     this.canvas = deps.canvas;
     this.loaders = { ...defaultLoaders, ...(deps.loaders ?? {}) };
+    this.ksf = deps.ksf ?? getKsfService();
     this.autotest = deps.autotest ?? false;
     registerConvars();
     registerBindCommands();
@@ -1092,6 +1115,7 @@ export class Game implements GameApi, CommandContext {
       'info',
     );
     welcomeMessage(this, s);
+    this.announceKsf(s);
   }
 
   private loadFailed(token: LoadToken, e: unknown): void {
@@ -1229,7 +1253,8 @@ export class Game implements GameApi, CommandContext {
     const s = this._session;
     if (!s) return false;
     if (!s.replay.spectate(group)) return false;
-    this.spec = { group, start: this.now, finishedAt: null, lastYaw: NaN };
+    const label = group > 0 ? `PB Replay (Bonus ${group})` : 'PB Replay';
+    this.spec = { kind: 'pb', label, group, start: this.now, finishedAt: null, lastYaw: NaN };
     // only a new jump press leaves the replay (not a jump key that was already held)
     this.input.buttons.jump.clearImpulses();
     this.ghostShown = true; // force a setGhosts([]) next frame
@@ -1249,6 +1274,153 @@ export class Game implements GameApi, CommandContext {
     this.acc = 0;
     // back into the game at the course start, like re-joining a team on a surf server
     s.timer.restart(group);
+  }
+
+  // ================================================================ KSF world records
+
+  /** Whether the session's map may be on KSF (never the built-in maps). */
+  private ksfEligible(s: Session): boolean {
+    return isKsfEligibleMap(s.map.name, s.map.source === 'builtin' || s.request?.kind === 'builtin');
+  }
+
+  /** The tickrate the session's runs (and so its KSF board) use. */
+  private sessionTickrate(s: Session): number {
+    const t = s.timer.tickrate;
+    if (typeof t === 'function') return t.call(s.timer);
+    const ti = tickInterval();
+    return ti > 0 ? 1 / ti : 100;
+  }
+
+  /** The KSF WR of a session's map for its tickrate (cached by the service); remembered on the session. */
+  private async ksfFor(s: Session): Promise<KsfWr> {
+    if (!this.ksfEligible(s)) return { status: 'unavailable', map: s.map.name, message: `${s.map.name} is not a KSF map (built-in maps have no world records).` };
+    const tick = this.sessionTickrate(s);
+    const res = await this.ksf.worldRecord(s.map.name, tick);
+    if (res.status === 'ok' || res.status === 'none') this.setSessionKsf(s, res, tick);
+    return res;
+  }
+
+  private setSessionKsf(s: Session, res: KsfWr, tick: number): void {
+    s.ksfWr = res;
+    s.ksfTickrate = tick;
+    s.ksfHud = res.status === 'ok' ? { time: res.wr.time, name: res.wr.name, board: boardLabel(res.board) } : null;
+    // a different WR (another board after a tickrate change): its replay is another one
+    const file = res.status === 'ok' ? res.wr.file : null;
+    if (s.ksfReplay && s.ksfReplay.file !== file) {
+      s.ksfReplay = null;
+      s.replay.setWrReplay(null);
+    }
+  }
+
+  /** CommandContext.ksfWorldRecord: the KSF WR of the current map. */
+  async ksfWorldRecord(): Promise<KsfWr> {
+    const s = this._session;
+    if (!s) return { status: 'error', map: '', message: 'No map loaded.' };
+    return this.ksfFor(s);
+  }
+
+  /** On map load: the WR line in chat (when the local server reaches KSF), and the WR ghost when it is on. */
+  private announceKsf(s: Session): void {
+    if (!this.ksfEligible(s)) return;
+    void this.ksfFor(s).then((res) => {
+      if (this._session !== s || res.status !== 'ok') return;
+      s.chat([
+        ...CHAT_PREFIX,
+        ...ksfWrSegments(res),
+        { text: ' - type ', color: 'default' },
+        { text: '!wrreplay', color: 'gold' },
+        { text: ' to watch', color: 'default' },
+      ]);
+      if (console_.getCvar('surf_ghost_wr')?.bool) void this.loadKsfWrReplay({ spectate: false }).catch(() => undefined);
+    });
+  }
+
+  /** A tickrate change may mean the other KSF board: refresh the WR (and the WR ghost's replay). */
+  private refreshKsf(s: Session): void {
+    if (!s.ksfWr || !this.ksfEligible(s)) return;
+    const tick = this.sessionTickrate(s);
+    if (Math.abs(tick - s.ksfTickrate) < 1e-6) return;
+    void this.ksfFor(s).then((res) => {
+      if (this._session === s && res.status === 'ok' && console_.getCvar('surf_ghost_wr')?.bool) void this.loadKsfWrReplay({ spectate: false }).catch(() => undefined);
+    });
+  }
+
+  /**
+   * CommandContext.loadKsfWrReplay: downloads (once) the KSF WR replay of the current map, installs it as the WR
+   * replay (ghost) and with `spectate` watches it. A WR without a replay file falls back to the fastest record
+   * that has one.
+   */
+  async loadKsfWrReplay(opts: { spectate: boolean; onDownload?: () => void }): Promise<KsfReplayResult> {
+    const s = this._session;
+    if (!s) return { ok: false, message: 'No map loaded.' };
+    const res = await this.ksfFor(s);
+    if (res.status === 'unavailable') return { ok: false, message: res.message };
+    if (res.status === 'error') return { ok: false, message: `Couldn't get the KSF records (${res.message}).` };
+    if (res.status === 'none') return { ok: false, message: `No KSF records on ${s.map.name} yet.` };
+    const rec = res.wr.file ? res.wr : res.records.find((r) => r.file);
+    if (!rec) return { ok: false, message: `The KSF records of ${s.map.name} have no replays.` };
+    const data = await this.ksfReplayData(s, res.board, rec, opts.onDownload);
+    if (this._session !== s) return { ok: false, message: 'The map changed.' };
+    const notWr = rec !== res.wr;
+    if (opts.spectate) {
+      const label = `${notWr ? `KSF #${rec.rank}` : 'KSF WR'} · ${rec.name} (${boardLabel(res.board)})`;
+      if (!this.startWrSpectate(data, label)) return { ok: false, message: "The KSF replay couldn't be played." };
+    }
+    return { ok: true, record: rec, board: res.board, fallback: res.fallback, notWr };
+  }
+
+  /** The replay of a KSF record as ReplayData, installed as the session's WR replay (one download per file). */
+  private ksfReplayData(s: Session, board: KsfBoard, rec: KsfRecord, onDownload?: () => void): Promise<ReplayData> {
+    const file = rec.file!;
+    if (s.ksfReplay && s.ksfReplay.file === file) return Promise.resolve(s.ksfReplay.data);
+    if (s.ksfReplayPending && s.ksfReplayPending.file === file) return s.ksfReplayPending.promise;
+    if (!this.ksf.hasReplay(rec)) onDownload?.();
+    const promise = this.ksf.replay(rec, board).then((parsed) => {
+      const data = replayFromKsf(parsed, s.map.name, { time: rec.time, date: rec.date * 1000 });
+      // (a tickrate change meanwhile may have picked another record: only the current WR's replay is installed)
+      const cur = s.ksfWr?.status === 'ok' ? s.ksfWr.records : null;
+      if (!s.ksfReplay && cur?.includes(rec)) {
+        s.ksfReplay = { file, record: rec, data };
+        s.replay.setWrReplay(data);
+      }
+      return data;
+    });
+    s.ksfReplayPending = { file, promise };
+    const clear = () => {
+      if (s.ksfReplayPending?.promise === promise) s.ksfReplayPending = null;
+    };
+    promise.then(clear, clear);
+    return promise;
+  }
+
+  /** GameApi.watchKsfWr: the map browser's "Watch WR" (the !wrreplay command, without toggling it off). */
+  watchKsfWr(): void {
+    if (!this._session || this.spec?.kind === 'wr') return;
+    if (this.spec) this.stopSpectate();
+    runChatCommand(this, 'wrreplay', []);
+  }
+
+  /** Spectates a KSF world record replay with the replay camera and HUD (leave like the PB replay). */
+  startWrSpectate(data: ReplayData, label: string): boolean {
+    const s = this._session;
+    if (!s) return false;
+    if (!s.replay.spectateData(data)) return false;
+    this.spec = { kind: 'wr', label, group: 0, start: this.now, finishedAt: null, lastYaw: NaN };
+    this.input.buttons.jump.clearImpulses();
+    this.ghostShown = true;
+    return true;
+  }
+
+  /** The end of the finish line: the run vs the KSF WR of the main course (" | +1.234 vs KSF WR"). */
+  ksfFinishSegments(s: Session, group: number, time: number): ChatSegment[] {
+    const r = s.ksfWr;
+    if (group !== 0 || !r || r.status !== 'ok' || !(time > 0)) return [];
+    const d = time - r.wr.time;
+    return [
+      { text: ' | ', color: 'grey' },
+      { text: formatSplitDelta(d), color: d < 0 ? 'lightgreen' : d > 0 ? 'lightred' : 'grey' },
+      { text: r.fallback ? ` vs KSF WR (${boardLabel(r.board)})` : ' vs KSF WR', color: 'grey' },
+    ];
   }
 
   // ================================================================ cvars
@@ -1273,6 +1445,13 @@ export class Game implements GameApi, CommandContext {
       const fresh = this.announcedCvars.get(c.name) !== c.value;
       this.announcedCvars.set(c.name, c.value);
       if (fresh && this._session) this._session.chat([{ text: `Server cvar '${c.name}' changed to ${c.value}`, color: 'default' }]);
+    }
+    if (this._session) {
+      if (c.name === 'tickrate') this.refreshKsf(this._session);
+      else if (c.name === 'surf_ghost_wr' && c.bool && this._session.ksfWr?.status === 'ok') {
+        // after the command that set it (!wrghost reports the download itself)
+        queueMicrotask(() => void this.loadKsfWrReplay({ spectate: false }).catch(() => undefined));
+      }
     }
     if (serverCvar && this._session) {
       // a server/physics change during a run: the run can't be ranked any more
@@ -1570,7 +1749,7 @@ export class Game implements GameApi, CommandContext {
 
   // ================================================================ HUD + render
 
-  private spectateSample(s: Session): { origin: Vec3; angles: QAngle; speed: number; time: number; buttons: number } | null {
+  private spectateSample(s: Session): { origin: Vec3; angles: QAngle; speed: number; time: number; finished: boolean; buttons: number } | null {
     const sp = this.spec;
     if (!sp) return null;
     let t = this.now - sp.start;
@@ -1585,24 +1764,30 @@ export class Game implements GameApi, CommandContext {
         v = s.replay.spectateView(0) ?? v;
       }
     }
-    // velocity / buttons from the replay frames around t
+    // velocity / buttons from the replay frames around t (stored velocities when the replay has them: KSF)
     const data = s.replay.spectatedReplay();
     let buttons = 0;
     if (data) {
-      const dtr = 1 / (data.tickrate > 0 ? data.tickrate : 100);
-      const a = sampleReplay(data, Math.max(0, v.time - dtr));
       const b = sampleReplay(data, v.time);
-      if (a && b && b.time > a.time) {
-        const k = 1 / (b.time - a.time);
-        this.specVel.x = (b.origin.x - a.origin.x) * k;
-        this.specVel.y = (b.origin.y - a.origin.y) * k;
-        this.specVel.z = (b.origin.z - a.origin.z) * k;
+      if (b?.velocity) {
+        this.specVel.x = b.velocity.x;
+        this.specVel.y = b.velocity.y;
+        this.specVel.z = b.velocity.z;
       } else {
-        this.specVel.x = this.specVel.y = this.specVel.z = 0;
+        const dtr = 1 / (data.tickrate > 0 ? data.tickrate : 100);
+        const a = sampleReplay(data, v.time - dtr);
+        if (a && b && b.time > a.time) {
+          const k = 1 / (b.time - a.time);
+          this.specVel.x = (b.origin.x - a.origin.x) * k;
+          this.specVel.y = (b.origin.y - a.origin.y) * k;
+          this.specVel.z = (b.origin.z - a.origin.z) * k;
+        } else {
+          this.specVel.x = this.specVel.y = this.specVel.z = 0;
+        }
       }
       if (b) buttons = b.buttons;
     }
-    return { origin: v.origin, angles: v.angles, speed: v.speed, time: v.time, buttons };
+    return { origin: v.origin, angles: v.angles, speed: v.speed, time: v.time, finished: v.finished, buttons };
   }
 
   private refreshHud(): HudState {
@@ -1634,10 +1819,14 @@ export class Game implements GameApi, CommandContext {
     const timerHud: TimerHud = s.timer.getHud();
     const spec = this.spec ? this.spectateSample(s) : null;
     if (spec) {
+      // the replay's run clock: a KSF replay starts with its prestrafe in the start zone and ends on the record's
+      // official time (finer than its ticks)
+      const wr = this.spec!.kind === 'wr';
+      const official = wr && spec.finished ? s.replay.spectatedReplay()?.time : undefined;
       const specTimer: TimerHud = {
         ...timerHud,
-        state: 'running',
-        time: spec.time,
+        state: spec.time < 0 ? 'startzone' : 'running',
+        time: official !== undefined && official > 0 ? official : Math.max(0, spec.time),
         stage: 0,
         stageTime: 0,
         checkpoint: 0,
@@ -1662,9 +1851,10 @@ export class Game implements GameApi, CommandContext {
         turn,
         practice: false,
         noclip: false,
-        spectating: this.spec!.group > 0 ? `PB Replay (Bonus ${this.spec!.group})` : 'PB Replay',
+        spectating: this.spec!.label,
         speed: spec.speed,
         now: this.now,
+        ksfWr: s.ksfHud,
       });
       return hud;
     }
@@ -1697,6 +1887,7 @@ export class Game implements GameApi, CommandContext {
       noclip: ps.moveType === MOVETYPE_NOCLIP || ps.moveType === MOVETYPE_OBSERVER,
       spectating: null,
       now: this.now,
+      ksfWr: s.ksfHud,
     });
     return hud;
   }
@@ -1747,16 +1938,27 @@ export class Game implements GameApi, CommandContext {
   }
 
   private updateGhost(s: Session, hud: HudState): void {
-    const want = (console_.getCvar('surf_ghost')?.num ?? 1) !== 0 && (console_.getCvar('surf_hide')?.num ?? 0) === 0 && !this.spec;
-    let ghost: GhostState | null = null;
-    // the ghost runs with the run clock: hidden in the start zone (it would stand in your face while you
+    const shown = (console_.getCvar('surf_hide')?.num ?? 0) === 0 && !this.spec;
+    const list = this.ghostList;
+    list.length = 0;
+    // the ghosts run with the run clock: hidden in the start zone (they would stand in your face while you
     // prestrafe), from the tick that leaves it at the same run time as you
-    if (want && hud.timer.state === 'running') {
+    if (shown && hud.timer.state === 'running') {
       // the rendered player is between the previous and the current tick: (runTicks - 1 + alpha) ticks into the run
-      ghost = s.replay.ghostAt(Math.max(0, hud.timer.time - (1 - this.alpha) * tickInterval()));
+      const t = Math.max(0, hud.timer.time - (1 - this.alpha) * tickInterval());
+      if ((console_.getCvar('surf_ghost')?.num ?? 1) !== 0) {
+        const pb = s.replay.ghostAt(t);
+        if (pb) list.push(pb);
+      }
+      // the KSF world record races the main course
+      if ((console_.getCvar('surf_ghost_wr')?.num ?? 0) !== 0 && s.group === 0) {
+        const wr = s.replay.wrGhostAt(t);
+        if (wr) list.push(wr);
+      }
     }
-    if (ghost) {
-      this.renderer.setGhosts([ghost]);
+    if (list.length) {
+      // (a fresh array: the renderer may keep it)
+      this.renderer.setGhosts(list.slice());
       this.ghostShown = true;
     } else if (this.ghostShown) {
       this.renderer.setGhosts([]);

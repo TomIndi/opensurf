@@ -24,6 +24,27 @@ export function formatTime(seconds: number): string {
   return hrs > 0 ? `${hrs}:${mm}:${ss}.${cc}` : `${mm}:${ss}.${cc}`;
 }
 
+/** Millisecond clock (KSF records): "00:53.364", "1:02:03.456" (truncated). */
+export function formatTimeMs(seconds: number): string {
+  const ms = Number.isFinite(seconds) && seconds > 0 ? Math.floor(seconds * 1000 + 1e-6) : 0;
+  const m3 = ms % 1000;
+  const totalSec = (ms - m3) / 1000;
+  const s = totalSec % 60;
+  const totalMin = (totalSec - s) / 60;
+  const m = totalMin % 60;
+  const hrs = (totalMin - m) / 60;
+  const mmm = m3 < 10 ? `00${m3}` : m3 < 100 ? `0${m3}` : `${m3}`;
+  const ss = s < 10 ? `0${s}` : `${s}`;
+  const mm = m < 10 ? `0${m}` : `${m}`;
+  return hrs > 0 ? `${hrs}:${mm}:${ss}.${mmm}` : `${mm}:${ss}.${mmm}`;
+}
+
+/** Compact millisecond time (map browser): "53.364" -> "0:53.364", "1:31.934", "1:02:03.456". */
+export function formatTimeMsShort(seconds: number): string {
+  const t = formatTimeMs(seconds);
+  return /^0\d:/.test(t) ? t.slice(1) : t;
+}
+
 /** Compact time for tables: "47.12", "1:23.45", "1:02:03.45". */
 export function formatTimeShort(seconds: number): string {
   const cs = centis(seconds);

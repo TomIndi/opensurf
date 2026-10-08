@@ -43,6 +43,7 @@ Run: `npm run dev`.
 | UI + audio | `src/ui/**`, `src/audio/**`, `src/styles/**`, `index.html` | ui |
 | built-in maps | `src/map/builtin/**`, `tests/builtin.test.ts` | builtin-maps |
 | map catalog/downloads | `src/maps/**`, `scripts/build-catalog.mjs`, `public/maps/**` | coordinator |
+| KSF world records | `src/maps/{ksf,ksfproxy,ksfreplay}.ts`, `tests/ksf*.test.ts` | coordinator |
 | bootstrap | `src/main.ts` | integration |
 
 ## Contracts (exact exported signatures)
@@ -295,7 +296,7 @@ Video: `mat_fullbright 0`, `r_drawzones 1` (0 off, 1 floor outline, 2 full box �
 `zoneStyle`), `r_drawtriggers 0`, `r_drawclips 0`, `mat_wireframe 0`,
 `r_brightness 1`, `r_renderscale 1`, `r_anisotropy 8`, `fog_enable 1`, `r_3dsky 1`.
 
-Surf/HUD: `surf_hud_speed 1`, `surf_hud_timer 1`, `surf_showkeys 1`, `surf_ghost 1`, `surf_ghost_trail 1`,
+Surf/HUD: `surf_hud_speed 1`, `surf_hud_timer 1`, `surf_showkeys 1`, `surf_ghost 1`, `surf_ghost_trail 1`, `surf_ghost_wr 0`,
 `surf_prespeed 350`, `surf_speedometer_color 1`, `surf_chat_sounds 1`.
 
 Autoexec compatibility (`COMPAT_CVAR_DEFS`, hidden, archived where CS:GO archives them, no effect): `viewmodel_*`,
@@ -316,6 +317,8 @@ Chat (SourceMod/SurfTimer style, also accept `/cmd` silently): `!r` `!restart`, 
 `!back`/`!stuck` (restart current stage), `!saveloc`/`!cp`, `!tele`/`!tp`, `!prac`/`!practice`, `!noclip`,
 `!pb`, `!top`, `!rank`/`!mrank`/`!prank` (Rank 1/1, PB, completions), `!stages`/`!wrcp`/`!cpr`/`!srcp`/`!stagetop`
 (stage records), `!mi`/`!tier`, `!replay`, `!ghost`, `!hide`, `!showkeys`, `!speed`, `!zones` (zone editor),
+`!wr` (KSF world record + top 5; `!wr <n>` and maps without KSF data: the local top like `!top`), `!wrreplay` /
+`!ksfreplay` / `!replay wr` (watch the KSF WR replay), `!wrghost` (race it),
 `!end` (practice), `!help`/`!commands`, `!fov <n>`, `!sens <n>`. Unknown commands get a "Did you mean" only for a
 near miss. Reaching stage N+1 prints the completed stage's own time vs its stage best ("Player finished Stage 2 in
 00:12.345 (PB -0.123)", also the HUD split flash) before the run split; the end zone completes the last stage.
@@ -326,6 +329,37 @@ Default binds (CS:GO + surf conventions): `w +forward`, `s +back`, `a +moveleft`
 `mouse5 "say !tele"`, `escape` menu, `f2 "say !prac"`.
 Key names follow Source: `a`..`z`, `0`..`9`, `space`, `ctrl`, `shift`, `alt`, `tab`, `enter`, `escape`,
 `backspace`, `uparrow`…, `f1`..`f12`, `mouse1`..`mouse5`, `mwheelup`, `mwheeldown`, `kp_*`, `semicolon`, `` ` ``.
+
+## KSF world records (`src/maps/ksf.ts`, `ksfproxy.ts`, `ksfreplay.ts`)
+
+ksf.surf publishes every map's leaderboards and a replay file of each record. Its API sends no CORS headers, so the
+page goes through the dev / preview server (vite.config.ts `ksfProxy`, header `x-surf-ksf-proxy: 1`):
+`/__ksf/records/<map>?game=<66t|100t>` → `https://ksf.surf/api/maps/<map>/records/zone/0/0?game=<css|css100t>&mode=0`
+(main course, normal style; ksf.surf's own `game` values are `css` = 66 tick and `css100t` = 100 tick, an unknown value
+silently answers with the 66 tick board) and `/__ksf/replay/<file>?game=...` → `https://ksf.surf/api/replays/<file>`.
+`parseKsfProxyRequest` validates map (`/^[a-z0-9][a-z0-9_.-]{0,63}$/i`, no `..`), file (`/^replay_[a-z0-9_]+\.rec$/i`)
+and board; only URLs built from them are fetched (10 / 15 s timeouts, size caps). Without the proxy (static hosting)
+`KsfService` reports `unavailable` once per session: no WR anywhere, commands say "KSF world records need the local
+server (npm run dev / npm run preview)". Record lists are cached per map + board, parsed replays per file (memory).
+Built-in maps are never looked up; catalog maps and other `surf_*` maps are.
+
+Board: tickrate 100 → `100t`, anything else → `66t`; a map without records there falls back to the other board.
+
+Replay file (little endian): int32 @8 frame count N, frames = the last N × 40 bytes (int32 buttons, float32 origin
+xyz (feet), angles pitch yaw roll, velocity xyz); int32 @12 zone block count (one more than there are); zone event i =
+int32 frame, type, index at 540 + 524 i — type 3 left a start zone (index 1 = run start; staged maps: each stage),
+type 1 checkpoint, type 2 reached stage n (staged) / the end (index 99). 100 tick files may lack the run-start event:
+int32 @16 then holds the start frame; the leaderboard time cross-checks it. The tick interval comes from the board and
+is verified from the motion (distance per frame / stored velocity). Frames after the end (and two junk teleport
+frames) are dropped. Coordinates are the map's own: the bot runs the real route on our BSP.
+
+In game: `replayFromKsf` turns it into a `ReplayData` (its own frame rate, `startFrame` = prestrafe, stored
+`velocities`, ducked = `IN_DUCK`). `Game.loadKsfWrReplay` installs it as the session's WR replay; `!wrreplay` spectates
+it with the replay camera/HUD (prestrafe shown as "Start Zone", clock from the run-start event, speed from the stored
+velocity, keys from the stored buttons, official time at the end; jump / `!r` leaves), `surf_ghost_wr` races it as a
+gold "KSF WR" ghost on the main course. The WR shows in the HUD side panel, the pause menu, a chat line on map load,
+the finish line (" | +1.234 vs KSF WR") and the map browser's details pane (KSF WR line, Watch WR, a "WR videos" link to
+`https://www.youtube.com/@ksfrecords/search?query=<map>`, credit). Nothing from KSF is stored in the repository.
 
 ## Collision notes
 
@@ -346,7 +380,9 @@ URL parameters (parsed by `game/debugapi.ts`):
 | `?bsp=<url>` | download and play a `.bsp` / `.bsp.bz2` / `.rar` / `.zip` from a URL (dev: `/__maps/<name>.bsp`) |
 | `?autotest=1` | automated sessions: no pointer lock needed (mouse buttons/wheel work without it), never pause on focus or pointer-lock loss, no "click to capture" hint, a hidden tab or a slow frame never turns a run into practice |
 
-`vite.config.ts` serves `$SURF_TEST_MAPS` / `$SURF_TEST_MAPS_LARGE` at `/__maps/<file>` in dev and preview.
+`vite.config.ts` serves `$SURF_TEST_MAPS` / `$SURF_TEST_MAPS_LARGE` at `/__maps/<file>` in dev and preview, plus the
+Drive (`/__drive/<id>`) and KSF (`/__ksf/...`) proxies. `$SURF_TEST_KSF_REPLAY` (a downloaded KSF `.rec`, e.g. the
+surf_utopia_njv 66 tick WR) enables the real-file parser test in `tests/ksf.test.ts`.
 
 `window.__surf` (`SurfDebugApi`, installed by `Game.start()`): `state()` (plain snapshot: game state, map, origin,
 velocity, speed, ground, timer HUD, tick, practice), `loadBuiltin(id)`, `loadUrl(url)`, `loadMap(name)` (resolve once
@@ -384,6 +420,7 @@ running on the tree (or the browser tests in `npm test`, which do the same) can'
 
 ```
 Drive (.rar) ─► dev/preview server /__drive/<id> (vite.config.ts) ─► maps/downloader (unrar wasm, IndexedDB cache) ─► bsp/loadmap ─► LoadedMap ─► game ─► renderer
+ksf.surf (records, .rec) ─► dev/preview server /__ksf/... ─► maps/ksf (+ksfreplay) ─► game (WR HUD/chat, replay bot, ghost) / ui map browser
                                                                    ▲   ▲                               ▲
                                    maps/zones (SurfTimer presets) ─┘   │           built-in maps ──────┘
       player's CS:S / CS:GO VPKs ─► maps/gamecontent (stock textures) ─┘

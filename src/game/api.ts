@@ -78,6 +78,16 @@ export interface KeysHud {
   turn: number;
 }
 
+/** The KSF world record of the map, for the HUD side panel and the pause menu. */
+export interface KsfWrHud {
+  /** Seconds. */
+  time: number;
+  /** Record holder. */
+  name: string;
+  /** Leaderboard: "66 tick" / "100 tick". */
+  board: string;
+}
+
 export interface HudState {
   /** False while in menus or with cl_drawhud 0. */
   visible: boolean;
@@ -102,6 +112,8 @@ export interface HudState {
   spectating: string | null;
   /** Elapsed real time, for HUD animations. */
   now: number;
+  /** Optional: the KSF world record of the map's main course (null / absent: none known, e.g. no local server). */
+  ksfWr?: KsfWrHud | null;
 }
 
 export interface ScoreboardRow {
@@ -172,6 +184,11 @@ export interface GameApi {
    * (or m_rawinput is 0).
    */
   readonly rawInputActive?: boolean | null;
+  /**
+   * Optional: watch the KSF world record replay of the current map (like the `!wrreplay` chat command, whose
+   * replies go to the chat; a replay already being watched is switched to the WR).
+   */
+  watchKsfWr?(): void;
 }
 
 /** What the game can ask the UI to do. Implemented by ui/ui.ts. */

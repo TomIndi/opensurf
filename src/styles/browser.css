@@ -656,6 +656,40 @@
   color: #ffb4b4;
 }
 
+.surf-ui .details-info tr.hidden {
+  display: none;
+}
+
+.surf-ui .details-info .ksf-time {
+  color: #ffc56b;
+}
+
+.surf-ui .details-info .ksf-holder {
+  color: #fff;
+  word-break: break-word;
+}
+
+.surf-ui .details-ksf {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.surf-ui .details-ksf .ksf-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.surf-ui .details-ksf .ksf-credit {
+  font-size: 0.74rem;
+  color: var(--text-3);
+}
+
+.surf-ui .details-ksf .ksf-credit a {
+  color: var(--text-2);
+}
+
 /* ------------------------------------------------------------ local */
 
 .surf-ui .pane-local {

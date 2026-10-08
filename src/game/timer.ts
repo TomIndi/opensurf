@@ -160,6 +160,11 @@ export class SurfTimer implements ISurfTimer {
   onRunFinish: ((ev: RunFinishEvent) => void) | null = null;
   /** Called when a run in progress is abandoned (restart, re-entering the start, stop zone, practice). */
   onRunCancel: (() => void) | null = null;
+  /**
+   * Optional: extra segments for the end of the finish line (the game adds the comparison with the KSF world
+   * record: " | +1.234 vs KSF WR"). `ranked` false for practice / custom physics finishes.
+   */
+  finishExtras: ((group: number, time: number, ranked: boolean) => ChatSegment[]) | null = null;
 
   private zones: ZoneRt[] = [];
   private zoneDefs: ZoneDef[] = [];
@@ -883,6 +888,7 @@ export class SurfTimer implements ISurfTimer {
         { text: ' in ', color: 'default' },
         { text: formatRunTime(time), color: 'lime' },
         { text: practice ? ' (practice — not saved)' : ' (custom physics — not saved)', color: 'grey' },
+        ...this.extraFinishSegments(group, time, false),
       ]);
       this.play('finish');
       this.onRunFinish?.({ group, time, ranked: false, isPb: false, rank: 0, total: 0, record: null });
@@ -920,6 +926,7 @@ export class SurfTimer implements ISurfTimer {
     // SurfTimer's rank is among the players who finished the map: on a local server that is you alone (your
     // own runs are a top list, not a ranking: !top, !pb)
     segs.push({ text: ' | Rank ', color: 'default' }, { text: '1/1', color: 'gold' });
+    segs.push(...this.extraFinishSegments(group, time, true));
     this.chat(segs);
     if (res.isPb) {
       this.chat([{ text: 'NEW PERSONAL BEST!', color: 'gold' }]);
@@ -930,6 +937,16 @@ export class SurfTimer implements ISurfTimer {
       void this.replay.endRecording(res.isPb, time);
     }
     this.onRunFinish?.({ group, time, ranked: true, isPb: res.isPb, rank: res.rank, total: res.total, record });
+  }
+
+  private extraFinishSegments(group: number, time: number, ranked: boolean): ChatSegment[] {
+    if (!this.finishExtras) return [];
+    try {
+      return this.finishExtras(group, time, ranked);
+    } catch (e) {
+      console.error(e);
+      return [];
+    }
   }
 
   private deltaSegments(delta: number | null): ChatSegment[] {

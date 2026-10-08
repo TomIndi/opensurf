@@ -9,10 +9,16 @@
 // a 64-tick run). Replays saved before the tick was part of the key ("map|group") are still found when their
 // recorded tickrate matches. Everything works without IndexedDB (node tests, private windows): replays then
 // live for the session only.
+//
+// KSF world record replays (maps/ksf.ts) use the same representation: replayFromKsf() converts a parsed KSF file
+// (its own tick interval, so no resampling) with the start-zone prestrafe kept before run time 0 (`startFrame`) and
+// the stored velocities (`velocities`, for the spectate speedometer). The WR replay is kept apart from the PBs
+// (setWrReplay): it can be spectated (spectateData) and raced as a second ghost (wrGhostAt).
 import { QAngle, angleDiff } from '../core/angles';
 import { console_ } from '../core/cvars';
 import { Vec3 } from '../core/vec3';
-import { VIEW_OFFSET_DUCK, VIEW_OFFSET_STAND } from '../physics/playertypes';
+import type { ParsedKsfReplay } from '../maps/ksfreplay';
+import { IN_DUCK, VIEW_OFFSET_DUCK, VIEW_OFFSET_STAND } from '../physics/playertypes';
 import { GhostState } from './api';
 import { IReplaySystem } from './contracts';
 import { tickLabel } from './records';
@@ -21,6 +27,9 @@ export const FRAME_STRIDE = 6;
 export const DUCKED_FLAG = 1 << 20;
 const BUTTON_MASK = 0x3ffff;
 const GHOST_COLOR: [number, number, number] = [0.25, 0.95, 1.0];
+/** The KSF world record ghost: gold, apart from the cyan PB ghost. */
+export const WR_GHOST_COLOR: [number, number, number] = [1.0, 0.72, 0.18];
+export const WR_GHOST_NAME = 'KSF WR';
 const DB_NAME = 'surf';
 const STORE = 'replays';
 const INITIAL_FRAMES = 4096;
@@ -36,6 +45,13 @@ export interface ReplayData {
   frames: Float32Array;
   /** Date.now() when recorded. */
   date: number;
+  /**
+   * Optional: frames before the run started (the prestrafe in the start zone); frame `startFrame` is run time 0.
+   * Absent / 0 for our own recordings (they start with the run).
+   */
+  startFrame?: number;
+  /** Optional: velocity x, y, z per frame (u/s), e.g. stored by KSF replays; the speed then comes from it. */
+  velocities?: Float32Array;
 }
 
 /** IndexedDB key of a PB replay: "surf_kitsune|0|100" (legacy keys without the tick: tickrate omitted). */
@@ -60,21 +76,34 @@ export interface ReplaySample {
   angles: QAngle;
   ducked: boolean;
   buttons: number;
-  /** Horizontal speed (u/s) from the frame positions. */
+  /** Horizontal speed (u/s): from the stored velocities when the replay has them, else the frame positions. */
   speed: number;
+  /** The stored velocity at the sample (null when the replay doesn't store velocities). */
+  velocity: Vec3 | null;
   /** Clamped sample time in seconds. */
   time: number;
   /** t was at or past the last frame. */
   finished: boolean;
 }
 
-/** Interpolated replay state at `t` seconds (clamped to the replay). Null for an empty replay. */
+/** Frame of run time 0 (after the prestrafe frames of a replay that has them), clamped to the replay. */
+export function replayStartFrame(r: ReplayData): number {
+  const n = frameCount(r);
+  const s = r.startFrame !== undefined && r.startFrame > 0 ? Math.floor(r.startFrame) : 0;
+  return n > 0 ? Math.min(s, n - 1) : 0;
+}
+
+/**
+ * Interpolated replay state at run time `t` seconds (clamped to the replay; negative times reach into the prestrafe
+ * frames of a replay that has them). Null for an empty replay.
+ */
 export function sampleReplay(r: ReplayData, t: number): ReplaySample | null {
   const n = frameCount(r);
   if (n === 0) return null;
   const f = r.frames;
   const rate = r.tickrate > 0 ? r.tickrate : 100;
-  let pos = (Number.isFinite(t) ? t : 0) * rate;
+  const start = replayStartFrame(r);
+  let pos = start + (Number.isFinite(t) ? t : 0) * rate;
   if (pos < 0) pos = 0;
   const last = n - 1;
   const finished = pos >= last;
@@ -92,14 +121,26 @@ export function sampleReplay(r: ReplayData, t: number): ReplaySample | null {
   const pitch = f[oi + 3] + (f[oj + 3] - f[oi + 3]) * a;
   const yaw = f[oi + 4] + angleDiff(f[oj + 4], f[oi + 4]) * a;
   const flags = f[(a < 0.5 ? oi : oj) + 5] | 0;
-  // speed from the surrounding frame pair (the last frame reuses the previous pair)
-  const si = j > i ? i : Math.max(0, i - 1);
-  const sj = j > i ? j : i;
   let speed = 0;
-  if (sj > si) {
-    const dx = f[sj * FRAME_STRIDE] - f[si * FRAME_STRIDE];
-    const dy = f[sj * FRAME_STRIDE + 1] - f[si * FRAME_STRIDE + 1];
-    speed = Math.sqrt(dx * dx + dy * dy) * rate;
+  let velocity: Vec3 | null = null;
+  const vel = r.velocities;
+  if (vel && vel.length >= n * 3) {
+    // stored velocities (KSF replays)
+    velocity = {
+      x: vel[i * 3] + (vel[j * 3] - vel[i * 3]) * a,
+      y: vel[i * 3 + 1] + (vel[j * 3 + 1] - vel[i * 3 + 1]) * a,
+      z: vel[i * 3 + 2] + (vel[j * 3 + 2] - vel[i * 3 + 2]) * a,
+    };
+    speed = Math.sqrt(velocity.x * velocity.x + velocity.y * velocity.y);
+  } else {
+    // speed from the surrounding frame pair (the last frame reuses the previous pair)
+    const si = j > i ? i : Math.max(0, i - 1);
+    const sj = j > i ? j : i;
+    if (sj > si) {
+      const dx = f[sj * FRAME_STRIDE] - f[si * FRAME_STRIDE];
+      const dy = f[sj * FRAME_STRIDE + 1] - f[si * FRAME_STRIDE + 1];
+      speed = Math.sqrt(dx * dx + dy * dy) * rate;
+    }
   }
   return {
     origin,
@@ -107,8 +148,40 @@ export function sampleReplay(r: ReplayData, t: number): ReplaySample | null {
     ducked: (flags & DUCKED_FLAG) !== 0,
     buttons: flags & BUTTON_MASK,
     speed,
-    time: pos / rate,
+    velocity,
+    time: (pos - start) / rate,
     finished,
+  };
+}
+
+/**
+ * A KSF world record replay (maps/ksfreplay.ts) as a ReplayData: its own frame rate (no resampling), the prestrafe
+ * before `startFrame`, the stored velocities and buttons; the ducked state (not stored) from IN_DUCK. `time` is the
+ * official record time when given (sub-tick precise), else the frames' run time.
+ */
+export function replayFromKsf(p: ParsedKsfReplay, map: string, opts: { time?: number; date?: number } = {}): ReplayData {
+  const n = p.frameCount;
+  const frames = new Float32Array(n * FRAME_STRIDE);
+  for (let k = 0; k < n; k++) {
+    const o = k * FRAME_STRIDE;
+    frames[o] = p.origins[k * 3];
+    frames[o + 1] = p.origins[k * 3 + 1];
+    frames[o + 2] = p.origins[k * 3 + 2];
+    frames[o + 3] = p.angles[k * 3];
+    frames[o + 4] = p.angles[k * 3 + 1];
+    const b = p.buttons[k];
+    frames[o + 5] = (b & BUTTON_MASK) | (b & IN_DUCK ? DUCKED_FLAG : 0);
+  }
+  const time = opts.time !== undefined && opts.time > 0 ? opts.time : p.time;
+  return {
+    map: map.toLowerCase(),
+    group: 0,
+    time,
+    tickrate: 1 / p.tickInterval,
+    frames,
+    date: opts.date ?? 0,
+    startFrame: p.startFrame,
+    velocities: p.velocities.slice(0, n * 3),
   };
 }
 
@@ -257,6 +330,8 @@ export class ReplaySystem implements IReplaySystem {
   /** Course whose PB the ghost shows (set by beginRecording / loadPb). */
   private activeGroup = 0;
   private spec: ReplayData | null = null;
+  /** The KSF world record replay of this map (setWrReplay), ghosted by wrGhostAt and spectated by spectateData. */
+  private wr: ReplayData | null = null;
 
   constructor(mapName: string) {
     this.mapName = mapName.toLowerCase();
@@ -429,13 +504,26 @@ export class ReplaySystem implements IReplaySystem {
     return true;
   }
 
+  /** Spectates any replay (the KSF WR); null stops. False for an empty replay. */
+  spectateData(data: ReplayData | null): boolean {
+    if (!data) {
+      this.spec = null;
+      return true;
+    }
+    if (frameCount(data) === 0) return false;
+    this.spec = data;
+    return true;
+  }
+
   /**
-   * First-person playback while spectating. `origin` is the EYE position (feet + view offset, ducked-aware),
-   * ready for ViewState.origin; `time` is the replay clock (clamped), `speed` horizontal u/s.
+   * First-person playback while spectating. `t` is seconds since the playback started (a replay with prestrafe
+   * frames shows them first). `origin` is the EYE position (feet + view offset, ducked-aware), ready for
+   * ViewState.origin; `time` is the run clock (clamped; negative during the prestrafe), `speed` horizontal u/s.
    */
   spectateView(t: number): { origin: Vec3; angles: QAngle; speed: number; time: number; finished: boolean } | null {
     if (!this.spec) return null;
-    const s = sampleReplay(this.spec, t);
+    const rate = this.spec.tickrate > 0 ? this.spec.tickrate : 100;
+    const s = sampleReplay(this.spec, t - replayStartFrame(this.spec) / rate);
     if (!s) return null;
     s.origin.z += s.ducked ? VIEW_OFFSET_DUCK : VIEW_OFFSET_STAND;
     return { origin: s.origin, angles: s.angles, speed: s.speed, time: s.time, finished: s.finished };
@@ -444,5 +532,32 @@ export class ReplaySystem implements IReplaySystem {
   /** The replay being spectated (null when not spectating). */
   spectatedReplay(): ReplayData | null {
     return this.spec;
+  }
+
+  /** Installs (or with null, forgets) the KSF world record replay of this map (watching it carries on until left). */
+  setWrReplay(data: ReplayData | null): void {
+    this.wr = data && frameCount(data) > 0 ? data : null;
+  }
+
+  getWrReplay(): ReplayData | null {
+    return this.wr;
+  }
+
+  /** The KSF WR ghost at `runTime` seconds into your run (main course; null without a WR replay). */
+  wrGhostAt(runTime: number): GhostState | null {
+    const data = this.wr;
+    if (!data) return null;
+    const s = sampleReplay(data, runTime);
+    if (!s) return null;
+    return {
+      id: 'ksf:wr',
+      origin: s.origin,
+      angles: s.angles,
+      ducked: s.ducked,
+      color: [WR_GHOST_COLOR[0], WR_GHOST_COLOR[1], WR_GHOST_COLOR[2]],
+      name: WR_GHOST_NAME,
+      visible: true,
+      trail: cvarNum('surf_ghost_trail', 1) !== 0,
+    };
   }
 }

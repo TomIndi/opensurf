@@ -135,6 +135,7 @@ export const CVAR_DEFS: readonly CvarDef[] = [
   { name: 'surf_showkeys', def: '1', flags: A, min: 0, max: 1, help: 'Show pressed movement keys (!showkeys).' },
   { name: 'surf_ghost', def: '1', flags: A, min: 0, max: 1, help: 'Race the ghost of your personal best (!ghost).' },
   { name: 'surf_ghost_trail', def: '1', flags: A, min: 0, max: 1, help: 'Draw a trail behind the ghost.' },
+  { name: 'surf_ghost_wr', def: '0', flags: A, min: 0, max: 1, help: 'Race the ghost of the KSF world record on the main course (!wrghost).' },
   { name: 'surf_hide', def: '0', flags: A, min: 0, max: 1, help: 'Hide other players and replay bots (!hide).' },
   { name: 'surf_speedometer_color', def: '1', flags: A, min: 0, max: 1, help: 'Color the speedometer by acceleration.' },
   { name: 'surf_chat_sounds', def: '1', flags: A, min: 0, max: 1, help: 'Play a sound for chat messages.' },

@@ -3,8 +3,10 @@
 // (!r, !s, !b, !back, !stop, !saveloc, !tele, !prac, !noclip, !pb, !top, !wrb, !stages, !rank, !bonuses, !mi,
 // !replay, !ghost, !hide, !showkeys, !speed, !zones, !end, !help, !fov, !sens), with SurfTimer's aliases (!start =
 // !r, !teleport / !stuck = !back, !btop = !wrb, !wrcp / !cpr / !srcp / !stagetop = !stages, !mrank / !prank =
-// !rank). Chat commands are also console commands as sm_<name>, like SourceMod registers them. An unknown
-// command gets a "Did you mean" only for a near miss (one typo in short names, two in longer ones).
+// !rank). KSF world records (ksf.surf, through the local server: maps/ksf.ts): !wr (the WR and top 5; without KSF
+// data the local top like !top), !wrreplay / !ksfreplay / !replay wr (watch the WR replay), !wrghost (race it).
+// Chat commands are also console commands as sm_<name>, like SourceMod registers them. An unknown command gets a
+// "Did you mean" only for a near miss (one typo in short names, two in longer ones).
 //
 // `exec <name>` runs a stored cfg (game/cfgstore.ts; cfg_save / cfg_list / cfg_delete manage them), and common
 // CS:GO client commands without an effect here (snd_setmixer, slot1, buy ...) are silent no-ops so a pasted
@@ -37,6 +39,7 @@ import {
 import type { ChatColor, ChatSegment, GameState, SoundApi, TimerState, UiApi } from './api';
 import { addConfigProvider, loadSavedConfig, scheduleConfigSave } from './binds';
 import type { IEntitySystem, IReplaySystem, ISurfTimer, RunRecord } from './contracts';
+import { boardLabel, formatKsfTime, KSF_NEEDS_SERVER, type KsfBoard, type KsfRecord, type KsfWr } from '../maps/ksf';
 import { deleteCfg, execCfg, listCfgs, normalizeCfgName, readCfg, writeCfg } from './cfgstore';
 import { currentTickrate, getCompletions, getStageBest, tickLabel } from './records';
 import { formatRunTime } from './timer';
@@ -123,7 +126,19 @@ export interface CommandContext {
   killPlayer(reason: string): void;
   /** Map names for `map` completion and `maps` (built-in ids + catalog). */
   mapNames(): Promise<string[]>;
+  /** Optional: the KSF world record of the current map (cached after the first request; never rejects). */
+  ksfWorldRecord?(): Promise<KsfWr>;
+  /**
+   * Optional: downloads the KSF WR replay of the current map (`onDownload` is called when a download starts, i.e.
+   * it wasn't cached) and spectates it (`spectate` false: only loads it, for the WR ghost).
+   */
+  loadKsfWrReplay?(opts: { spectate: boolean; onDownload?: () => void }): Promise<KsfReplayResult>;
 }
+
+/** What loading the KSF WR replay gave. */
+export type KsfReplayResult =
+  | { ok: true; record: KsfRecord; board: KsfBoard; fallback: boolean; /** The WR had no replay: this is the best record with one. */ notWr: boolean }
+  | { ok: false; message: string };
 
 // ------------------------------------------------------------------------------------------ chat helpers
 
@@ -532,10 +547,160 @@ function setCvarFromChat(ctx: CommandContext, name: string, label: string, arg: 
   reply(ctx, seg(`${label} set to `), seg(fmt(c.num), 'lime'), seg('.'));
 }
 
+// ------------------------------------------------------------------------------------------ KSF world records
+
+function ksfWhere(s: CommandSession): string {
+  return s.map.name;
+}
+
+function chatLineOut(ctx: CommandContext, segs: ChatSegment[]): void {
+  ctx.ui.chat(segs);
+  chatToConsole(segs);
+}
+
+function ksfDate(unix: number): string {
+  if (!(unix > 0)) return '';
+  const d = new Date(unix * 1000);
+  return Number.isFinite(d.getTime()) ? d.toISOString().slice(0, 10) : '';
+}
+
+/** "KSF WR 00:53.364 by :( (66 tick)" segments (the map-load line and !wr). */
+export function ksfWrSegments(res: Extract<KsfWr, { status: 'ok' }>): ChatSegment[] {
+  return [seg('KSF WR ', 'lightblue'), seg(formatKsfTime(res.wr.time), 'lime'), seg(' by '), seg(res.wr.name, 'gold'), seg(` (${boardLabel(res.board)})`, 'grey')];
+}
+
+/** !wr: the KSF WR (holder, time, date, board), the top 5 and how to watch it; without KSF data the local top. */
+function showKsfWr(ctx: CommandContext, s: CommandSession): void {
+  const local = (why: string | null) => {
+    if (why) reply(ctx, seg(why, 'orange'));
+    showTop(ctx, s, 0);
+  };
+  if (!ctx.ksfWorldRecord) {
+    local(KSF_NEEDS_SERVER);
+    return;
+  }
+  void ctx.ksfWorldRecord().then(
+    (res) => {
+      if (ctx.session !== s) return;
+      if (res.status === 'unavailable') return local(res.message);
+      if (res.status === 'error') return local(`Couldn't get the KSF records (${res.message}).`);
+      if (res.status === 'none') return local(`No KSF records on ${ksfWhere(s)} yet.`);
+      const wr = res.wr;
+      const date = ksfDate(wr.date);
+      reply(
+        ctx,
+        seg('KSF WR on '),
+        seg(ksfWhere(s), 'gold'),
+        seg(` (${boardLabel(res.board)})`, 'grey'),
+        seg(': '),
+        seg(formatKsfTime(wr.time), 'lime'),
+        seg(' by '),
+        seg(wr.name, 'gold'),
+        seg(`${date ? ` on ${date}` : ''}${wr.country ? ` · ${wr.country}` : ''}`, 'grey'),
+        ...(res.fallback ? [seg(` (no ${boardLabel(res.preferred)} records)`, 'grey')] : []),
+      );
+      res.records.slice(0, 5).forEach((r, i) => {
+        const segs: ChatSegment[] = [seg(`#${i + 1} `, i === 0 ? 'gold' : 'default'), seg(formatKsfTime(r.time), i === 0 ? 'lime' : 'default')];
+        // (the gap between the times as shown: both truncated to the millisecond)
+        if (i > 0) segs.push(seg(` (+${((Math.floor(r.time * 1000 + 1e-6) - Math.floor(wr.time * 1000 + 1e-6)) / 1000).toFixed(3)})`, 'lightred'));
+        segs.push(seg(` ${r.name}`, 'default'));
+        const d = ksfDate(r.date);
+        segs.push(seg(`${r.country ? ` · ${r.country}` : ''}${d ? ` · ${d}` : ''}`, 'grey'));
+        chatLineOut(ctx, segs);
+      });
+      chatLineOut(ctx, [
+        seg('Type ', 'grey'),
+        seg('!wrreplay', 'gold'),
+        seg(' to watch the WR, ', 'grey'),
+        seg('!wrghost', 'gold'),
+        seg(' to race it, ', 'grey'),
+        seg('!top', 'gold'),
+        seg(' for your own times. World records from ksf.surf.', 'grey'),
+      ]);
+    },
+    (e: Error) => local(`Couldn't get the KSF records (${e?.message ?? e}).`),
+  );
+}
+
+/** !wrreplay / !ksfreplay / !replay wr: download the KSF WR replay and spectate it. */
+function watchKsfWr(ctx: CommandContext, s: CommandSession): void {
+  if (!ctx.loadKsfWrReplay) {
+    reply(ctx, seg(KSF_NEEDS_SERVER, 'lightred'));
+    return;
+  }
+  void ctx
+    .loadKsfWrReplay({ spectate: true, onDownload: () => reply(ctx, seg('Downloading the KSF WR replay of ', 'grey'), seg(ksfWhere(s), 'gold'), seg('…', 'grey')) })
+    .then(
+      (r) => {
+        if (ctx.session !== s) return;
+        if (!r.ok) {
+          reply(ctx, seg(r.message, 'lightred'));
+          return;
+        }
+        const rec = r.record;
+        reply(
+          ctx,
+          seg('Watching the '),
+          seg(r.notWr ? `KSF #${rec.rank}` : 'KSF WR', 'gold'),
+          seg(' by '),
+          seg(rec.name, 'gold'),
+          seg(` (${formatKsfTime(rec.time)}, ${boardLabel(r.board)})`, 'grey'),
+          seg('. Jump or '),
+          seg('!r', 'lightblue'),
+          seg(' to stop.'),
+        );
+        if (r.notWr) reply(ctx, seg("The world record itself has no replay on ksf.surf: this is the fastest run that has one.", 'grey'));
+      },
+      (e: Error) => reply(ctx, seg(`Couldn't load the KSF WR replay: ${e?.message ?? e}`, 'lightred')),
+    );
+}
+
+/** !wrghost: toggles surf_ghost_wr; turning it on downloads the WR replay (when there is a map). */
+function toggleWrGhost(ctx: CommandContext): void {
+  const c = console_.getCvar('surf_ghost_wr');
+  if (!c) return;
+  c.set(c.bool ? 0 : 1);
+  if (!c.bool) {
+    reply(ctx, seg('KSF WR ghost '), seg('disabled', 'lightred'), seg('.'));
+    return;
+  }
+  const s = ctx.session;
+  if (!s) {
+    reply(ctx, seg('KSF WR ghost '), seg('enabled', 'lime'), seg(': it races you on maps with a KSF world record.'));
+    return;
+  }
+  if (!ctx.loadKsfWrReplay) {
+    reply(ctx, seg('KSF WR ghost '), seg('enabled', 'lime'), seg('. '), seg(KSF_NEEDS_SERVER, 'orange'));
+    return;
+  }
+  void ctx
+    .loadKsfWrReplay({ spectate: false, onDownload: () => reply(ctx, seg('Downloading the KSF WR replay…', 'grey')) })
+    .then(
+      (r) => {
+        if (ctx.session !== s) return;
+        if (!r.ok) {
+          reply(ctx, seg('KSF WR ghost '), seg('enabled', 'lime'), seg('. '), seg(r.message, 'orange'));
+          return;
+        }
+        reply(
+          ctx,
+          seg('KSF WR ghost '),
+          seg('enabled', 'lime'),
+          seg(': '),
+          seg(r.record.name, 'gold'),
+          seg(` (${formatKsfTime(r.record.time)}, ${boardLabel(r.board)})`, 'grey'),
+          seg(' races you from the start zone.'),
+        );
+      },
+      (e: Error) => reply(ctx, seg(`Couldn't load the KSF WR replay: ${e?.message ?? e}`, 'lightred')),
+    );
+}
+
 const HELP_LINES: ReadonlyArray<ReadonlyArray<[string, string]>> = [
   [['!r', 'restart'], ['!s <n>', 'stage'], ['!b <n>', 'bonus'], ['!back', 'stage start'], ['!stop', 'stop timer'], ['!end', 'end zone']],
   [['!saveloc', 'save'], ['!tele [n]', 'saveloc teleport'], ['!prac', 'practice'], ['!noclip', 'noclip']],
   [['!pb', 'personal best'], ['!top', 'top times'], ['!rank', ''], ['!wrb <n>', 'bonus top'], ['!wrcp', 'stage times'], ['!bonuses', ''], ['!mi', 'map info'], ['!replay', 'watch PB']],
+  [['!wr', 'KSF world record'], ['!wrreplay', 'watch the KSF WR'], ['!wrghost', 'race the KSF WR']],
   [['!ghost', ''], ['!hide', ''], ['!showkeys', ''], ['!speed', ''], ['!fov <n>', ''], ['!sens <n>', ''], ['!zones', '']],
 ];
 
@@ -706,7 +871,7 @@ export const CHAT_COMMANDS: readonly ChatCommand[] = [
     },
   },
   {
-    names: ['top', 'wr', 'maptop', 'records'],
+    names: ['top', 'maptop', 'records'],
     usage: '!top',
     help: 'Best times on this course.',
     map: true,
@@ -755,12 +920,17 @@ export const CHAT_COMMANDS: readonly ChatCommand[] = [
   },
   {
     names: ['replay', 'spec', 'watch'],
-    usage: '!replay',
-    help: 'Watch your PB replay of this course (again to stop).',
+    usage: '!replay [wr]',
+    help: 'Watch your PB replay of this course (again to stop); !replay wr watches the KSF world record.',
     map: true,
     run: (ctx, args, s) => {
       if (ctx.spectating) {
         ctx.stopSpectate();
+        return;
+      }
+      const a0 = (args[0] ?? '').toLowerCase();
+      if (a0 === 'wr' || a0 === 'ksf') {
+        watchKsfWr(ctx, s!);
         return;
       }
       const g = args[0] !== undefined ? parseIntArg(args[0]) : null;
@@ -771,6 +941,41 @@ export const CHAT_COMMANDS: readonly ChatCommand[] = [
       }
       reply(ctx, seg('Watching your '), seg(group > 0 ? `Bonus ${group} PB replay` : 'PB replay', 'gold'), seg('. Jump or '), seg('!r', 'lightblue'), seg(' to stop.'));
     },
+  },
+  {
+    names: ['wr', 'ksfwr', 'worldrecord'],
+    usage: '!wr',
+    help: 'The KSF world record and top 5 of this map (ksf.surf); !wr <n> is the top of bonus n.',
+    map: true,
+    run: (ctx, args, s) => {
+      const g = args[0] !== undefined ? parseIntArg(args[0]) : null;
+      // KSF's bonus boards aren't read: a bonus number shows its local top like before
+      if (g !== null && g > 0) {
+        showTop(ctx, s!, g);
+        return;
+      }
+      showKsfWr(ctx, s!);
+    },
+  },
+  {
+    names: ['wrreplay', 'ksfreplay', 'wrbot'],
+    usage: '!wrreplay',
+    help: 'Watch the KSF world record replay of this map (again to stop).',
+    map: true,
+    run: (ctx, _a, s) => {
+      if (ctx.spectating) {
+        ctx.stopSpectate();
+        return;
+      }
+      watchKsfWr(ctx, s!);
+    },
+  },
+  {
+    names: ['wrghost', 'ksfghost'],
+    usage: '!wrghost',
+    help: 'Toggle the KSF world record ghost (races you on the main course).',
+    map: false,
+    run: (ctx) => toggleWrGhost(ctx),
   },
   {
     names: ['ghost'],

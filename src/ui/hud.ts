@@ -4,7 +4,7 @@ import { console_ } from '../core/cvars';
 import type { HudState } from '../game/api';
 import { cvarBool, cvarGetter, cvarNum, cvarStr } from './cvardefs';
 import { ClassSwitch, ClassToggle, h, TextSlot } from './dom';
-import { fmtPos, formatSpeed, formatTime } from './format';
+import { fmtPos, formatSpeed, formatTime, formatTimeMs } from './format';
 import { FpsMeter, FrameStats, HoldLatch, netGraphText, SpeedTrend, splitView, timerView } from './hudlogic';
 import { crosshairGeometry, drawCrosshair, readCrosshairParams } from './crosshair';
 
@@ -113,6 +113,9 @@ export class Hud {
   private readonly sideRows: Record<string, TextSlot> = {};
   private sideWrNone!: ClassToggle;
   private sidePbNone!: ClassToggle;
+  /** KSF world record rows (hidden without KSF data). */
+  private readonly sideKsf: HTMLElement[] = [];
+  private sideKsfShown = false;
   private readonly posEl: HTMLElement;
   private readonly posText: TextSlot;
   private readonly fpsEl: HTMLElement;
@@ -213,6 +216,8 @@ export class Hud {
     for (const [key, label] of [
       ['tier', 'Tier'],
       ['type', 'Type'],
+      ['ksfwr', 'KSF WR'],
+      ['ksfwho', ''],
       ['wr', 'Server record'],
       ['pb', 'Personal best'],
       ['stage', 'Stage time'],
@@ -225,6 +230,11 @@ export class Hud {
       const row = h(`div.hs-row.hs-${key}`, null, h('span', { text: label }), v);
       if (key === 'wr') this.sideWrNone = new ClassToggle(row, 'none');
       if (key === 'pb') this.sidePbNone = new ClassToggle(row, 'none');
+      if (key === 'ksfwr' || key === 'ksfwho') {
+        // shown once the game knows the map's KSF world record
+        row.classList.add('hidden');
+        this.sideKsf.push(row);
+      }
       this.sideEl.appendChild(row);
     }
 
@@ -397,6 +407,16 @@ export class Hud {
       this.sideRows.pb.set(t.pb ? formatTime(t.pb) : 'None');
       this.sideWrNone.set(!t.wr);
       this.sidePbNone.set(!t.pb);
+      // the KSF world record (ksf.surf, through the local server): time, then holder and board
+      const k = hud.ksfWr ?? null;
+      if (k) {
+        this.sideRows.ksfwr.set(formatTimeMs(k.time));
+        this.sideRows.ksfwho.set(`${k.name} · ${k.board}`);
+      }
+      if (this.sideKsfShown !== !!k) {
+        this.sideKsfShown = !!k;
+        for (const r of this.sideKsf) r.classList.toggle('hidden', !k);
+      }
       this.sideRows.stage.set(t.mapType === 'staged' && (t.state === 'running' || t.state === 'practice') ? formatTime(t.stageTime) : '—');
       this.sideRows.jumps.set(String(hud.jumps));
       this.sideRows.strafes.set(String(hud.strafes));

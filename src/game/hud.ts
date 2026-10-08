@@ -3,7 +3,7 @@
 import { QAngle, normalizeAngle } from '../core/angles';
 import { Vec3, v3 } from '../core/vec3';
 import { IN_BACK, IN_DUCK, IN_FORWARD, IN_JUMP, IN_MOVELEFT, IN_MOVERIGHT, IN_SPEED } from '../physics/playertypes';
-import { HudState, KeysHud, TimerHud } from './api';
+import { HudState, KeysHud, KsfWrHud, TimerHud } from './api';
 
 /** Timer HUD for "no timer" (no map, or a map without zones). */
 export function emptyTimerHud(): TimerHud {
@@ -47,6 +47,7 @@ export function createHudState(): HudState {
     noclip: false,
     spectating: null,
     now: 0,
+    ksfWr: null,
   };
 }
 
@@ -136,6 +137,8 @@ export interface HudSource {
   /** Overrides the speed derived from `velocity` (replay playback). */
   speed?: number;
   now: number;
+  /** The KSF world record of the map (kept by reference: the game replaces it, never mutates it). */
+  ksfWr?: KsfWrHud | null;
 }
 
 /** Refills `out` from `src` (keeps nested objects so the UI may hold references between frames). */
@@ -165,6 +168,7 @@ export function updateHudState(out: HudState, src: HudSource): HudState {
   out.noclip = src.noclip;
   out.spectating = src.spectating;
   out.now = src.now;
+  out.ksfWr = src.ksfWr ?? null;
   return out;
 }
 

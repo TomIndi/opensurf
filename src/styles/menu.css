@@ -555,6 +555,13 @@
   font-variant-numeric: tabular-nums;
 }
 
+.surf-ui .pause-run b.pause-ksfwr {
+  color: #ffc56b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .surf-ui .pause-nav {
   display: flex;
   flex-direction: column;

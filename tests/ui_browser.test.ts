@@ -297,7 +297,7 @@ export function buildBuiltinMap() { throw new Error('stub'); }`,
     });
     await page.click('.hero-actions .btn-primary').catch(() => undefined);
     await ev(() => (window as any).__harness.ui.mainMenu.setPage('play', false));
-    await page.click('.tab:has-text("Featured")');
+    await page.click('.tab:has-text("Classics")');
     await page.locator('.pane-featured .map-card', { hasText: 'kitsune' }).first().click();
     await page.waitForFunction(() => document.querySelector('.loading-screen.error') !== null, null, { timeout: 10000 });
     expect(await ev(() => document.querySelector('.loading-detail')!.textContent)).toContain('HTTP 429');

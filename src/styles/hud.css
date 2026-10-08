@@ -402,6 +402,33 @@
   color: #f2c14e;
 }
 
+.surf-ui .hs-ksfwr b {
+  color: #ffb84a;
+}
+
+.surf-ui .hs-ksfwho {
+  justify-content: flex-end;
+  margin-top: calc(-0.15 * var(--u));
+  font-size: calc(0.72 * var(--u));
+}
+
+.surf-ui .hs-ksfwho span {
+  display: none;
+}
+
+.surf-ui .hs-ksfwho b {
+  color: rgba(255, 216, 150, 0.8);
+  font-weight: 500;
+  max-width: calc(14 * var(--u));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.surf-ui .hs-row.hidden {
+  display: none;
+}
+
 .surf-ui .hs-row.none b {
   color: rgba(255, 255, 255, 0.55);
   font-weight: 500;
