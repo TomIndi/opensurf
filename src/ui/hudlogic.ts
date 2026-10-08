@@ -25,10 +25,15 @@ export function courseText(t: TimerHud): string {
   return t.checkpointCount > 0 ? `Linear | CP ${Math.min(t.checkpoint, t.checkpointCount)}/${t.checkpointCount}` : 'Linear';
 }
 
-export function timerView(t: TimerHud, practice = false): TimerView {
+/**
+ * The timer box. `ksfWr` (seconds): the map's KSF world record when known - the box's "WR" is the world record
+ * then, and the local best (t.wr, the side panel's "Server record") only without KSF data.
+ */
+export function timerView(t: TimerHud, practice = false, ksfWr: number | null = null): TimerView {
   const course = courseText(t);
   const pb = t.pb !== null && t.pb > 0 ? formatTime(t.pb) : 'None';
-  const wr = t.wr !== null && t.wr > 0 ? formatTime(t.wr) : 'None';
+  const best = ksfWr !== null && ksfWr > 0 ? ksfWr : t.wr;
+  const wr = best !== null && best > 0 ? formatTime(best) : 'None';
   const base = { course, pb, wr };
   switch (t.state) {
     case 'disabled':

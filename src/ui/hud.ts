@@ -335,7 +335,7 @@ export class Hud {
 
     // ---- timer panel
     if (this.cfg.timer) {
-      const tv = timerView(hud.timer, hud.practice);
+      const tv = timerView(hud.timer, hud.practice, hud.ksfWr?.time ?? null);
       this.timerState.set(`st-${tv.cls}`);
       this.tLabel.set(tv.label);
       this.tMain.set(tv.main);

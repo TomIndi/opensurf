@@ -33,6 +33,10 @@ describe('timer panel view', () => {
     expect(timerView(T(), true)).toMatchObject({ cls: 'practice', label: '[Practice]' });
     expect(timerView(T({ state: 'stopped' }))).toMatchObject({ cls: 'stopped', label: 'Stopped' });
     expect(timerView(T({ state: 'disabled' }))).toMatchObject({ cls: 'disabled', main: 'No Timer' });
+    // the box's WR is the KSF world record when known, else the local best
+    expect(timerView(T({ wr: 60 }), false, 52.81).wr).toBe(timerView(T({ wr: 52.81 })).wr);
+    expect(timerView(T({ wr: 60 }), false, null).wr).toBe(timerView(T({ wr: 60 })).wr);
+    expect(timerView(T({ wr: null }), false, null).wr).toBe('None');
   });
 
   it('PB/WR text', () => {
