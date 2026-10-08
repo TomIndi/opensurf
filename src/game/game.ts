@@ -13,12 +13,18 @@
 // velocity -> zone button filters and strafe stats -> playerMove (+ ground mover velocity) -> +use -> entities
 // (triggers, I/O) -> timer -> replay recording -> sounds.
 //
-// Pausing (ESC / the pause menu) works like CS:GO's ESC menu during a ranked run: the world keeps running (the
-// movement keys are released, the player keeps flying or falling) and the run goes on. Otherwise (start zone,
-// practice, menus, a finished run) pausing freezes the world. When the game is forced to stop simulating in the
-// middle of a ranked run (the tab is hidden, frames stop for over a second, a map change gave up and returned),
-// the run goes on as practice ("Timer stopped — run paused, it won't count"), and the hidden time is never
-// caught up. The debug API's pause() is a hard freeze (deterministic stepping with runTicks).
+// Pausing (ESC, the pause menu, losing the mouse capture, hiding the tab) freezes the world: physics, map logic,
+// movers and the timer all stop, and resuming carries on exactly where the player was (the run still counts: the
+// run clock only counts simulated ticks). Time the game didn't simulate (a hidden tab, a frame gap) is never
+// caught up. A map change that was given up returns to the map with a ranked run turned into practice ("Timer
+// stopped — run paused, it won't count"). The debug API's pause() is the same freeze (deterministic stepping
+// with runTicks).
+//
+// !undo (an accidental !r, game/undo.ts): !r keeps a snapshot of the run in progress (Session.undo) that !undo puts
+// back exactly - player, view, timer run (same clock: the run clock stops while restarted), trigger contacts,
+// replay recording - until a new run starts, another !r, a map change or the undo itself. The map keeps running
+// meanwhile, so the run comes back as practice after practice in between (noclip, !tele, !end...) or more than
+// UNDO_GRACE_SECONDS restarted.
 //
 // Map changes: `map <name>` checks the name first (built-in list, else the catalog) and only prints
 // "map load failed: <name> not found" for an unknown one. While a new map downloads and parses, the current
@@ -27,11 +33,12 @@
 // (LoadProgress.loadId / mapName) so the loading screen can tell loads apart.
 import { QAngle, angleDiff, angleVectors, normalizeAngle, qa } from '../core/angles';
 import { conPrint, console_, Cvar, FCVAR_CHEAT, FCVAR_REPLICATED } from '../core/cvars';
-import { Vec3, v3, v3clone, v3copy } from '../core/vec3';
+import { Vec3, v3, v3clone, v3copy, v3dist } from '../core/vec3';
 import { BUILTIN_MAPS } from '../map/builtin/list';
 import { FogDef, LoadedMap, ZoneDef, ZoneSource } from '../map/types';
 import { CatalogEntry, getCatalogEntry, loadCatalog } from '../maps/catalog';
 import { extractMapArchive, fetchCatalogMap } from '../maps/downloader';
+import { boardLabel, getKsfService, isKsfEligibleMap, type KsfBoard, type KsfRecord, ksfReplayRecord, type KsfService, type KsfWr } from '../maps/ksf';
 import type { CollisionWorld } from '../physics/collision';
 import { categorizePosition, playerMove, unstuckPlayer } from '../physics/movement';
 import {
@@ -39,6 +46,7 @@ import {
   IN_DUCK,
   IN_SPEED,
   IN_USE,
+  MOVETYPE_LADDER,
   MOVETYPE_NOCLIP,
   MOVETYPE_OBSERVER,
   MOVETYPE_WALK,
@@ -57,6 +65,7 @@ import {
   GameState,
   GhostState,
   HudState,
+  KsfWrHud,
   LoadProgress,
   RenderSettings,
   RendererApi,
@@ -78,8 +87,11 @@ import {
   GameTimer,
   Saveloc,
   handleSay,
+  KsfReplayResult,
+  ksfWrSegments,
   playerName,
   registerGameCommands,
+  runChatCommand,
   welcomeMessage,
   zoneSourceText,
 } from './commands';
@@ -89,8 +101,9 @@ import { installDebugApi, parseUrlOptions } from './debugapi';
 import { EntitySystem } from './entities';
 import { createHudState, horizontalSpeed, turnFromYawDelta, updateHudState } from './hud';
 import { InputDevice, InputState, KeyDispatcher, readMouseSettings, registerButtonCommands } from './input';
-import { ReplaySystem, sampleReplay } from './replay';
-import { SurfTimer } from './timer';
+import { REPLAY_TELEPORT_DISTANCE, ReplayData, ReplaySystem, replayFromKsf, sampleReplay } from './replay';
+import { formatSplitDelta, SurfTimer } from './timer';
+import { assignDeep, deepClone, RunUndoSnapshot, UNDO_GRACE_SECONDS, UndoPauseTally } from './undo';
 import { ZoneEditor, getEditorDebugBoxes, installZoneEditor, registerZoneCommands } from './zoneeditor';
 import { resolveZones } from './zoneresolve';
 
@@ -111,8 +124,6 @@ const FOOTSTEP_MIN_SPEED = 150;
 const SPECTATE_LOOP_PAUSE = 2;
 /** Lowest effective fps_max (10 ticks per frame must cover 128 tick). */
 const MIN_FPS_LIMIT = 30;
-/** A frame gap this long during a ranked run means the game stopped simulating: the run can't count. */
-const STALL_MS = 1000;
 /**
  * BSPs larger than this drop the previous map before parsing instead of keeping it until the parse succeeded:
  * two of the biggest maps in memory at once could run the tab out of memory.
@@ -420,6 +431,20 @@ export class Session implements TimerHost, CommandSession {
   ghostGroup = 0;
   /** How this map was loaded (`retry` reloads it). */
   request: LoadRequest | null = null;
+  /** The KSF world record of the map (for the tickrate `ksfTickrate`), once known. */
+  ksfWr: KsfWr | null = null;
+  ksfTickrate = 0;
+  /** HUD view of ksfWr (replaced, never mutated). */
+  ksfHud: KsfWrHud | null = null;
+  /** The KSF replay installed as the WR replay (s.replay.setWrReplay). */
+  ksfReplay: { file: string; record: KsfRecord; data: ReplayData } | null = null;
+  ksfReplayPending: { file: string; promise: Promise<ReplayData> } | null = null;
+  /** Runs started on this map so far (ranked or practice): a pending !wrreplay doesn't take over a newer run. */
+  runStarts = 0;
+  /** The run the latest !r restarted, for !undo (null: nothing to undo). */
+  undo: RunUndoSnapshot | null = null;
+  /** Simulated time the run in progress spent restarted over its earlier undos (UNDO_GRACE_SECONDS is per run). */
+  undoPaused: UndoPauseTally | null = null;
   private readonly game: Game;
 
   constructor(game: Game, map: LoadedMap, tier: number | null) {
@@ -438,6 +463,15 @@ export class Session implements TimerHost, CommandSession {
     this.entities = new EntitySystem(this);
     const timer = new SurfTimer(this);
     timer.onRunFinish = (ev) => game.emitEvent('runfinished', ev);
+    timer.onRunStart = () => {
+      this.runStarts++;
+    };
+    // practice entered after an !r (noclip, !tele, !end, setpos, !prac): the run !undo brings back can't count either
+    // (marked now: a kill or the start zone ends practice before the undo)
+    timer.onPracticeEnter = (reason) => {
+      if (this.undo && !this.undo.practiceReason) this.undo.practiceReason = reason;
+    };
+    timer.finishExtras = (group, time) => game.ksfFinishSegments(this, group, time);
     this.timer = timer;
     this.replay = new ReplaySystem(map.name);
     timer.setReplay(this.replay);
@@ -522,6 +556,8 @@ export interface GameDeps {
   loaders?: Partial<MapLoaders>;
   /** No pointer lock needed, never pause when it is lost (automated tests). Default: the ?autotest=1 URL flag. */
   autotest?: boolean;
+  /** KSF world records (tests inject a fake client). Default: the shared service (maps/ksf.ts). */
+  ksf?: KsfService;
 }
 
 /** The session kept aside while another map loads (it comes back if that load fails). */
@@ -533,6 +569,10 @@ interface SuspendedSession {
 }
 
 interface SpectateState {
+  /** Your PB replay, or the KSF world record. */
+  kind: 'pb' | 'wr';
+  /** Banner / showpos name ("PB Replay", "KSF WR · name (66 tick)"). */
+  label: string;
   group: number;
   /** Real time (s) at which replay time 0 is shown. */
   start: number;
@@ -547,6 +587,7 @@ export class Game implements GameApi, CommandContext {
   readonly sound: SoundApi;
   readonly canvas: HTMLCanvasElement;
   readonly loaders: MapLoaders;
+  readonly ksf: KsfService;
   readonly input = new InputState();
   readonly dispatcher = new KeyDispatcher();
   private device: InputDevice | null = null;
@@ -558,8 +599,6 @@ export class Game implements GameApi, CommandContext {
   private _session: Session | null = null;
   /** The previous map's session while a new map downloads and parses (see "Map changes" above). */
   private suspended: SuspendedSession | null = null;
-  /** Debug API / tests: paused with nothing simulating until resume(), even mid-run. */
-  private frozen = false;
   private loadingName: string | null = null;
   private loadSeq = 0;
   private currentLoad: LoadToken | null = null;
@@ -587,9 +626,15 @@ export class Game implements GameApi, CommandContext {
   private readonly hud: HudState = createHudState();
   private readonly view: ViewState = { origin: v3(), angles: qa(), fov: 90, time: 0 };
   private readonly debugBoxes: { mins: Vec3; maxs: Vec3; color: [number, number, number] }[] = [];
+  private readonly ghostList: GhostState[] = [];
   private debugShown = false;
   private ghostShown = false;
   private spec: SpectateState | null = null;
+  /**
+   * The !wrreplay waiting for its download (one at a time). Spectating starts when the replay is there unless the
+   * watch was cancelled (!wrreplay again, a PB replay, another map) or a run started meanwhile.
+   */
+  private ksfWatch: { session: Session; runStarts: number } | null = null;
   private readonly specVel = v3();
   private readonly fwd = v3();
   private readonly eye = v3();
@@ -601,6 +646,7 @@ export class Game implements GameApi, CommandContext {
     this.sound = deps.sound;
     this.canvas = deps.canvas;
     this.loaders = { ...defaultLoaders, ...(deps.loaders ?? {}) };
+    this.ksf = deps.ksf ?? getKsfService();
     this.autotest = deps.autotest ?? false;
     registerConvars();
     registerBindCommands();
@@ -649,23 +695,9 @@ export class Game implements GameApi, CommandContext {
     return this.device?.rawInputActive ?? null;
   }
 
-  /**
-   * True while the pause menu is open over a ranked run in progress: the world keeps simulating (CS:GO's ESC menu
-   * never stops the server), with every key released.
-   */
-  get simulatingWhilePaused(): boolean {
-    const s = this._session;
-    return !!s && this._state === 'paused' && this.liveWhilePaused(s);
-  }
-
-  private liveWhilePaused(s: Session): boolean {
-    if (this.frozen || this.spec) return false;
-    return (s.timer.timerState ?? s.timer.getHud().state) === 'running';
-  }
-
-  /** The world of session `s` simulates this frame. */
-  private isLive(s: Session): boolean {
-    return this._state === 'playing' || (this._state === 'paused' && this.liveWhilePaused(s));
+  /** The world simulates this frame (paused = frozen). */
+  private isLive(): boolean {
+    return this._state === 'playing';
   }
 
   on(event: GameEvent, cb: (data?: unknown) => void): () => void {
@@ -697,13 +729,11 @@ export class Game implements GameApi, CommandContext {
   }
 
   /**
-   * Opens the pause menu: every key is released; the world keeps running during a ranked run (see the top of the
-   * file) and freezes otherwise. `freeze` (debug API, tests) stops the simulation in any case until resume().
+   * Opens the pause menu and freezes the world (every key released) until resume(). `freeze` is accepted for the
+   * debug API and tests; every pause is a freeze.
    */
-  pause(opts?: { freeze?: boolean }): void {
-    if (this._state === 'paused' && opts?.freeze) this.frozen = true;
+  pause(_opts?: { freeze?: boolean }): void {
     if (this._state !== 'playing') return;
-    this.frozen = !!opts?.freeze;
     this.dispatcher.releaseAll();
     this.input.releaseAll();
     this.setState('paused');
@@ -711,15 +741,14 @@ export class Game implements GameApi, CommandContext {
 
   resume(): void {
     if (this._state !== 'paused') return;
-    this.frozen = false;
     this.lastFrameMs = 0;
     this.input.discardMouse();
     this.setState('playing');
   }
 
   /**
-   * The page was hidden or shown (visibilitychange). Hidden: the browser stops the frames, so a ranked run in
-   * progress can't count any more (practice); either way the time the page was hidden is never caught up.
+   * The page was hidden or shown (visibilitychange). Hidden: the browser stops the frames, so the game pauses (the
+   * pause menu is up when the player comes back); either way the time the page was hidden is never caught up.
    */
   onVisibilityChange(hidden: boolean): void {
     this.lastFrameMs = 0;
@@ -728,8 +757,7 @@ export class Game implements GameApi, CommandContext {
     this.dispatcher.releaseAll();
     this.input.releaseAll();
     if (this.autotest) return;
-    const s = this._session;
-    if (s && (this._state === 'playing' || this._state === 'paused')) s.timer.interruptRun?.();
+    if (this._state === 'playing') this.pause();
   }
 
   disconnect(): void {
@@ -978,6 +1006,7 @@ export class Game implements GameApi, CommandContext {
     if (!s) return;
     if (this.spec) this.stopSpectate();
     if (this.suspended) this.dropSuspended(); // (never both: a session only exists while nothing is suspended)
+    s.undo = null; // (a map change ends what !undo could bring back, even one that fails and comes back)
     this.suspended = { session: s, state: this._state === 'paused' ? 'paused' : 'playing', request: s.request };
     this._session = null;
     installZoneEditor(null);
@@ -1114,6 +1143,7 @@ export class Game implements GameApi, CommandContext {
       'info',
     );
     welcomeMessage(this, s);
+    this.announceKsf(s);
   }
 
   private loadFailed(token: LoadToken, e: unknown): void {
@@ -1251,14 +1281,17 @@ export class Game implements GameApi, CommandContext {
     const s = this._session;
     if (!s) return false;
     if (!s.replay.spectate(group)) return false;
-    this.spec = { group, start: this.now, finishedAt: null, lastYaw: NaN };
+    const label = group > 0 ? `PB Replay (Bonus ${group})` : 'PB Replay';
+    this.spec = { kind: 'pb', label, group, start: this.now, finishedAt: null, lastYaw: NaN };
+    // watching the PB replay replaces a KSF WR replay still downloading
+    this.ksfWatch = null;
     // only a new jump press leaves the replay (not a jump key that was already held)
     this.input.buttons.jump.clearImpulses();
     this.ghostShown = true; // force a setGhosts([]) next frame
     return true;
   }
 
-  stopSpectate(): void {
+  stopSpectate(respawn = true): void {
     const s = this._session;
     if (!this.spec || !s) {
       this.spec = null;
@@ -1270,7 +1303,270 @@ export class Game implements GameApi, CommandContext {
     for (const k of Object.values(this.input.buttons)) k.clearImpulses();
     this.acc = 0;
     // back into the game at the course start, like re-joining a team on a surf server
-    s.timer.restart(group);
+    if (respawn) s.timer.restart(group);
+  }
+
+  // ================================================================ !undo (an accidental !r)
+
+  /**
+   * CommandContext.keepRunForUndo: !r calls it before restarting. When a run is in progress (a ranked run, a practice
+   * run with time on the clock, stage practice) it keeps a snapshot for !undo, replacing an older one, and returns
+   * true. Without a run in progress (or while watching a replay) nothing is taken and an earlier snapshot stays: a
+   * second press of R in the start zone doesn't lose the run the first one restarted.
+   */
+  keepRunForUndo(): boolean {
+    const s = this._session;
+    if (!s || this.spec) return false;
+    const t = s.timer;
+    if (typeof t.snapshotRun !== 'function' || typeof t.restoreRun !== 'function' || typeof t.hasRunInProgress !== 'function') return false;
+    if (!t.hasRunInProgress()) return false;
+    const ents = s.entities;
+    const generation = t.runGeneration ?? 0;
+    s.undo = {
+      player: deepClone(s.player),
+      view: { pitch: this.input.view.pitch, yaw: this.input.view.yaw, roll: this.input.view.roll },
+      lastCmdYaw: s.lastCmdYaw,
+      lastJumped: s.lastJumped,
+      stepDistance: s.stepDistance,
+      timer: t.snapshotRun(),
+      entities: typeof ents.snapshotPlayer === 'function' ? ents.snapshotPlayer() : null,
+      generation,
+      takenAt: s.time,
+      pausedBefore: s.undoPaused?.generation === generation ? s.undoPaused.seconds : 0,
+      practiceReason: null,
+    };
+    // Off a ladder now rather than by the first ladder move that fails at the start: the movement code keeps the
+    // ladder's plane per player outside the PlayerState and forgets it only then, so the undo can hang on it again.
+    if (s.player.moveType === MOVETYPE_LADDER) s.player.moveType = MOVETYPE_WALK;
+    return true;
+  }
+
+  /**
+   * CommandContext.undoRestart (!undo, surf_undo): puts the run the latest !r restarted back exactly as it was - the
+   * whole PlayerState (position, velocity, base velocity, view, duck, ground / water state, map-driven gravity and
+   * speed), the view, the player's map-logic name and trigger contacts (no StartTouch / EndTouch storm), and the
+   * timer run on the same clock (the run clock stopped while restarted; splits, stage, stats; the replay recording
+   * carries on; practice stays practice). The map kept running meanwhile, so a ranked run (or stage practice) comes
+   * back as practice when practice was entered in between (noclip, !tele, !end, setpos, !prac, a server cvar
+   * change) or the run spent more than UNDO_GRACE_SECONDS restarted over its undos. Consumes the snapshot. Returns
+   * the restored run's timer HUD, or null when there is nothing to undo (no snapshot, a new run started since, the
+   * zones changed).
+   */
+  undoRestart(): TimerHud | null {
+    const s = this._session;
+    const snap = s?.undo ?? null;
+    if (!s || !snap) return null;
+    s.undo = null;
+    const t = s.timer;
+    if (typeof t.restoreRun !== 'function' || (t.runGeneration ?? 0) !== snap.generation) return null;
+    const paused = snap.pausedBefore + Math.max(0, s.time - snap.takenAt);
+    // (slack for float rounding of the simulation clock)
+    const late = paused > UNDO_GRACE_SECONDS + 1e-6 ? `restarted for ${paused.toFixed(1)} s` : null;
+    if (!t.restoreRun(snap.timer, snap.practiceReason ?? late)) return null;
+    s.undoPaused = { generation: snap.generation, seconds: paused };
+    // (watching a replay meanwhile: leave it without the respawn)
+    if (this.spec) this.stopSpectate(false);
+    const ps = s.player;
+    assignDeep(ps, snap.player);
+    this.input.setAngles(snap.view.pitch, snap.view.yaw, snap.view.roll);
+    s.lastCmdYaw = snap.lastCmdYaw;
+    s.lastJumped = snap.lastJumped;
+    s.stepDistance = snap.stepDistance;
+    // (also lets go of a moving platform that has moved on since)
+    if (snap.entities && typeof s.entities.restorePlayer === 'function') s.entities.restorePlayer(snap.entities);
+    // a mover that came into the spot meanwhile (a door that closed): out of it, like a teleport (else nothing moves)
+    const ox = ps.origin.x;
+    const oy = ps.origin.y;
+    const oz = ps.origin.z;
+    unstuckPlayer(ps, s.collision);
+    if (ps.origin.x !== ox || ps.origin.y !== oy || ps.origin.z !== oz) categorizePosition(ps, s.collision, getMoveVars());
+    // no interpolation from the start zone: the camera is simply back
+    v3copy(s.prevOrigin, ps.origin);
+    s.prevViewOffset = ps.viewOffsetZ;
+    // (a !wrreplay still downloading doesn't take over the run that came back)
+    s.runStarts++;
+    return t.getHud();
+  }
+
+  // ================================================================ KSF world records
+
+  /** Whether the session's map may be on KSF (never the built-in maps). */
+  private ksfEligible(s: Session): boolean {
+    return isKsfEligibleMap(s.map.name, s.map.source === 'builtin' || s.request?.kind === 'builtin');
+  }
+
+  /** The tickrate the session's runs (and so its KSF board) use. */
+  private sessionTickrate(s: Session): number {
+    const t = s.timer.tickrate;
+    if (typeof t === 'function') return t.call(s.timer);
+    const ti = tickInterval();
+    return ti > 0 ? 1 / ti : 100;
+  }
+
+  /** The KSF WR of a session's map for its tickrate (cached by the service); remembered on the session. */
+  private async ksfFor(s: Session): Promise<KsfWr> {
+    if (!this.ksfEligible(s)) return { status: 'unavailable', map: s.map.name, message: `${s.map.name} is not a KSF map (built-in maps have no world records).` };
+    const tick = this.sessionTickrate(s);
+    const res = await this.ksf.worldRecord(s.map.name, tick);
+    if (res.status === 'ok' || res.status === 'none') this.setSessionKsf(s, res, tick);
+    return res;
+  }
+
+  private setSessionKsf(s: Session, res: KsfWr, tick: number): void {
+    s.ksfWr = res;
+    s.ksfTickrate = tick;
+    s.ksfHud = res.status === 'ok' ? { time: res.wr.time, name: res.wr.name, board: boardLabel(res.board) } : null;
+    // the installed WR replay stays while it is still the one loadKsfWrReplay would pick (the WR's, or the fastest
+    // record with a replay when the WR has none); another board (tickrate change) or no records drop it
+    const pick = res.status === 'ok' ? ksfReplayRecord(res.records) : null;
+    if (s.ksfReplay && s.ksfReplay.file !== pick?.file) {
+      s.ksfReplay = null;
+      s.replay.setWrReplay(null);
+    }
+  }
+
+  /** CommandContext.ksfWorldRecord: the KSF WR of the current map. */
+  async ksfWorldRecord(): Promise<KsfWr> {
+    const s = this._session;
+    if (!s) return { status: 'error', map: '', message: 'No map loaded.' };
+    return this.ksfFor(s);
+  }
+
+  /** On map load: the WR line in chat (when the local server reaches KSF), and the WR ghost when it is on. */
+  private announceKsf(s: Session): void {
+    if (!this.ksfEligible(s)) return;
+    void this.ksfFor(s).then((res) => {
+      if (this._session !== s || res.status !== 'ok') return;
+      s.chat([
+        ...CHAT_PREFIX,
+        ...ksfWrSegments(res),
+        { text: ' - type ', color: 'default' },
+        { text: '!wrreplay', color: 'gold' },
+        { text: ' to watch', color: 'default' },
+      ]);
+      if (console_.getCvar('surf_ghost_wr')?.bool) void this.loadKsfWrReplay({ spectate: false }).catch(() => undefined);
+    });
+  }
+
+  /** A tickrate change may mean the other KSF board: refresh the WR (and the WR ghost's replay). */
+  private refreshKsf(s: Session): void {
+    if (!s.ksfWr || !this.ksfEligible(s)) return;
+    const tick = this.sessionTickrate(s);
+    if (Math.abs(tick - s.ksfTickrate) < 1e-6) return;
+    void this.ksfFor(s).then((res) => {
+      if (this._session === s && res.status === 'ok' && console_.getCvar('surf_ghost_wr')?.bool) void this.loadKsfWrReplay({ spectate: false }).catch(() => undefined);
+    });
+  }
+
+  /** A !wrreplay is waiting for its download on this map (Watch WR clicks are ignored meanwhile). */
+  get ksfWatchPending(): boolean {
+    return this.ksfWatch !== null && this.ksfWatch.session === this._session;
+  }
+
+  /** CommandContext.cancelKsfWatch: forgets the pending !wrreplay (the download carries on, cached); true if any. */
+  cancelKsfWatch(): boolean {
+    const had = this.ksfWatchPending;
+    this.ksfWatch = null;
+    return had;
+  }
+
+  /**
+   * CommandContext.loadKsfWrReplay: downloads (once) the KSF WR replay of the current map, installs it as the WR
+   * replay (ghost) and with `spectate` watches it. A WR without a replay file falls back to the fastest record
+   * that has one. A watch is pending while the replay downloads (ksfWatchPending): when it arrives, spectating
+   * starts only if the watch wasn't cancelled meanwhile (`cancelled`) and no run started since the request (else the
+   * replay is just ready: `deferred`, it doesn't take over the run).
+   */
+  async loadKsfWrReplay(opts: { spectate: boolean; onDownload?: () => void }): Promise<KsfReplayResult> {
+    const s = this._session;
+    if (!s) return { ok: false, message: 'No map loaded.' };
+    const watch = opts.spectate ? { session: s, runStarts: s.runStarts } : null;
+    if (watch) this.ksfWatch = watch;
+    // (a cancelled watch ends quietly, whatever happened to the download: the cancel was already answered)
+    const cancelled = () => watch !== null && this.ksfWatch !== watch;
+    const cancelledResult: KsfReplayResult = { ok: false, cancelled: true, message: 'The KSF WR replay was cancelled.' };
+    try {
+      const res = await this.ksfFor(s);
+      if (cancelled()) return cancelledResult;
+      if (res.status === 'unavailable') return { ok: false, message: res.message };
+      if (res.status === 'error') return { ok: false, message: `Couldn't get the KSF records (${res.message}).` };
+      if (res.status === 'none') return { ok: false, message: `No KSF records on ${s.map.name} yet.` };
+      const rec = ksfReplayRecord(res.records);
+      if (!rec) return { ok: false, message: `The KSF records of ${s.map.name} have no replays.` };
+      let data: ReplayData;
+      try {
+        data = await this.ksfReplayData(s, res.board, rec, opts.onDownload);
+      } catch (e) {
+        if (cancelled()) return cancelledResult;
+        throw e;
+      }
+      if (this._session !== s) return { ok: false, message: 'The map changed.' };
+      const notWr = rec !== res.wr;
+      const loaded = { ok: true as const, record: rec, board: res.board, fallback: res.fallback, notWr };
+      if (!watch) return loaded;
+      if (cancelled()) return cancelledResult;
+      if (s.runStarts !== watch.runStarts) return { ...loaded, deferred: true };
+      const label = `${notWr ? `KSF #${rec.rank}` : 'KSF WR'} · ${rec.name} (${boardLabel(res.board)})`;
+      if (!this.startWrSpectate(data, label)) return { ok: false, message: "The KSF replay couldn't be played." };
+      return loaded;
+    } finally {
+      if (watch && this.ksfWatch === watch) this.ksfWatch = null;
+    }
+  }
+
+  /** The replay of a KSF record as ReplayData, installed as the session's WR replay (one download per file). */
+  private ksfReplayData(s: Session, board: KsfBoard, rec: KsfRecord, onDownload?: () => void): Promise<ReplayData> {
+    const file = rec.file!;
+    if (s.ksfReplay && s.ksfReplay.file === file) return Promise.resolve(s.ksfReplay.data);
+    if (s.ksfReplayPending && s.ksfReplayPending.file === file) return s.ksfReplayPending.promise;
+    if (!this.ksf.hasReplay(rec)) onDownload?.();
+    const promise = this.ksf.replay(rec, board).then((parsed) => {
+      const data = replayFromKsf(parsed, s.map.name, { time: rec.time, date: rec.date * 1000 });
+      // (a tickrate change meanwhile may have picked another record: only the current WR replay is installed)
+      const cur = s.ksfWr?.status === 'ok' ? ksfReplayRecord(s.ksfWr.records) : null;
+      if (!s.ksfReplay && cur?.file === file) {
+        s.ksfReplay = { file, record: rec, data };
+        s.replay.setWrReplay(data);
+      }
+      return data;
+    });
+    s.ksfReplayPending = { file, promise };
+    const clear = () => {
+      if (s.ksfReplayPending?.promise === promise) s.ksfReplayPending = null;
+    };
+    promise.then(clear, clear);
+    return promise;
+  }
+
+  /** GameApi.watchKsfWr: the map browser's "Watch WR" (the !wrreplay command, without toggling it off). */
+  watchKsfWr(): void {
+    // (already watching it, or already loading it: a second click changes nothing)
+    if (!this._session || this.spec?.kind === 'wr' || this.ksfWatchPending) return;
+    if (this.spec) this.stopSpectate();
+    runChatCommand(this, 'wrreplay', []);
+  }
+
+  /** Spectates a KSF world record replay with the replay camera and HUD (leave like the PB replay). */
+  startWrSpectate(data: ReplayData, label: string): boolean {
+    const s = this._session;
+    if (!s) return false;
+    if (!s.replay.spectateData(data)) return false;
+    this.spec = { kind: 'wr', label, group: 0, start: this.now, finishedAt: null, lastYaw: NaN };
+    this.input.buttons.jump.clearImpulses();
+    this.ghostShown = true;
+    return true;
+  }
+
+  /** The end of the finish line: the run vs the KSF WR of the main course (" | +1.234 vs KSF WR"). */
+  ksfFinishSegments(s: Session, group: number, time: number): ChatSegment[] {
+    const r = s.ksfWr;
+    if (group !== 0 || !r || r.status !== 'ok' || !(time > 0)) return [];
+    const d = time - r.wr.time;
+    return [
+      { text: ' | ', color: 'grey' },
+      { text: formatSplitDelta(d), color: d < 0 ? 'lightgreen' : d > 0 ? 'lightred' : 'grey' },
+      { text: r.fallback ? ` vs KSF WR (${boardLabel(r.board)})` : ' vs KSF WR', color: 'grey' },
+    ];
   }
 
   // ================================================================ cvars
@@ -1296,12 +1592,22 @@ export class Game implements GameApi, CommandContext {
       this.announcedCvars.set(c.name, c.value);
       if (fresh && this._session) this._session.chat([{ text: `Server cvar '${c.name}' changed to ${c.value}`, color: 'default' }]);
     }
+    if (this._session) {
+      if (c.name === 'tickrate') this.refreshKsf(this._session);
+      else if (c.name === 'surf_ghost_wr' && c.bool && this._session.ksfWr?.status === 'ok') {
+        // after the command that set it (!wrghost reports the download itself)
+        queueMicrotask(() => void this.loadKsfWrReplay({ spectate: false }).catch(() => undefined));
+      }
+    }
     if (serverCvar && this._session) {
       // a server/physics change during a run: the run can't be ranked any more
       if (c.name !== 'sv_cheats') {
         const t = this._session.timer;
         const st = t.timerState ?? t.getHud().state;
         if (st === 'running') t.enterPractice(`${c.name} changed`);
+        // ... nor the run an !undo would bring back
+        const undo = this._session.undo;
+        if (undo && !undo.practiceReason) undo.practiceReason = `${c.name} changed`;
       }
     }
   }
@@ -1426,10 +1732,8 @@ export class Game implements GameApi, CommandContext {
       this.emitEvent('cvarschanged');
     }
     const s = this._session;
-    const live = !!s && this.isLive(s);
-    // no frames for over a second (a debugger, a frozen or throttled page): the world stood still mid-run
-    if (s && live && gapMs > STALL_MS && !this.autotest) s.timer.interruptRun?.();
-    if (s && live) this.simulateFrame(s, dt);
+    // a frame gap (a debugger, a frozen or throttled page) only loses that time: dt is capped, never caught up
+    if (s && this.isLive()) this.simulateFrame(s, dt);
     else {
       this.input.discardMouse();
       this.dispatcher.afterTick();
@@ -1437,7 +1741,7 @@ export class Game implements GameApi, CommandContext {
     const hud = this.refreshHud();
     if (s && (this._state === 'playing' || this._state === 'paused')) this.renderFrame(s, hud);
     this.ui.updateHud(hud);
-    if (s && live && this._session === s) {
+    if (s && this.isLive() && this._session === s) {
       const v = this.spec ? this.specVel : s.player.velocity;
       const speed = Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
       this.sound.setWind(speed, this.spec ? true : !s.player.onGround);
@@ -1464,8 +1768,8 @@ export class Game implements GameApi, CommandContext {
       this.input.tickAngles(this.tickAngles, i, n, r.acc, ti, span);
       this.tickSession(s, this.tickAngles);
       this.dispatcher.afterTick();
-      // (a run that ends while the pause menu is open freezes the world from the next tick on)
-      if (this._session !== s || !this.isLive(s) || this.spec) break;
+      // (map logic or a command that paused / changed the map stops the frame's remaining ticks)
+      if (this._session !== s || !this.isLive() || this.spec) break;
     }
     this.alpha = ti > 0 ? Math.min(1, Math.max(0, this.acc / ti)) : 1;
     this.input.endFrame();
@@ -1594,7 +1898,7 @@ export class Game implements GameApi, CommandContext {
 
   // ================================================================ HUD + render
 
-  private spectateSample(s: Session): { origin: Vec3; angles: QAngle; speed: number; time: number; buttons: number } | null {
+  private spectateSample(s: Session): { origin: Vec3; angles: QAngle; speed: number; time: number; finished: boolean; buttons: number } | null {
     const sp = this.spec;
     if (!sp) return null;
     let t = this.now - sp.start;
@@ -1609,24 +1913,33 @@ export class Game implements GameApi, CommandContext {
         v = s.replay.spectateView(0) ?? v;
       }
     }
-    // velocity / buttons from the replay frames around t
+    // velocity / buttons from the replay frames around t (stored velocities when the replay has them: KSF)
     const data = s.replay.spectatedReplay();
     let buttons = 0;
     if (data) {
-      const dtr = 1 / (data.tickrate > 0 ? data.tickrate : 100);
-      const a = sampleReplay(data, Math.max(0, v.time - dtr));
       const b = sampleReplay(data, v.time);
-      if (a && b && b.time > a.time) {
-        const k = 1 / (b.time - a.time);
-        this.specVel.x = (b.origin.x - a.origin.x) * k;
-        this.specVel.y = (b.origin.y - a.origin.y) * k;
-        this.specVel.z = (b.origin.z - a.origin.z) * k;
+      if (b?.velocity) {
+        this.specVel.x = b.velocity.x;
+        this.specVel.y = b.velocity.y;
+        this.specVel.z = b.velocity.z;
       } else {
-        this.specVel.x = this.specVel.y = this.specVel.z = 0;
+        const dtr = 1 / (data.tickrate > 0 ? data.tickrate : 100);
+        const a = sampleReplay(data, v.time - dtr);
+        if (a && b && b.time > a.time) {
+          // (across a teleport the velocity from before it stays)
+          if (v3dist(a.origin, b.origin) <= REPLAY_TELEPORT_DISTANCE) {
+            const k = 1 / (b.time - a.time);
+            this.specVel.x = (b.origin.x - a.origin.x) * k;
+            this.specVel.y = (b.origin.y - a.origin.y) * k;
+            this.specVel.z = (b.origin.z - a.origin.z) * k;
+          }
+        } else {
+          this.specVel.x = this.specVel.y = this.specVel.z = 0;
+        }
       }
       if (b) buttons = b.buttons;
     }
-    return { origin: v.origin, angles: v.angles, speed: v.speed, time: v.time, buttons };
+    return { origin: v.origin, angles: v.angles, speed: v.speed, time: v.time, finished: v.finished, buttons };
   }
 
   private refreshHud(): HudState {
@@ -1658,10 +1971,14 @@ export class Game implements GameApi, CommandContext {
     const timerHud: TimerHud = s.timer.getHud();
     const spec = this.spec ? this.spectateSample(s) : null;
     if (spec) {
+      // the replay's run clock: a KSF replay starts with its prestrafe in the start zone and ends on the record's
+      // official time (finer than its ticks)
+      const wr = this.spec!.kind === 'wr';
+      const official = wr && spec.finished ? s.replay.spectatedReplay()?.time : undefined;
       const specTimer: TimerHud = {
         ...timerHud,
-        state: 'running',
-        time: spec.time,
+        state: spec.time < 0 ? 'startzone' : 'running',
+        time: official !== undefined && official > 0 ? official : Math.max(0, spec.time),
         stage: 0,
         stageTime: 0,
         checkpoint: 0,
@@ -1686,9 +2003,10 @@ export class Game implements GameApi, CommandContext {
         turn,
         practice: false,
         noclip: false,
-        spectating: this.spec!.group > 0 ? `PB Replay (Bonus ${this.spec!.group})` : 'PB Replay',
+        spectating: this.spec!.label,
         speed: spec.speed,
         now: this.now,
+        ksfWr: s.ksfHud,
       });
       return hud;
     }
@@ -1721,6 +2039,7 @@ export class Game implements GameApi, CommandContext {
       noclip: ps.moveType === MOVETYPE_NOCLIP || ps.moveType === MOVETYPE_OBSERVER,
       spectating: null,
       now: this.now,
+      ksfWr: s.ksfHud,
     });
     return hud;
   }
@@ -1771,16 +2090,27 @@ export class Game implements GameApi, CommandContext {
   }
 
   private updateGhost(s: Session, hud: HudState): void {
-    const want = (console_.getCvar('surf_ghost')?.num ?? 1) !== 0 && (console_.getCvar('surf_hide')?.num ?? 0) === 0 && !this.spec;
-    let ghost: GhostState | null = null;
-    // the ghost runs with the run clock: hidden in the start zone (it would stand in your face while you
+    const shown = (console_.getCvar('surf_hide')?.num ?? 0) === 0 && !this.spec;
+    const list = this.ghostList;
+    list.length = 0;
+    // the ghosts run with the run clock: hidden in the start zone (they would stand in your face while you
     // prestrafe), from the tick that leaves it at the same run time as you
-    if (want && hud.timer.state === 'running') {
+    if (shown && hud.timer.state === 'running') {
       // the rendered player is between the previous and the current tick: (runTicks - 1 + alpha) ticks into the run
-      ghost = s.replay.ghostAt(Math.max(0, hud.timer.time - (1 - this.alpha) * tickInterval()));
+      const t = Math.max(0, hud.timer.time - (1 - this.alpha) * tickInterval());
+      if ((console_.getCvar('surf_ghost')?.num ?? 1) !== 0) {
+        const pb = s.replay.ghostAt(t);
+        if (pb) list.push(pb);
+      }
+      // the KSF world record races the main course
+      if ((console_.getCvar('surf_ghost_wr')?.num ?? 0) !== 0 && s.group === 0) {
+        const wr = s.replay.wrGhostAt(t);
+        if (wr) list.push(wr);
+      }
     }
-    if (ghost) {
-      this.renderer.setGhosts([ghost]);
+    if (list.length) {
+      // (a fresh array: the renderer may keep it)
+      this.renderer.setGhosts(list.slice());
       this.ghostShown = true;
     } else if (this.ghostShown) {
       this.renderer.setGhosts([]);

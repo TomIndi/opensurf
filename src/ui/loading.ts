@@ -4,7 +4,7 @@ import { h, TextSlot } from './dom';
 import { mapTypeName } from './format';
 import { icon, logoMarkSvg } from './icons';
 import { mapNameEl, tierPill } from './mapui';
-import { mapThumbSvg } from './thumbs';
+import { setMapArt } from './thumbs';
 import { SURF_TIPS, tipOrder } from './tips';
 
 import { PHASE_LABELS, PHASE_SPANS, type Phase, phaseText, rawProgress, rescaleProgress, STEPS } from './loadprogress';
@@ -125,7 +125,8 @@ export class LoadingScreen {
     }
     this.mapName = name;
     this.title.replaceChildren(name ? mapNameEl(name, 'map-title') : h('span', { text: 'Loading…' }));
-    this.art.innerHTML = name ? mapThumbSvg(name) : '';
+    if (name) setMapArt(this.art, name);
+    else this.art.innerHTML = '';
     this.renderPills(tier, type, hasZones);
   }
 

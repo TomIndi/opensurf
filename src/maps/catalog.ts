@@ -13,8 +13,13 @@ export interface CatalogEntry {
   type: 'linear' | 'staged' | 'staged-linear' | null;
   /** SurfTimer zone presets exist for this map (exact name or a matching build). */
   hasZones: boolean;
-  /** Highlighted classic. */
+  /** A classic (the Classics tab): from public/maps/popularity.json when present. */
   featured: boolean;
+  /**
+   * How popular the map was on CS:GO surf servers (about 2015-2020), 0..100, from public/maps/popularity.json
+   * (KSF play statistics, Steam Workshop subscribers, server and community data); absent when unknown.
+   */
+  popularity?: number;
 }
 
 interface CatalogFile {

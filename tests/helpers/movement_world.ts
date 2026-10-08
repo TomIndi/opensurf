@@ -6,11 +6,12 @@
 //    furthest behind the plane (mins/maxs per normal component sign); bevel sides only take part in box traces;
 //  - d1/d2 = signed distances of start/end from the pushed plane; d1 > 0 && d2 > 0 for any plane means the
 //    sweep never touches this brush; planes with both <= 0 are skipped;
-//  - entering planes give (d1 - DIST_EPSILON) / (d1 - d2), leaving planes (d1 + DIST_EPSILON) / (d1 - d2);
-//    the hit is the largest enter fraction if it is below the smallest leave fraction (clamped to >= 0).
-//    The enter fraction starts at a NEVER_UPDATED sentinel (Source), not Quake 2's -1: a box already closer
-//    than DIST_EPSILON that moves into a face by less than the remaining epsilon gets a negative enter
-//    fraction below -1, and with the -1 start that hit would be dropped and the box would end in solid;
+//  - entering planes give (d1 - DIST_EPSILON) / (d1 - d2), clamped to >= 0 (a box starting inside a face's
+//    epsilon shell enters it at 0), leaving planes (d1 + DIST_EPSILON) / (d1 - d2); the hit is the largest
+//    enter fraction if it is below the smallest leave fraction. A hit at 0 (every entering face's shell holds
+//    the start, where Source goes by side / BSP order) reports the face really crossed last (largest
+//    d1 / (d1 - d2)), and of brushes hit at 0 the one really entered first wins. The enter fraction starts at
+//    a NEVER_UPDATED sentinel (Source), so every entering plane counts, however small the move into it;
 //  - a start inside a brush (no d1 > 0) reports startsolid and that brush does not block; if the end is also
 //    inside, allsolid with fraction 0 and endpos = start;
 //  - a zero-length trace is the TestPlayerPosition query: touching a face (d == 0) counts as inside.
@@ -49,6 +50,7 @@ export class RefWorld implements TraceWorld {
     let hitPlane: Plane | null = null;
     let hitBrush: Brush | null = null;
     let solidBrush: Brush | null = null;
+    let bestIn = -1;
     for (const b of this.brushes) {
       if ((b.contents & mask) === 0) continue;
       let enterfrac = NEVER_UPDATED;
@@ -56,6 +58,8 @@ export class RefWorld implements TraceWorld {
       let startout = false;
       let getout = false;
       let lead: Plane | null = null;
+      let inT = -1;
+      let inLead: Plane | null = null;
       let skip = false;
       for (const side of b.sides) {
         if (isPoint && side.bevel) continue;
@@ -74,7 +78,16 @@ export class RefWorld implements TraceWorld {
         if (d1 > 0) startout = true;
         if (d1 <= 0 && d2 <= 0) continue;
         if (d1 > d2) {
-          const f = (d1 - DIST_EPSILON) / (d1 - d2);
+          // Source clamps a pulled-back crossing behind the start to 0; then the face really crossed last leads
+          let f = (d1 - DIST_EPSILON) / (d1 - d2);
+          if (f <= 0) {
+            f = 0;
+            const t = d1 / (d1 - d2);
+            if (t > inT) {
+              inT = t;
+              inLead = side.plane;
+            }
+          }
           if (f > enterfrac) {
             enterfrac = f;
             lead = side.plane;
@@ -95,9 +108,11 @@ export class RefWorld implements TraceWorld {
         }
         continue;
       }
-      if (enterfrac < leavefrac && enterfrac > NEVER_UPDATED && enterfrac < fraction) {
-        fraction = enterfrac < 0 ? 0 : enterfrac;
-        hitPlane = lead;
+      // a hit at 0 reports the face really crossed last, and the brush really entered first wins
+      if (enterfrac < leavefrac && enterfrac > NEVER_UPDATED && (enterfrac < fraction || (enterfrac === 0 && fraction === 0 && inT < bestIn))) {
+        fraction = enterfrac;
+        bestIn = enterfrac === 0 ? inT : -1;
+        hitPlane = enterfrac === 0 ? inLead : lead;
         hitBrush = b;
       }
     }

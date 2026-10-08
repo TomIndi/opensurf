@@ -1,0 +1,4664 @@
+{
+"generated": "2026-10-08",
+"source": "https://ksf.surf (KSF map statistics: total completions per map on KSF servers, cumulative over the years)",
+"method": "score = log10(total KSF completions), scaled 0..100 across catalog maps; classics = the hand-picked iconic maps plus the 24 most completed",
+"ranking": [
+{
+"name": "surf_rookie",
+"score": 100.0,
+"completions": 517673
+},
+{
+"name": "surf_ace",
+"score": 90.9,
+"completions": 290270
+},
+{
+"name": "surf_kitsune",
+"score": 90.4,
+"completions": 280758
+},
+{
+"name": "surf_orthodox",
+"score": 90.4,
+"completions": 280318
+},
+{
+"name": "surf_kz_protraining",
+"score": 90.2,
+"completions": 276859
+},
+{
+"name": "surf_beginner",
+"score": 89.3,
+"completions": 262455
+},
+{
+"name": "surf_boring",
+"score": 88.3,
+"completions": 246017
+},
+{
+"name": "surf_summer_ksf",
+"score": 86.7,
+"completions": 221217
+},
+{
+"name": "surf_simpsons_source",
+"score": 85.3,
+"completions": 203293
+},
+{
+"name": "surf_garden",
+"score": 85.2,
+"completions": 201362
+},
+{
+"name": "surf_anzchamps",
+"score": 85.1,
+"completions": 200318
+},
+{
+"name": "surf_lessons",
+"score": 84.9,
+"completions": 197755
+},
+{
+"name": "surf_fruits",
+"score": 84.4,
+"completions": 192001
+},
+{
+"name": "surf_lt_omnific",
+"score": 84.3,
+"completions": 190517
+},
+{
+"name": "surf_classics2",
+"score": 83.0,
+"completions": 174800
+},
+{
+"name": "surf_whiteout",
+"score": 82.9,
+"completions": 173678
+},
+{
+"name": "surf_me",
+"score": 82.7,
+"completions": 171784
+},
+{
+"name": "surf_school_fix",
+"score": 82.1,
+"completions": 165874
+},
+{
+"name": "surf_classics",
+"score": 81.9,
+"completions": 163531
+},
+{
+"name": "surf_syria",
+"score": 81.7,
+"completions": 161052
+},
+{
+"name": "surf_illusion",
+"score": 81.5,
+"completions": 158750
+},
+{
+"name": "surf_aura",
+"score": 81.4,
+"completions": 157856
+},
+{
+"name": "surf_lore",
+"score": 80.7,
+"completions": 150985
+},
+{
+"name": "surf_beyond",
+"score": 80.5,
+"completions": 149108
+},
+{
+"name": "surf_delusional",
+"score": 80.2,
+"completions": 146742
+},
+{
+"name": "surf_spacejam",
+"score": 80.1,
+"completions": 146013
+},
+{
+"name": "surf_borderlands",
+"score": 80.1,
+"completions": 145271
+},
+{
+"name": "surf_vegetables",
+"score": 79.9,
+"completions": 144230
+},
+{
+"name": "surf_kitsune2",
+"score": 79.9,
+"completions": 144171
+},
+{
+"name": "surf_premium",
+"score": 79.8,
+"completions": 143181
+},
+{
+"name": "surf_kepler",
+"score": 79.5,
+"completions": 140514
+},
+{
+"name": "surf_derpis_ksf",
+"score": 79.3,
+"completions": 138499
+},
+{
+"name": "surf_fruits2",
+"score": 79.3,
+"completions": 138300
+},
+{
+"name": "surf_beginner2",
+"score": 79.1,
+"completions": 137018
+},
+{
+"name": "surf_benevolent_refix",
+"score": 78.5,
+"completions": 131741
+},
+{
+"name": "surf_listless_ksf",
+"score": 78.5,
+"completions": 131441
+},
+{
+"name": "surf_doodles_njv",
+"score": 78.2,
+"completions": 129094
+},
+{
+"name": "surf_commune_beta11",
+"score": 78.1,
+"completions": 128595
+},
+{
+"name": "surf_santorini_ksf",
+"score": 78.1,
+"completions": 127932
+},
+{
+"name": "surf_666",
+"score": 77.7,
+"completions": 125205
+},
+{
+"name": "surf_mom_fix",
+"score": 77.1,
+"completions": 120323
+},
+{
+"name": "surf_beverages_remix",
+"score": 75.9,
+"completions": 111162
+},
+{
+"name": "surf_heaven_njv",
+"score": 75.8,
+"completions": 110636
+},
+{
+"name": "surf_acp_fix",
+"score": 75.4,
+"completions": 107685
+},
+{
+"name": "surf_ny_platinum",
+"score": 75.2,
+"completions": 106506
+},
+{
+"name": "surf_rez",
+"score": 75.2,
+"completions": 106293
+},
+{
+"name": "surf_tuscany",
+"score": 75.1,
+"completions": 106059
+},
+{
+"name": "surf_fortum_fix",
+"score": 74.9,
+"completions": 104593
+},
+{
+"name": "surf_mwag_reloaded",
+"score": 74.9,
+"completions": 104298
+},
+{
+"name": "surf_aser",
+"score": 74.8,
+"completions": 103715
+},
+{
+"name": "surf_cubic_ksf",
+"score": 74.5,
+"completions": 102095
+},
+{
+"name": "surf_artois",
+"score": 74.2,
+"completions": 100221
+},
+{
+"name": "surf_exocube",
+"score": 74.2,
+"completions": 100207
+},
+{
+"name": "surf_presmon_fix",
+"score": 74.1,
+"completions": 99326
+},
+{
+"name": "surf_psycho",
+"score": 74.0,
+"completions": 98914
+},
+{
+"name": "surf_omnibus",
+"score": 73.8,
+"completions": 97793
+},
+{
+"name": "surf_oasis",
+"score": 73.7,
+"completions": 96993
+},
+{
+"name": "surf_deathstar",
+"score": 73.6,
+"completions": 96273
+},
+{
+"name": "surf_arcade",
+"score": 73.5,
+"completions": 95556
+},
+{
+"name": "surf_syria_again",
+"score": 73.1,
+"completions": 93413
+},
+{
+"name": "surf_overgrowth",
+"score": 73.1,
+"completions": 93023
+},
+{
+"name": "surf_botanica",
+"score": 72.4,
+"completions": 89148
+},
+{
+"name": "surf_calzone",
+"score": 72.4,
+"completions": 89092
+},
+{
+"name": "surf_zbig_ksf",
+"score": 72.2,
+"completions": 88153
+},
+{
+"name": "surf_healthy",
+"score": 72.1,
+"completions": 87280
+},
+{
+"name": "surf_bob",
+"score": 71.9,
+"completions": 86583
+},
+{
+"name": "surf_christmas",
+"score": 71.5,
+"completions": 84329
+},
+{
+"name": "surf_beyond2",
+"score": 71.3,
+"completions": 82968
+},
+{
+"name": "surf_sunnyhappylove",
+"score": 71.2,
+"completions": 82804
+},
+{
+"name": "surf_n_turf",
+"score": 71.2,
+"completions": 82669
+},
+{
+"name": "surf_anoobis",
+"score": 71.2,
+"completions": 82629
+},
+{
+"name": "surf_1day",
+"score": 70.9,
+"completions": 81110
+},
+{
+"name": "surf_imex",
+"score": 70.8,
+"completions": 80535
+},
+{
+"name": "surf_olympics",
+"score": 70.7,
+"completions": 79979
+},
+{
+"name": "surf_y",
+"score": 70.5,
+"completions": 79029
+},
+{
+"name": "surf_81st_network",
+"score": 70.5,
+"completions": 78836
+},
+{
+"name": "surf_crzyfrog_reloaded",
+"score": 70.3,
+"completions": 77797
+},
+{
+"name": "surf_ethereal",
+"score": 70.2,
+"completions": 77599
+},
+{
+"name": "surf_lies_ksf",
+"score": 70.1,
+"completions": 77167
+},
+{
+"name": "surf_noble",
+"score": 69.8,
+"completions": 75569
+},
+{
+"name": "surf_meme",
+"score": 69.5,
+"completions": 74141
+},
+{
+"name": "surf_eclipse",
+"score": 69.5,
+"completions": 74094
+},
+{
+"name": "surf_aircontrol_ksf",
+"score": 69.5,
+"completions": 74082
+},
+{
+"name": "surf_sanctuary",
+"score": 69.4,
+"completions": 73799
+},
+{
+"name": "surf_lt_unicorn",
+"score": 69.3,
+"completions": 73401
+},
+{
+"name": "surf_liberation",
+"score": 69.3,
+"completions": 73352
+},
+{
+"name": "surf_annoyance_njv",
+"score": 69.0,
+"completions": 71578
+},
+{
+"name": "surf_progress_fix",
+"score": 68.9,
+"completions": 71519
+},
+{
+"name": "surf_devs_ksf",
+"score": 68.7,
+"completions": 70450
+},
+{
+"name": "surf_4am",
+"score": 68.6,
+"completions": 70176
+},
+{
+"name": "surf_harmony_fix",
+"score": 68.6,
+"completions": 70065
+},
+{
+"name": "surf_froots_ksf",
+"score": 68.6,
+"completions": 69919
+},
+{
+"name": "surf_elements_beta3",
+"score": 68.5,
+"completions": 69710
+},
+{
+"name": "surf_believe",
+"score": 68.5,
+"completions": 69496
+},
+{
+"name": "surf_water_run_ksf",
+"score": 68.4,
+"completions": 69291
+},
+{
+"name": "surf_slob",
+"score": 68.4,
+"completions": 69031
+},
+{
+"name": "surf_greek_ksf",
+"score": 68.3,
+"completions": 68550
+},
+{
+"name": "surf_sinister_evil",
+"score": 68.2,
+"completions": 68363
+},
+{
+"name": "surf_legendary",
+"score": 68.1,
+"completions": 67862
+},
+{
+"name": "surf_highlands",
+"score": 68.1,
+"completions": 67737
+},
+{
+"name": "surf_nuclear",
+"score": 68.0,
+"completions": 67398
+},
+{
+"name": "surf_refraxis",
+"score": 67.9,
+"completions": 66946
+},
+{
+"name": "surf_mash-up",
+"score": 67.8,
+"completions": 66447
+},
+{
+"name": "surf_gleam2",
+"score": 67.8,
+"completions": 66348
+},
+{
+"name": "surf_chaos_fix",
+"score": 67.7,
+"completions": 65979
+},
+{
+"name": "surf_voteforthisone",
+"score": 67.4,
+"completions": 65019
+},
+{
+"name": "surf_misc",
+"score": 67.4,
+"completions": 64828
+},
+{
+"name": "surf_deadline",
+"score": 67.3,
+"completions": 64490
+},
+{
+"name": "surf_forbidden_tomb",
+"score": 67.1,
+"completions": 63768
+},
+{
+"name": "surf_liberation2",
+"score": 67.1,
+"completions": 63649
+},
+{
+"name": "surf_overgrowth2",
+"score": 67.0,
+"completions": 63135
+},
+{
+"name": "surf_ny_superhappiest_b3",
+"score": 66.7,
+"completions": 62196
+},
+{
+"name": "surf_depressing",
+"score": 66.4,
+"completions": 60898
+},
+{
+"name": "surf_korn",
+"score": 66.2,
+"completions": 60164
+},
+{
+"name": "surf_bluewall_v2",
+"score": 66.2,
+"completions": 59970
+},
+{
+"name": "surf_lodypreview",
+"score": 66.1,
+"completions": 59616
+},
+{
+"name": "surf_autumn_fix",
+"score": 66.0,
+"completions": 59475
+},
+{
+"name": "surf_anthropomorphic",
+"score": 65.8,
+"completions": 58652
+},
+{
+"name": "surf_not_so_sinister_ksf",
+"score": 65.8,
+"completions": 58551
+},
+{
+"name": "surf_activation",
+"score": 65.7,
+"completions": 58337
+},
+{
+"name": "surf_year3000",
+"score": 65.7,
+"completions": 58008
+},
+{
+"name": "surf_sc_essence_v2",
+"score": 65.6,
+"completions": 57912
+},
+{
+"name": "surf_forbidden_tomb2",
+"score": 65.5,
+"completions": 57526
+},
+{
+"name": "surf_holiday",
+"score": 65.5,
+"completions": 57350
+},
+{
+"name": "surf_destruction",
+"score": 65.4,
+"completions": 57137
+},
+{
+"name": "surf_elysium",
+"score": 65.4,
+"completions": 57098
+},
+{
+"name": "surf_in_space",
+"score": 65.3,
+"completions": 56856
+},
+{
+"name": "surf_exurbia_v2",
+"score": 65.3,
+"completions": 56736
+},
+{
+"name": "surf_beginner_hell",
+"score": 65.3,
+"completions": 56655
+},
+{
+"name": "surf_extremex",
+"score": 65.3,
+"completions": 56625
+},
+{
+"name": "surf_summit",
+"score": 65.3,
+"completions": 56618
+},
+{
+"name": "surf_swagtoast",
+"score": 65.1,
+"completions": 56119
+},
+{
+"name": "surf_dusk",
+"score": 65.0,
+"completions": 55730
+},
+{
+"name": "surf_commune_too_beta5",
+"score": 65.0,
+"completions": 55561
+},
+{
+"name": "surf_fornax",
+"score": 64.9,
+"completions": 55224
+},
+{
+"name": "surf_airflow",
+"score": 64.8,
+"completions": 54875
+},
+{
+"name": "surf_parc_colore",
+"score": 64.6,
+"completions": 54394
+},
+{
+"name": "surf_sandtrap2",
+"score": 64.5,
+"completions": 53981
+},
+{
+"name": "surf_stonks",
+"score": 64.5,
+"completions": 53761
+},
+{
+"name": "surf_mesa_fixed",
+"score": 64.4,
+"completions": 53530
+},
+{
+"name": "surf_hades",
+"score": 64.3,
+"completions": 53190
+},
+{
+"name": "surf_8bit",
+"score": 64.3,
+"completions": 53058
+},
+{
+"name": "surf_hades2",
+"score": 64.1,
+"completions": 52630
+},
+{
+"name": "surf_ny_advance",
+"score": 64.1,
+"completions": 52624
+},
+{
+"name": "surf_fast",
+"score": 64.1,
+"completions": 52515
+},
+{
+"name": "surf_pantheon",
+"score": 64.1,
+"completions": 52508
+},
+{
+"name": "surf_nightmare",
+"score": 64.1,
+"completions": 52410
+},
+{
+"name": "surf_gradient",
+"score": 64.0,
+"completions": 52298
+},
+{
+"name": "surf_ember",
+"score": 64.0,
+"completions": 52201
+},
+{
+"name": "surf_forbidden_tomb3",
+"score": 64.0,
+"completions": 52174
+},
+{
+"name": "surf_smaragd_fix",
+"score": 63.7,
+"completions": 51343
+},
+{
+"name": "surf_gurus_fix",
+"score": 63.4,
+"completions": 50155
+},
+{
+"name": "surf_frost",
+"score": 63.3,
+"completions": 49984
+},
+{
+"name": "surf_sandman_v2",
+"score": 63.2,
+"completions": 49726
+},
+{
+"name": "surf_prime_time_r3vamp",
+"score": 63.2,
+"completions": 49543
+},
+{
+"name": "surf_auroria_ksf",
+"score": 63.2,
+"completions": 49494
+},
+{
+"name": "surf_tendies",
+"score": 63.0,
+"completions": 49035
+},
+{
+"name": "surf_animals_ksf",
+"score": 63.0,
+"completions": 48919
+},
+{
+"name": "surf_imagine_fix",
+"score": 63.0,
+"completions": 48873
+},
+{
+"name": "surf_apollonian",
+"score": 63.0,
+"completions": 48830
+},
+{
+"name": "surf_ghost_busters",
+"score": 62.9,
+"completions": 48770
+},
+{
+"name": "surf_sodacity",
+"score": 62.9,
+"completions": 48692
+},
+{
+"name": "surf_boogie_woogie",
+"score": 62.7,
+"completions": 48091
+},
+{
+"name": "surf_stonework4",
+"score": 62.6,
+"completions": 47812
+},
+{
+"name": "surf_graphia",
+"score": 62.5,
+"completions": 47433
+},
+{
+"name": "surf_2012_beta12",
+"score": 62.5,
+"completions": 47355
+},
+{
+"name": "surf_epic",
+"score": 62.4,
+"completions": 47155
+},
+{
+"name": "surf_sanding_ksf",
+"score": 62.4,
+"completions": 47021
+},
+{
+"name": "surf_jenocide",
+"score": 61.9,
+"completions": 45561
+},
+{
+"name": "surf_crystal",
+"score": 61.8,
+"completions": 45257
+},
+{
+"name": "surf_amateur_v2b",
+"score": 61.7,
+"completions": 45222
+},
+{
+"name": "surf_injection_njv",
+"score": 61.6,
+"completions": 44900
+},
+{
+"name": "surf_bbb",
+"score": 61.6,
+"completions": 44855
+},
+{
+"name": "surf_stonework",
+"score": 61.6,
+"completions": 44670
+},
+{
+"name": "surf_elixor",
+"score": 61.4,
+"completions": 44330
+},
+{
+"name": "surf_bork_nbv",
+"score": 61.4,
+"completions": 44223
+},
+{
+"name": "surf_concept",
+"score": 61.3,
+"completions": 44004
+},
+{
+"name": "surf_plaguelands_beta7a",
+"score": 61.2,
+"completions": 43779
+},
+{
+"name": "surf_creation",
+"score": 61.2,
+"completions": 43686
+},
+{
+"name": "surf_stonework3",
+"score": 61.2,
+"completions": 43657
+},
+{
+"name": "surf_cement",
+"score": 61.2,
+"completions": 43544
+},
+{
+"name": "surf_friday",
+"score": 61.1,
+"completions": 43467
+},
+{
+"name": "surf_collection_njv",
+"score": 61.1,
+"completions": 43329
+},
+{
+"name": "surf_thembrium_njv",
+"score": 61.0,
+"completions": 43184
+},
+{
+"name": "surf_canisius",
+"score": 61.0,
+"completions": 43048
+},
+{
+"name": "surf_forgotten",
+"score": 60.9,
+"completions": 42973
+},
+{
+"name": "surf_color_fix",
+"score": 60.9,
+"completions": 42972
+},
+{
+"name": "surf_methadone",
+"score": 60.9,
+"completions": 42879
+},
+{
+"name": "surf_royal_fix",
+"score": 60.9,
+"completions": 42873
+},
+{
+"name": "surf_utopia_njv",
+"score": 60.8,
+"completions": 42695
+},
+{
+"name": "surf_sc_colours",
+"score": 60.8,
+"completions": 42593
+},
+{
+"name": "surf_ing",
+"score": 60.7,
+"completions": 42365
+},
+{
+"name": "surf_kloakk",
+"score": 60.5,
+"completions": 41872
+},
+{
+"name": "surf_static",
+"score": 60.4,
+"completions": 41629
+},
+{
+"name": "surf_velocity",
+"score": 60.3,
+"completions": 41350
+},
+{
+"name": "surf_auroria2",
+"score": 60.3,
+"completions": 41307
+},
+{
+"name": "surf_deceptive_final",
+"score": 60.3,
+"completions": 41265
+},
+{
+"name": "surf_treefort",
+"score": 60.2,
+"completions": 41092
+},
+{
+"name": "surf_furios",
+"score": 60.1,
+"completions": 40790
+},
+{
+"name": "surf_pure",
+"score": 60.1,
+"completions": 40624
+},
+{
+"name": "surf_disneyland",
+"score": 60.1,
+"completions": 40615
+},
+{
+"name": "surf_smile_njv",
+"score": 60.0,
+"completions": 40547
+},
+{
+"name": "surf_s_t_a_t_i_o_n",
+"score": 60.0,
+"completions": 40362
+},
+{
+"name": "surf_commune_again_beta5",
+"score": 59.9,
+"completions": 40299
+},
+{
+"name": "surf_reprise",
+"score": 59.9,
+"completions": 40250
+},
+{
+"name": "surf_pandemonium_njv",
+"score": 59.9,
+"completions": 40237
+},
+{
+"name": "surf_morbid",
+"score": 59.9,
+"completions": 40118
+},
+{
+"name": "surf_sandtrap",
+"score": 59.8,
+"completions": 39889
+},
+{
+"name": "surf_sexplizooimed",
+"score": 59.7,
+"completions": 39688
+},
+{
+"name": "surf_palette_fix",
+"score": 59.7,
+"completions": 39661
+},
+{
+"name": "surf_ivory",
+"score": 59.5,
+"completions": 39263
+},
+{
+"name": "surf_loves_spliff",
+"score": 59.4,
+"completions": 38996
+},
+{
+"name": "surf_canisius2_fix",
+"score": 59.4,
+"completions": 38846
+},
+{
+"name": "surf_collaboration",
+"score": 59.3,
+"completions": 38815
+},
+{
+"name": "surf_frey_remake",
+"score": 59.3,
+"completions": 38634
+},
+{
+"name": "surf_lighthouse",
+"score": 59.2,
+"completions": 38553
+},
+{
+"name": "surf_purgatory",
+"score": 59.2,
+"completions": 38485
+},
+{
+"name": "surf_perennial",
+"score": 59.2,
+"completions": 38442
+},
+{
+"name": "surf_theme",
+"score": 59.1,
+"completions": 38302
+},
+{
+"name": "surf_forbidden_ways_ksf",
+"score": 59.1,
+"completions": 38172
+},
+{
+"name": "surf_andromeda",
+"score": 59.0,
+"completions": 38052
+},
+{
+"name": "surf_portal_game4",
+"score": 59.0,
+"completions": 38030
+},
+{
+"name": "surf_two_colour",
+"score": 59.0,
+"completions": 37875
+},
+{
+"name": "surf_calamity_njv",
+"score": 59.0,
+"completions": 37841
+},
+{
+"name": "surf_ember2",
+"score": 58.9,
+"completions": 37744
+},
+{
+"name": "surf_stick",
+"score": 58.9,
+"completions": 37738
+},
+{
+"name": "surf_rapid",
+"score": 58.9,
+"completions": 37601
+},
+{
+"name": "surf_core_refix",
+"score": 58.8,
+"completions": 37589
+},
+{
+"name": "surf_lithium",
+"score": 58.8,
+"completions": 37528
+},
+{
+"name": "surf_kz_mix_journeys",
+"score": 58.7,
+"completions": 37244
+},
+{
+"name": "surf_ataque_final",
+"score": 58.7,
+"completions": 37190
+},
+{
+"name": "surf_impact",
+"score": 58.5,
+"completions": 36853
+},
+{
+"name": "surf_skipalot",
+"score": 58.5,
+"completions": 36821
+},
+{
+"name": "surf_happyhands",
+"score": 58.5,
+"completions": 36820
+},
+{
+"name": "surf_solace",
+"score": 58.4,
+"completions": 36652
+},
+{
+"name": "surf_ripper",
+"score": 58.3,
+"completions": 36321
+},
+{
+"name": "surf_palm",
+"score": 58.3,
+"completions": 36227
+},
+{
+"name": "surf_torque",
+"score": 58.2,
+"completions": 36188
+},
+{
+"name": "surf_hotwheels_fix",
+"score": 58.2,
+"completions": 36130
+},
+{
+"name": "surf_diverge",
+"score": 58.2,
+"completions": 36116
+},
+{
+"name": "surf_nyx",
+"score": 58.2,
+"completions": 36004
+},
+{
+"name": "surf_elysium2",
+"score": 58.1,
+"completions": 35760
+},
+{
+"name": "surf_freedom",
+"score": 58.0,
+"completions": 35698
+},
+{
+"name": "surf_calamity2",
+"score": 58.0,
+"completions": 35669
+},
+{
+"name": "surf_zion",
+"score": 58.0,
+"completions": 35571
+},
+{
+"name": "surf_distraction_v2",
+"score": 57.9,
+"completions": 35489
+},
+{
+"name": "surf_compulsive_njv",
+"score": 57.8,
+"completions": 35257
+},
+{
+"name": "surf_trapped2",
+"score": 57.8,
+"completions": 35167
+},
+{
+"name": "surf_lepidus",
+"score": 57.8,
+"completions": 35104
+},
+{
+"name": "surf_boreas",
+"score": 57.7,
+"completions": 34847
+},
+{
+"name": "surf_sky_ages",
+"score": 57.6,
+"completions": 34714
+},
+{
+"name": "surf_proximity_final",
+"score": 57.6,
+"completions": 34632
+},
+{
+"name": "surf_ixtab",
+"score": 57.4,
+"completions": 34362
+},
+{
+"name": "surf_wizard",
+"score": 57.3,
+"completions": 34107
+},
+{
+"name": "surf_4head",
+"score": 57.3,
+"completions": 34098
+},
+{
+"name": "surf_rands",
+"score": 57.2,
+"completions": 33946
+},
+{
+"name": "surf_sunset",
+"score": 57.2,
+"completions": 33913
+},
+{
+"name": "surf_torque2",
+"score": 57.2,
+"completions": 33837
+},
+{
+"name": "surf_1998",
+"score": 57.1,
+"completions": 33627
+},
+{
+"name": "surf_savant_njv",
+"score": 57.1,
+"completions": 33593
+},
+{
+"name": "surf_nyze",
+"score": 57.0,
+"completions": 33505
+},
+{
+"name": "surf_cyka_ksf",
+"score": 57.0,
+"completions": 33356
+},
+{
+"name": "surf_zae",
+"score": 57.0,
+"completions": 33339
+},
+{
+"name": "surf_exxak",
+"score": 56.9,
+"completions": 33240
+},
+{
+"name": "surf_saturday",
+"score": 56.9,
+"completions": 33237
+},
+{
+"name": "surf_apollo",
+"score": 56.9,
+"completions": 33195
+},
+{
+"name": "surf_exile",
+"score": 56.8,
+"completions": 33085
+},
+{
+"name": "surf_elysium3",
+"score": 56.8,
+"completions": 32987
+},
+{
+"name": "surf_b_r_o_x_x_x",
+"score": 56.8,
+"completions": 32968
+},
+{
+"name": "surf_exocube_h",
+"score": 56.8,
+"completions": 32923
+},
+{
+"name": "surf_vale2",
+"score": 56.7,
+"completions": 32746
+},
+{
+"name": "surf_prosperity_v2",
+"score": 56.6,
+"completions": 32636
+},
+{
+"name": "surf_insignia_b1",
+"score": 56.5,
+"completions": 32402
+},
+{
+"name": "surf_helium_fix",
+"score": 56.4,
+"completions": 32063
+},
+{
+"name": "surf_christmas2",
+"score": 56.3,
+"completions": 32034
+},
+{
+"name": "surf_guitar_hi",
+"score": 56.3,
+"completions": 31980
+},
+{
+"name": "surf_pavilion",
+"score": 56.3,
+"completions": 31882
+},
+{
+"name": "surf_prosaic",
+"score": 56.3,
+"completions": 31880
+},
+{
+"name": "surf_chromatic",
+"score": 56.2,
+"completions": 31847
+},
+{
+"name": "surf_ardon_fix",
+"score": 56.2,
+"completions": 31757
+},
+{
+"name": "surf_blackside",
+"score": 56.2,
+"completions": 31725
+},
+{
+"name": "surf_interstellar",
+"score": 56.1,
+"completions": 31589
+},
+{
+"name": "surf_excavation",
+"score": 56.0,
+"completions": 31320
+},
+{
+"name": "surf_mesa_mine",
+"score": 56.0,
+"completions": 31317
+},
+{
+"name": "surf_metallic",
+"score": 56.0,
+"completions": 31308
+},
+{
+"name": "surf_outside",
+"score": 55.9,
+"completions": 31255
+},
+{
+"name": "surf_wood",
+"score": 55.9,
+"completions": 31193
+},
+{
+"name": "surf_ebony",
+"score": 55.8,
+"completions": 30996
+},
+{
+"name": "surf_nesquik",
+"score": 55.8,
+"completions": 30899
+},
+{
+"name": "surf_adtr_njv",
+"score": 55.8,
+"completions": 30898
+},
+{
+"name": "surf_lolrevlis",
+"score": 55.8,
+"completions": 30887
+},
+{
+"name": "surf_finesse_final",
+"score": 55.8,
+"completions": 30866
+},
+{
+"name": "surf_abstinens",
+"score": 55.7,
+"completions": 30850
+},
+{
+"name": "surf_artifex",
+"score": 55.7,
+"completions": 30828
+},
+{
+"name": "surf_neoplasma_ksf",
+"score": 55.7,
+"completions": 30734
+},
+{
+"name": "surf_ragequit",
+"score": 55.7,
+"completions": 30732
+},
+{
+"name": "surf_spectrum_njv",
+"score": 55.7,
+"completions": 30692
+},
+{
+"name": "surf_nebula",
+"score": 55.6,
+"completions": 30579
+},
+{
+"name": "surf_dragon",
+"score": 55.4,
+"completions": 30175
+},
+{
+"name": "surf_nova",
+"score": 55.3,
+"completions": 30031
+},
+{
+"name": "surf_beyer2",
+"score": 55.3,
+"completions": 30007
+},
+{
+"name": "surf_vale",
+"score": 55.3,
+"completions": 29987
+},
+{
+"name": "surf_r-ne",
+"score": 55.2,
+"completions": 29885
+},
+{
+"name": "surf_halloween_fix",
+"score": 55.2,
+"completions": 29853
+},
+{
+"name": "surf_quirky",
+"score": 55.2,
+"completions": 29840
+},
+{
+"name": "surf_not_so_disaster",
+"score": 55.2,
+"completions": 29777
+},
+{
+"name": "surf_globalchaos",
+"score": 55.2,
+"completions": 29770
+},
+{
+"name": "surf_waterworks",
+"score": 55.1,
+"completions": 29691
+},
+{
+"name": "surf_mate",
+"score": 55.1,
+"completions": 29659
+},
+{
+"name": "surf_acerbus",
+"score": 55.1,
+"completions": 29656
+},
+{
+"name": "surf_runewords",
+"score": 55.1,
+"completions": 29622
+},
+{
+"name": "surf_orbion",
+"score": 55.0,
+"completions": 29479
+},
+{
+"name": "surf_z",
+"score": 55.0,
+"completions": 29462
+},
+{
+"name": "surf_polygon",
+"score": 55.0,
+"completions": 29356
+},
+{
+"name": "surf_cartoon",
+"score": 54.9,
+"completions": 29210
+},
+{
+"name": "surf_kvas",
+"score": 54.8,
+"completions": 29137
+},
+{
+"name": "surf_unraveled",
+"score": 54.8,
+"completions": 29117
+},
+{
+"name": "surf_awakening",
+"score": 54.8,
+"completions": 29112
+},
+{
+"name": "surf_leet_xl_beta7z",
+"score": 54.8,
+"completions": 29094
+},
+{
+"name": "surf_eternal_beta",
+"score": 54.7,
+"completions": 28928
+},
+{
+"name": "surf_razer_final",
+"score": 54.6,
+"completions": 28706
+},
+{
+"name": "surf_banger",
+"score": 54.6,
+"completions": 28646
+},
+{
+"name": "surf_amplitude_apex",
+"score": 54.6,
+"completions": 28642
+},
+{
+"name": "surf_lost2",
+"score": 54.5,
+"completions": 28534
+},
+{
+"name": "surf_sempar_njv",
+"score": 54.5,
+"completions": 28527
+},
+{
+"name": "surf_paranoid_enigma",
+"score": 54.4,
+"completions": 28327
+},
+{
+"name": "surf_technique",
+"score": 54.4,
+"completions": 28309
+},
+{
+"name": "surf_happyhug",
+"score": 54.4,
+"completions": 28272
+},
+{
+"name": "surf_qlimax_q",
+"score": 54.3,
+"completions": 28140
+},
+{
+"name": "surf_sinister2",
+"score": 54.3,
+"completions": 28097
+},
+{
+"name": "surf_discovery",
+"score": 54.2,
+"completions": 28030
+},
+{
+"name": "surf_garden_h",
+"score": 54.2,
+"completions": 27936
+},
+{
+"name": "surf_inspire",
+"score": 54.0,
+"completions": 27549
+},
+{
+"name": "surf_desolate",
+"score": 54.0,
+"completions": 27543
+},
+{
+"name": "surf_slobs",
+"score": 54.0,
+"completions": 27535
+},
+{
+"name": "surf_trapped",
+"score": 53.9,
+"completions": 27475
+},
+{
+"name": "surf_froots2",
+"score": 53.9,
+"completions": 27360
+},
+{
+"name": "surf_resource",
+"score": 53.8,
+"completions": 27190
+},
+{
+"name": "surf_flow_ksf",
+"score": 53.7,
+"completions": 27140
+},
+{
+"name": "surf_neoteric_retexture",
+"score": 53.7,
+"completions": 27129
+},
+{
+"name": "surf_faint_fix",
+"score": 53.7,
+"completions": 27047
+},
+{
+"name": "surf_lithium2",
+"score": 53.6,
+"completions": 26960
+},
+{
+"name": "surf_x",
+"score": 53.5,
+"completions": 26791
+},
+{
+"name": "surf_compact",
+"score": 53.5,
+"completions": 26721
+},
+{
+"name": "surf_lost",
+"score": 53.5,
+"completions": 26670
+},
+{
+"name": "surf_illumination",
+"score": 53.4,
+"completions": 26650
+},
+{
+"name": "surf_and_destroy_fix",
+"score": 53.4,
+"completions": 26609
+},
+{
+"name": "surf_the_internet",
+"score": 53.4,
+"completions": 26594
+},
+{
+"name": "surf_rocco_v2",
+"score": 53.4,
+"completions": 26560
+},
+{
+"name": "surf_jizznipples",
+"score": 53.3,
+"completions": 26429
+},
+{
+"name": "surf_ultimatum",
+"score": 53.3,
+"completions": 26381
+},
+{
+"name": "surf_runewords2",
+"score": 53.3,
+"completions": 26374
+},
+{
+"name": "surf_zeitgeist",
+"score": 53.2,
+"completions": 26257
+},
+{
+"name": "surf_pox",
+"score": 53.2,
+"completions": 26244
+},
+{
+"name": "surf_tundra_v2",
+"score": 53.2,
+"completions": 26164
+},
+{
+"name": "surf_goliath",
+"score": 53.2,
+"completions": 26154
+},
+{
+"name": "surf_antimatter_v2",
+"score": 53.2,
+"completions": 26149
+},
+{
+"name": "surf_transient",
+"score": 53.0,
+"completions": 25964
+},
+{
+"name": "surf_the_gloaming",
+"score": 53.0,
+"completions": 25954
+},
+{
+"name": "surf_freaky",
+"score": 53.0,
+"completions": 25928
+},
+{
+"name": "surf_mynah_final",
+"score": 53.0,
+"completions": 25824
+},
+{
+"name": "surf_echo",
+"score": 52.9,
+"completions": 25804
+},
+{
+"name": "surf_gleam",
+"score": 52.9,
+"completions": 25800
+},
+{
+"name": "surf_wazor_ksf",
+"score": 52.9,
+"completions": 25789
+},
+{
+"name": "surf_ezclap",
+"score": 52.9,
+"completions": 25758
+},
+{
+"name": "surf_legends",
+"score": 52.9,
+"completions": 25697
+},
+{
+"name": "surf_kawaii",
+"score": 52.9,
+"completions": 25681
+},
+{
+"name": "surf_minigolf_ksf",
+"score": 52.9,
+"completions": 25663
+},
+{
+"name": "surf_sundown",
+"score": 52.8,
+"completions": 25620
+},
+{
+"name": "surf_grassland",
+"score": 52.7,
+"completions": 25461
+},
+{
+"name": "surf_demise",
+"score": 52.7,
+"completions": 25451
+},
+{
+"name": "surf_nac",
+"score": 52.7,
+"completions": 25419
+},
+{
+"name": "surf_interceptor",
+"score": 52.7,
+"completions": 25395
+},
+{
+"name": "surf_blub",
+"score": 52.7,
+"completions": 25373
+},
+{
+"name": "surf_hyper",
+"score": 52.7,
+"completions": 25364
+},
+{
+"name": "surf_zealand",
+"score": 52.6,
+"completions": 25279
+},
+{
+"name": "surf_enlightened_ksf",
+"score": 52.6,
+"completions": 25220
+},
+{
+"name": "surf_elites_v2",
+"score": 52.6,
+"completions": 25174
+},
+{
+"name": "surf_asrown",
+"score": 52.5,
+"completions": 25139
+},
+{
+"name": "surf_juturna",
+"score": 52.4,
+"completions": 24987
+},
+{
+"name": "surf_whatever",
+"score": 52.4,
+"completions": 24910
+},
+{
+"name": "surf_quarantine",
+"score": 52.3,
+"completions": 24842
+},
+{
+"name": "surf_compulsive_njv_h",
+"score": 52.3,
+"completions": 24778
+},
+{
+"name": "surf_timewarp",
+"score": 52.3,
+"completions": 24729
+},
+{
+"name": "surf_akai_final",
+"score": 52.2,
+"completions": 24657
+},
+{
+"name": "surf_entropy_finalv2",
+"score": 52.1,
+"completions": 24508
+},
+{
+"name": "surf_ab",
+"score": 52.0,
+"completions": 24368
+},
+{
+"name": "surf_illumination2",
+"score": 51.9,
+"completions": 24148
+},
+{
+"name": "surf_agony",
+"score": 51.9,
+"completions": 24125
+},
+{
+"name": "surf_divided_fix",
+"score": 51.8,
+"completions": 24008
+},
+{
+"name": "surf_rebel_resistance_final3",
+"score": 51.7,
+"completions": 23887
+},
+{
+"name": "surf_duggywuggy",
+"score": 51.7,
+"completions": 23871
+},
+{
+"name": "surf_ultimate_fix",
+"score": 51.7,
+"completions": 23842
+},
+{
+"name": "surf_zor",
+"score": 51.7,
+"completions": 23839
+},
+{
+"name": "surf_tenacious",
+"score": 51.7,
+"completions": 23816
+},
+{
+"name": "surf_driftless",
+"score": 51.6,
+"completions": 23748
+},
+{
+"name": "surf_construction",
+"score": 51.6,
+"completions": 23656
+},
+{
+"name": "surf_helloworld",
+"score": 51.5,
+"completions": 23479
+},
+{
+"name": "surf_delight",
+"score": 51.4,
+"completions": 23316
+},
+{
+"name": "surf_lax",
+"score": 51.2,
+"completions": 23155
+},
+{
+"name": "surf_prelude_fix",
+"score": 51.2,
+"completions": 23131
+},
+{
+"name": "surf_network2008_final",
+"score": 51.2,
+"completions": 23084
+},
+{
+"name": "surf_tensile_njv",
+"score": 51.0,
+"completions": 22829
+},
+{
+"name": "surf_sunset2_fix",
+"score": 51.0,
+"completions": 22824
+},
+{
+"name": "surf_diamond_beta1",
+"score": 51.0,
+"completions": 22824
+},
+{
+"name": "surf_quasar_final",
+"score": 51.0,
+"completions": 22752
+},
+{
+"name": "surf_4dimensional",
+"score": 50.9,
+"completions": 22703
+},
+{
+"name": "surf_grotto",
+"score": 50.9,
+"completions": 22694
+},
+{
+"name": "surf_elysium4",
+"score": 50.9,
+"completions": 22659
+},
+{
+"name": "surf_not_so_generated",
+"score": 50.9,
+"completions": 22618
+},
+{
+"name": "surf_semesterbreak",
+"score": 50.8,
+"completions": 22489
+},
+{
+"name": "surf_island",
+"score": 50.7,
+"completions": 22419
+},
+{
+"name": "surf_life_of_cow",
+"score": 50.7,
+"completions": 22412
+},
+{
+"name": "surf_sanguine",
+"score": 50.7,
+"completions": 22359
+},
+{
+"name": "surf_epicube",
+"score": 50.6,
+"completions": 22273
+},
+{
+"name": "surf_aqua_fix",
+"score": 50.6,
+"completions": 22246
+},
+{
+"name": "surf_eggplant",
+"score": 50.6,
+"completions": 22245
+},
+{
+"name": "surf_squirrelsonvacation",
+"score": 50.6,
+"completions": 22207
+},
+{
+"name": "surf_papertown",
+"score": 50.6,
+"completions": 22187
+},
+{
+"name": "surf_concretejungle_fix",
+"score": 50.6,
+"completions": 22167
+},
+{
+"name": "surf_infamous_ksf",
+"score": 50.6,
+"completions": 22164
+},
+{
+"name": "surf_flyin_fortress_fix",
+"score": 50.5,
+"completions": 22140
+},
+{
+"name": "surf_journeys",
+"score": 50.5,
+"completions": 22085
+},
+{
+"name": "surf_coralis_ksf",
+"score": 50.5,
+"completions": 22035
+},
+{
+"name": "surf_extremex2_5",
+"score": 50.4,
+"completions": 22008
+},
+{
+"name": "surf_004_fix",
+"score": 50.4,
+"completions": 21881
+},
+{
+"name": "surf_unreal2",
+"score": 50.3,
+"completions": 21851
+},
+{
+"name": "surf_not_so_quick",
+"score": 50.3,
+"completions": 21754
+},
+{
+"name": "surf_proliferation",
+"score": 50.3,
+"completions": 21737
+},
+{
+"name": "surf_serenity",
+"score": 50.2,
+"completions": 21704
+},
+{
+"name": "surf_sluice_final",
+"score": 50.2,
+"completions": 21703
+},
+{
+"name": "surf_tranquil",
+"score": 50.2,
+"completions": 21701
+},
+{
+"name": "surf_aquaflow",
+"score": 50.2,
+"completions": 21693
+},
+{
+"name": "surf_dhyana",
+"score": 50.2,
+"completions": 21649
+},
+{
+"name": "surf_calycate2",
+"score": 50.2,
+"completions": 21635
+},
+{
+"name": "surf_sh",
+"score": 50.2,
+"completions": 21629
+},
+{
+"name": "surf_wasteland2",
+"score": 50.2,
+"completions": 21611
+},
+{
+"name": "surf_tronia_refix",
+"score": 50.1,
+"completions": 21498
+},
+{
+"name": "surf_salient",
+"score": 50.1,
+"completions": 21475
+},
+{
+"name": "surf_happyhands2",
+"score": 50.0,
+"completions": 21424
+},
+{
+"name": "surf_treespam",
+"score": 50.0,
+"completions": 21368
+},
+{
+"name": "surf_egypt2",
+"score": 49.9,
+"completions": 21240
+},
+{
+"name": "surf_mephobia_final",
+"score": 49.8,
+"completions": 21176
+},
+{
+"name": "surf_rubiks_cube",
+"score": 49.8,
+"completions": 21132
+},
+{
+"name": "surf_seaworld_fix",
+"score": 49.7,
+"completions": 21037
+},
+{
+"name": "surf_zen",
+"score": 49.6,
+"completions": 20898
+},
+{
+"name": "surf_mellow",
+"score": 49.6,
+"completions": 20797
+},
+{
+"name": "surf_shoria",
+"score": 49.5,
+"completions": 20713
+},
+{
+"name": "surf_vector_final",
+"score": 49.4,
+"completions": 20604
+},
+{
+"name": "surf_twilight_njv",
+"score": 49.3,
+"completions": 20501
+},
+{
+"name": "surf_lockdown",
+"score": 49.3,
+"completions": 20486
+},
+{
+"name": "surf_trance",
+"score": 49.3,
+"completions": 20457
+},
+{
+"name": "surf_wasteland",
+"score": 49.3,
+"completions": 20451
+},
+{
+"name": "surf_seaside",
+"score": 49.3,
+"completions": 20448
+},
+{
+"name": "surf_eryr",
+"score": 49.3,
+"completions": 20440
+},
+{
+"name": "surf_lovetunnel",
+"score": 49.3,
+"completions": 20432
+},
+{
+"name": "surf_awp_sk337_v3",
+"score": 49.2,
+"completions": 20287
+},
+{
+"name": "surf_6",
+"score": 49.1,
+"completions": 20239
+},
+{
+"name": "surf_perforated_restored",
+"score": 49.1,
+"completions": 20216
+},
+{
+"name": "surf_abandoned",
+"score": 49.1,
+"completions": 20204
+},
+{
+"name": "surf_happyhands3",
+"score": 48.9,
+"completions": 19913
+},
+{
+"name": "surf_sunday",
+"score": 48.8,
+"completions": 19857
+},
+{
+"name": "surf_domain",
+"score": 48.8,
+"completions": 19845
+},
+{
+"name": "surf_sci_fi",
+"score": 48.7,
+"completions": 19753
+},
+{
+"name": "surf_funhouse_v1",
+"score": 48.7,
+"completions": 19677
+},
+{
+"name": "surf_germania",
+"score": 48.7,
+"completions": 19671
+},
+{
+"name": "surf_rez2",
+"score": 48.6,
+"completions": 19550
+},
+{
+"name": "surf_citypop",
+"score": 48.6,
+"completions": 19510
+},
+{
+"name": "surf_amplitude_light",
+"score": 48.5,
+"completions": 19473
+},
+{
+"name": "surf_be_gentle",
+"score": 48.4,
+"completions": 19331
+},
+{
+"name": "surf_quattro",
+"score": 48.4,
+"completions": 19321
+},
+{
+"name": "surf_lullaby_ksf",
+"score": 48.4,
+"completions": 19286
+},
+{
+"name": "surf_odyssey",
+"score": 48.3,
+"completions": 19221
+},
+{
+"name": "surf_lux",
+"score": 48.2,
+"completions": 19093
+},
+{
+"name": "surf_android_ksf",
+"score": 48.2,
+"completions": 19070
+},
+{
+"name": "surf_redemption_b1",
+"score": 48.2,
+"completions": 19040
+},
+{
+"name": "surf_zen2",
+"score": 48.0,
+"completions": 18875
+},
+{
+"name": "surf_halloween_tf2",
+"score": 48.0,
+"completions": 18863
+},
+{
+"name": "surf_trihard",
+"score": 48.0,
+"completions": 18853
+},
+{
+"name": "surf_a",
+"score": 48.0,
+"completions": 18776
+},
+{
+"name": "surf_sinsane_ksf",
+"score": 47.9,
+"completions": 18732
+},
+{
+"name": "surf_sensation_fix",
+"score": 47.9,
+"completions": 18730
+},
+{
+"name": "surf_amplitude_encore",
+"score": 47.9,
+"completions": 18681
+},
+{
+"name": "surf_cavemissile_fix",
+"score": 47.9,
+"completions": 18671
+},
+{
+"name": "surf_gekar",
+"score": 47.9,
+"completions": 18668
+},
+{
+"name": "surf_izded",
+"score": 47.8,
+"completions": 18612
+},
+{
+"name": "surf_instantdeath",
+"score": 47.7,
+"completions": 18511
+},
+{
+"name": "surf_tropic_ksf",
+"score": 47.7,
+"completions": 18482
+},
+{
+"name": "surf_tomb_redone",
+"score": 47.6,
+"completions": 18365
+},
+{
+"name": "surf_hurrr",
+"score": 47.6,
+"completions": 18351
+},
+{
+"name": "surf_rustic_v2",
+"score": 47.6,
+"completions": 18316
+},
+{
+"name": "surf_klue",
+"score": 47.6,
+"completions": 18309
+},
+{
+"name": "surf_thesteve",
+"score": 47.5,
+"completions": 18190
+},
+{
+"name": "surf_fabas",
+"score": 47.2,
+"completions": 17933
+},
+{
+"name": "surf_indecisive",
+"score": 47.2,
+"completions": 17880
+},
+{
+"name": "surf_euphoria",
+"score": 47.2,
+"completions": 17858
+},
+{
+"name": "surf_pogchamp",
+"score": 47.1,
+"completions": 17796
+},
+{
+"name": "surf_stonework2",
+"score": 47.1,
+"completions": 17773
+},
+{
+"name": "surf_interference",
+"score": 47.1,
+"completions": 17744
+},
+{
+"name": "surf_hope",
+"score": 47.0,
+"completions": 17725
+},
+{
+"name": "surf_intense_ksf",
+"score": 47.0,
+"completions": 17656
+},
+{
+"name": "surf_luminaris_refix",
+"score": 46.9,
+"completions": 17594
+},
+{
+"name": "surf_pathfinder",
+"score": 46.8,
+"completions": 17449
+},
+{
+"name": "surf_grid_ksf",
+"score": 46.8,
+"completions": 17439
+},
+{
+"name": "surf_psi_fixed",
+"score": 46.7,
+"completions": 17293
+},
+{
+"name": "surf_low_production",
+"score": 46.6,
+"completions": 17176
+},
+{
+"name": "surf_entropy_hardmode",
+"score": 46.5,
+"completions": 17146
+},
+{
+"name": "surf_masonry",
+"score": 46.5,
+"completions": 17127
+},
+{
+"name": "surf_slob2_fix",
+"score": 46.5,
+"completions": 17109
+},
+{
+"name": "surf_barbies_malibu_adventure",
+"score": 46.5,
+"completions": 17099
+},
+{
+"name": "surf_zenith",
+"score": 46.5,
+"completions": 17078
+},
+{
+"name": "surf_ny_momentum_v3_1",
+"score": 46.4,
+"completions": 16987
+},
+{
+"name": "surf_rst",
+"score": 46.3,
+"completions": 16876
+},
+{
+"name": "surf_network_2009",
+"score": 46.3,
+"completions": 16873
+},
+{
+"name": "surf_memories",
+"score": 46.3,
+"completions": 16868
+},
+{
+"name": "surf_palais",
+"score": 46.1,
+"completions": 16697
+},
+{
+"name": "surf_funhouse2",
+"score": 46.1,
+"completions": 16674
+},
+{
+"name": "surf_looksmodern",
+"score": 46.1,
+"completions": 16655
+},
+{
+"name": "surf_taq",
+"score": 46.1,
+"completions": 16632
+},
+{
+"name": "surf_ravine",
+"score": 46.0,
+"completions": 16624
+},
+{
+"name": "surf_bikini_bottom",
+"score": 46.0,
+"completions": 16543
+},
+{
+"name": "surf_wicked",
+"score": 45.9,
+"completions": 16492
+},
+{
+"name": "surf_fantasy",
+"score": 45.9,
+"completions": 16489
+},
+{
+"name": "surf_sandbrick",
+"score": 45.9,
+"completions": 16434
+},
+{
+"name": "surf_axiom",
+"score": 45.8,
+"completions": 16417
+},
+{
+"name": "surf_cannonball",
+"score": 45.8,
+"completions": 16414
+},
+{
+"name": "surf_shodan",
+"score": 45.7,
+"completions": 16316
+},
+{
+"name": "surf_ruse",
+"score": 45.7,
+"completions": 16304
+},
+{
+"name": "surf_quickie_fix",
+"score": 45.7,
+"completions": 16298
+},
+{
+"name": "surf_anubis_ksf",
+"score": 45.6,
+"completions": 16212
+},
+{
+"name": "surf_zbig2",
+"score": 45.6,
+"completions": 16203
+},
+{
+"name": "surf_kismet",
+"score": 45.6,
+"completions": 16202
+},
+{
+"name": "surf_greensway",
+"score": 45.6,
+"completions": 16159
+},
+{
+"name": "surf_hourglass",
+"score": 45.5,
+"completions": 16084
+},
+{
+"name": "surf_sofia_fix",
+"score": 45.4,
+"completions": 15993
+},
+{
+"name": "surf_innokia",
+"score": 45.4,
+"completions": 15964
+},
+{
+"name": "surf_bugs",
+"score": 45.4,
+"completions": 15933
+},
+{
+"name": "surf_loentra",
+"score": 45.3,
+"completions": 15858
+},
+{
+"name": "surf_aether",
+"score": 45.3,
+"completions": 15816
+},
+{
+"name": "surf_frequency_njv",
+"score": 45.2,
+"completions": 15759
+},
+{
+"name": "surf_rebel_scaz_ksf",
+"score": 45.2,
+"completions": 15754
+},
+{
+"name": "surf_dynasty",
+"score": 45.1,
+"completions": 15647
+},
+{
+"name": "surf_tronic_njv",
+"score": 44.9,
+"completions": 15490
+},
+{
+"name": "surf_kalium",
+"score": 44.8,
+"completions": 15390
+},
+{
+"name": "surf_hero",
+"score": 44.8,
+"completions": 15332
+},
+{
+"name": "surf_chungus_fungus",
+"score": 44.8,
+"completions": 15314
+},
+{
+"name": "surf_the_distance",
+"score": 44.7,
+"completions": 15234
+},
+{
+"name": "surf_sedona",
+"score": 44.7,
+"completions": 15231
+},
+{
+"name": "surf_zoomathon",
+"score": 44.7,
+"completions": 15218
+},
+{
+"name": "surf_diminsion",
+"score": 44.6,
+"completions": 15155
+},
+{
+"name": "surf_monolith",
+"score": 44.6,
+"completions": 15148
+},
+{
+"name": "surf_calycate_ksf",
+"score": 44.5,
+"completions": 15046
+},
+{
+"name": "surf_beyer",
+"score": 44.4,
+"completions": 14938
+},
+{
+"name": "surf_pls",
+"score": 44.4,
+"completions": 14935
+},
+{
+"name": "surf_leesriize_ksf",
+"score": 44.4,
+"completions": 14933
+},
+{
+"name": "surf_minimumwage",
+"score": 44.3,
+"completions": 14905
+},
+{
+"name": "surf_void",
+"score": 44.3,
+"completions": 14888
+},
+{
+"name": "surf_underworld",
+"score": 44.3,
+"completions": 14878
+},
+{
+"name": "surf_pipeline",
+"score": 44.3,
+"completions": 14868
+},
+{
+"name": "surf_lament_ksf",
+"score": 44.2,
+"completions": 14797
+},
+{
+"name": "surf_loweffort",
+"score": 44.2,
+"completions": 14784
+},
+{
+"name": "surf_devil",
+"score": 44.2,
+"completions": 14766
+},
+{
+"name": "surf_minecraft_fix",
+"score": 44.1,
+"completions": 14726
+},
+{
+"name": "surf_kultur",
+"score": 44.1,
+"completions": 14708
+},
+{
+"name": "surf_midsommar",
+"score": 44.0,
+"completions": 14620
+},
+{
+"name": "surf_sandstorm2",
+"score": 44.0,
+"completions": 14588
+},
+{
+"name": "surf_leidenfrost",
+"score": 43.9,
+"completions": 14526
+},
+{
+"name": "surf_aux",
+"score": 43.8,
+"completions": 14386
+},
+{
+"name": "surf_corruption",
+"score": 43.6,
+"completions": 14228
+},
+{
+"name": "surf_fractal",
+"score": 43.6,
+"completions": 14211
+},
+{
+"name": "surf_porn_fix",
+"score": 43.5,
+"completions": 14157
+},
+{
+"name": "surf_threnody",
+"score": 43.5,
+"completions": 14152
+},
+{
+"name": "surf_krow10",
+"score": 43.5,
+"completions": 14093
+},
+{
+"name": "surf_epiphany",
+"score": 43.4,
+"completions": 14064
+},
+{
+"name": "surf_facility",
+"score": 43.4,
+"completions": 14035
+},
+{
+"name": "surf_glass9",
+"score": 43.4,
+"completions": 14015
+},
+{
+"name": "surf_gloomy",
+"score": 43.3,
+"completions": 13978
+},
+{
+"name": "surf_vast",
+"score": 43.2,
+"completions": 13844
+},
+{
+"name": "surf_calibration",
+"score": 43.2,
+"completions": 13836
+},
+{
+"name": "surf_adventure_final",
+"score": 43.1,
+"completions": 13771
+},
+{
+"name": "surf_salient2",
+"score": 43.1,
+"completions": 13760
+},
+{
+"name": "surf_fiellu_ksf",
+"score": 43.0,
+"completions": 13732
+},
+{
+"name": "surf_verge",
+"score": 42.9,
+"completions": 13622
+},
+{
+"name": "surf_spaceship_ksf",
+"score": 42.8,
+"completions": 13539
+},
+{
+"name": "surf_aeron",
+"score": 42.6,
+"completions": 13357
+},
+{
+"name": "surf_nemesis",
+"score": 42.6,
+"completions": 13339
+},
+{
+"name": "surf_whoknows2",
+"score": 42.6,
+"completions": 13331
+},
+{
+"name": "surf_glass7_ksf",
+"score": 42.6,
+"completions": 13324
+},
+{
+"name": "surf_tempest",
+"score": 42.4,
+"completions": 13214
+},
+{
+"name": "surf_christmas3",
+"score": 42.4,
+"completions": 13196
+},
+{
+"name": "surf_tycho_fix",
+"score": 42.4,
+"completions": 13195
+},
+{
+"name": "surf_depths",
+"score": 42.2,
+"completions": 13043
+},
+{
+"name": "surf_shy",
+"score": 42.2,
+"completions": 12998
+},
+{
+"name": "surf_selenka",
+"score": 42.0,
+"completions": 12842
+},
+{
+"name": "surf_eryr2_fix",
+"score": 41.9,
+"completions": 12768
+},
+{
+"name": "surf_mdrn",
+"score": 41.8,
+"completions": 12704
+},
+{
+"name": "surf_cordelia",
+"score": 41.8,
+"completions": 12675
+},
+{
+"name": "surf_minuet_ksf",
+"score": 41.6,
+"completions": 12551
+},
+{
+"name": "surf_prosurf",
+"score": 41.6,
+"completions": 12550
+},
+{
+"name": "surf_25_lighters",
+"score": 41.6,
+"completions": 12498
+},
+{
+"name": "surf_sippysip",
+"score": 41.6,
+"completions": 12488
+},
+{
+"name": "surf_stagejuan_ksf",
+"score": 41.5,
+"completions": 12474
+},
+{
+"name": "surf_oddworld",
+"score": 41.5,
+"completions": 12471
+},
+{
+"name": "surf_nsz_fix",
+"score": 41.5,
+"completions": 12463
+},
+{
+"name": "surf_whoknows_ksf",
+"score": 41.4,
+"completions": 12397
+},
+{
+"name": "surf_tensor",
+"score": 41.4,
+"completions": 12357
+},
+{
+"name": "surf_milkyway",
+"score": 41.4,
+"completions": 12356
+},
+{
+"name": "surf_efficacy",
+"score": 41.3,
+"completions": 12294
+},
+{
+"name": "surf_polonia",
+"score": 41.1,
+"completions": 12158
+},
+{
+"name": "surf_forbidden_tomb4",
+"score": 41.1,
+"completions": 12128
+},
+{
+"name": "surf_brutalist",
+"score": 41.1,
+"completions": 12102
+},
+{
+"name": "surf_salvador_ksf",
+"score": 40.9,
+"completions": 11967
+},
+{
+"name": "surf_delta",
+"score": 40.9,
+"completions": 11955
+},
+{
+"name": "surf_loweffort2",
+"score": 40.8,
+"completions": 11934
+},
+{
+"name": "surf_togo",
+"score": 40.8,
+"completions": 11926
+},
+{
+"name": "surf_serenity2",
+"score": 40.8,
+"completions": 11919
+},
+{
+"name": "surf_primero_fix",
+"score": 40.8,
+"completions": 11905
+},
+{
+"name": "surf_shibboleth",
+"score": 40.8,
+"completions": 11902
+},
+{
+"name": "surf_kairo",
+"score": 40.8,
+"completions": 11893
+},
+{
+"name": "surf_satellite_fix",
+"score": 40.8,
+"completions": 11883
+},
+{
+"name": "surf_tensor2",
+"score": 40.8,
+"completions": 11871
+},
+{
+"name": "surf_iceworld",
+"score": 40.8,
+"completions": 11865
+},
+{
+"name": "surf_affliction",
+"score": 40.6,
+"completions": 11762
+},
+{
+"name": "surf_happyhands4",
+"score": 40.6,
+"completions": 11754
+},
+{
+"name": "surf_monotony_ksf",
+"score": 40.4,
+"completions": 11628
+},
+{
+"name": "surf_secluded",
+"score": 40.3,
+"completions": 11541
+},
+{
+"name": "surf_fuchnut",
+"score": 40.3,
+"completions": 11506
+},
+{
+"name": "surf_everdark",
+"score": 40.2,
+"completions": 11483
+},
+{
+"name": "surf_sequoia_fix",
+"score": 40.1,
+"completions": 11406
+},
+{
+"name": "surf_pagoda",
+"score": 40.1,
+"completions": 11372
+},
+{
+"name": "surf_fortress_ksf",
+"score": 40.0,
+"completions": 11338
+},
+{
+"name": "surf_kaaba",
+"score": 40.0,
+"completions": 11328
+},
+{
+"name": "surf_placid",
+"score": 40.0,
+"completions": 11304
+},
+{
+"name": "surf_triggered_fix",
+"score": 40.0,
+"completions": 11299
+},
+{
+"name": "surf_industries",
+"score": 39.9,
+"completions": 11249
+},
+{
+"name": "surf_this_njv",
+"score": 39.8,
+"completions": 11172
+},
+{
+"name": "surf_map_njv",
+"score": 39.8,
+"completions": 11171
+},
+{
+"name": "surf_whynot",
+"score": 39.7,
+"completions": 11121
+},
+{
+"name": "surf_fuckyall",
+"score": 39.6,
+"completions": 11055
+},
+{
+"name": "surf_valpect",
+"score": 39.6,
+"completions": 11048
+},
+{
+"name": "surf_revolution_fix",
+"score": 39.6,
+"completions": 11044
+},
+{
+"name": "surf_nocturn",
+"score": 39.6,
+"completions": 11016
+},
+{
+"name": "surf_stickybutt_alpha",
+"score": 39.4,
+"completions": 10878
+},
+{
+"name": "surf_catalyst2",
+"score": 39.3,
+"completions": 10824
+},
+{
+"name": "surf_2pacisalive",
+"score": 39.3,
+"completions": 10818
+},
+{
+"name": "surf_subway",
+"score": 39.1,
+"completions": 10660
+},
+{
+"name": "surf_koa",
+"score": 39.0,
+"completions": 10600
+},
+{
+"name": "surf_brodderlands",
+"score": 38.9,
+"completions": 10576
+},
+{
+"name": "surf_bumpybusride",
+"score": 38.9,
+"completions": 10551
+},
+{
+"name": "surf_bonk",
+"score": 38.9,
+"completions": 10546
+},
+{
+"name": "surf_spooky",
+"score": 38.8,
+"completions": 10471
+},
+{
+"name": "surf_cookiejar",
+"score": 38.7,
+"completions": 10420
+},
+{
+"name": "surf_ny_momentum2_ksf",
+"score": 38.7,
+"completions": 10389
+},
+{
+"name": "surf_infrared",
+"score": 38.6,
+"completions": 10368
+},
+{
+"name": "surf_eunoia",
+"score": 38.6,
+"completions": 10365
+},
+{
+"name": "surf_exogenesis",
+"score": 38.6,
+"completions": 10348
+},
+{
+"name": "surf_hyper2",
+"score": 38.5,
+"completions": 10267
+},
+{
+"name": "surf_our",
+"score": 38.5,
+"completions": 10257
+},
+{
+"name": "surf_ofrenda",
+"score": 38.3,
+"completions": 10133
+},
+{
+"name": "surf_morbid2",
+"score": 38.3,
+"completions": 10124
+},
+{
+"name": "surf_mesa_aether",
+"score": 38.3,
+"completions": 10118
+},
+{
+"name": "surf_antimatter2",
+"score": 38.2,
+"completions": 10076
+},
+{
+"name": "surf_smart",
+"score": 38.1,
+"completions": 9999
+},
+{
+"name": "surf_clavius",
+"score": 38.0,
+"completions": 9986
+},
+{
+"name": "surf_huh",
+"score": 38.0,
+"completions": 9983
+},
+{
+"name": "surf_remeanian",
+"score": 38.0,
+"completions": 9960
+},
+{
+"name": "surf_drifting",
+"score": 37.9,
+"completions": 9882
+},
+{
+"name": "surf_nostromo",
+"score": 37.8,
+"completions": 9803
+},
+{
+"name": "surf_anything",
+"score": 37.7,
+"completions": 9799
+},
+{
+"name": "surf_insideout_final",
+"score": 37.6,
+"completions": 9713
+},
+{
+"name": "surf_jaqen",
+"score": 37.6,
+"completions": 9701
+},
+{
+"name": "surf_centipedes",
+"score": 37.5,
+"completions": 9659
+},
+{
+"name": "surf_sidelines",
+"score": 37.5,
+"completions": 9645
+},
+{
+"name": "surf_retroartz",
+"score": 37.5,
+"completions": 9620
+},
+{
+"name": "surf_jagerbomb",
+"score": 37.2,
+"completions": 9458
+},
+{
+"name": "surf_earthmover",
+"score": 37.2,
+"completions": 9450
+},
+{
+"name": "surf_skill8",
+"score": 37.2,
+"completions": 9447
+},
+{
+"name": "surf_edge",
+"score": 37.0,
+"completions": 9338
+},
+{
+"name": "surf_jumble",
+"score": 37.0,
+"completions": 9323
+},
+{
+"name": "surf_sinsane_ez",
+"score": 36.9,
+"completions": 9265
+},
+{
+"name": "surf_sacrifice",
+"score": 36.7,
+"completions": 9148
+},
+{
+"name": "surf_mushroom_ksf",
+"score": 36.6,
+"completions": 9130
+},
+{
+"name": "surf_symbiosis",
+"score": 36.6,
+"completions": 9117
+},
+{
+"name": "surf_radiant",
+"score": 36.6,
+"completions": 9082
+},
+{
+"name": "surf_oompa_loompa",
+"score": 36.5,
+"completions": 9049
+},
+{
+"name": "surf_medley_fix",
+"score": 36.5,
+"completions": 9047
+},
+{
+"name": "surf_sluice2",
+"score": 36.5,
+"completions": 9035
+},
+{
+"name": "surf_tempest2",
+"score": 36.4,
+"completions": 9020
+},
+{
+"name": "surf_despair",
+"score": 36.4,
+"completions": 9013
+},
+{
+"name": "surf_mudkip",
+"score": 36.4,
+"completions": 8988
+},
+{
+"name": "surf_parrot_selector",
+"score": 36.3,
+"completions": 8939
+},
+{
+"name": "surf_simpsons2",
+"score": 36.1,
+"completions": 8847
+},
+{
+"name": "surf_sexyartz_njv",
+"score": 36.1,
+"completions": 8830
+},
+{
+"name": "surf_runewords2_lod",
+"score": 36.1,
+"completions": 8819
+},
+{
+"name": "surf_assail",
+"score": 36.1,
+"completions": 8808
+},
+{
+"name": "surf_axil",
+"score": 36.1,
+"completions": 8802
+},
+{
+"name": "surf_dynamics_fixed",
+"score": 36.0,
+"completions": 8766
+},
+{
+"name": "surf_goldarn",
+"score": 35.9,
+"completions": 8731
+},
+{
+"name": "surf_sentient",
+"score": 35.9,
+"completions": 8683
+},
+{
+"name": "surf_chateau_fix",
+"score": 35.8,
+"completions": 8656
+},
+{
+"name": "surf_destiny_fixed",
+"score": 35.6,
+"completions": 8533
+},
+{
+"name": "surf_excess",
+"score": 35.6,
+"completions": 8526
+},
+{
+"name": "surf_second",
+"score": 35.6,
+"completions": 8520
+},
+{
+"name": "surf_sinner_ksf",
+"score": 35.5,
+"completions": 8489
+},
+{
+"name": "surf_curious",
+"score": 35.5,
+"completions": 8489
+},
+{
+"name": "surf_ecosystem",
+"score": 35.5,
+"completions": 8467
+},
+{
+"name": "surf_antagonist",
+"score": 35.4,
+"completions": 8456
+},
+{
+"name": "surf_jaqen2",
+"score": 35.4,
+"completions": 8448
+},
+{
+"name": "surf_honour",
+"score": 35.4,
+"completions": 8436
+},
+{
+"name": "surf_santorini3",
+"score": 35.4,
+"completions": 8419
+},
+{
+"name": "surf_lolrevlis2",
+"score": 35.3,
+"completions": 8391
+},
+{
+"name": "surf_bluewinter",
+"score": 35.3,
+"completions": 8371
+},
+{
+"name": "surf_networked",
+"score": 35.3,
+"completions": 8364
+},
+{
+"name": "surf_quilavar",
+"score": 35.1,
+"completions": 8269
+},
+{
+"name": "surf_catalyst",
+"score": 35.0,
+"completions": 8243
+},
+{
+"name": "surf_spectra",
+"score": 35.0,
+"completions": 8217
+},
+{
+"name": "surf_slate",
+"score": 34.7,
+"completions": 8060
+},
+{
+"name": "surf_banana_fix",
+"score": 34.5,
+"completions": 7982
+},
+{
+"name": "surf_cozy",
+"score": 34.5,
+"completions": 7971
+},
+{
+"name": "surf_not_so_prosurf",
+"score": 34.4,
+"completions": 7940
+},
+{
+"name": "surf_zeonine",
+"score": 34.4,
+"completions": 7934
+},
+{
+"name": "surf_chasm",
+"score": 34.4,
+"completions": 7899
+},
+{
+"name": "surf_synada",
+"score": 34.3,
+"completions": 7886
+},
+{
+"name": "surf_cyanide",
+"score": 34.3,
+"completions": 7883
+},
+{
+"name": "surf_ben10",
+"score": 34.3,
+"completions": 7881
+},
+{
+"name": "surf_inrage",
+"score": 34.3,
+"completions": 7861
+},
+{
+"name": "surf_strike",
+"score": 34.3,
+"completions": 7845
+},
+{
+"name": "surf_tron_njv",
+"score": 34.2,
+"completions": 7826
+},
+{
+"name": "surf_hardline",
+"score": 34.2,
+"completions": 7816
+},
+{
+"name": "surf_resort",
+"score": 34.1,
+"completions": 7784
+},
+{
+"name": "surf_exclave_fix",
+"score": 34.1,
+"completions": 7776
+},
+{
+"name": "surf_missing_no",
+"score": 34.0,
+"completions": 7741
+},
+{
+"name": "surf_quartus_ksf",
+"score": 34.0,
+"completions": 7733
+},
+{
+"name": "surf_seraph",
+"score": 34.0,
+"completions": 7706
+},
+{
+"name": "surf_eon_fix",
+"score": 33.9,
+"completions": 7691
+},
+{
+"name": "surf_quantum_njv",
+"score": 33.9,
+"completions": 7691
+},
+{
+"name": "surf_undergrowth",
+"score": 33.8,
+"completions": 7639
+},
+{
+"name": "surf_sewers",
+"score": 33.5,
+"completions": 7495
+},
+{
+"name": "surf_north",
+"score": 33.5,
+"completions": 7483
+},
+{
+"name": "surf_pancake",
+"score": 33.5,
+"completions": 7477
+},
+{
+"name": "surf_autosave_fix",
+"score": 33.4,
+"completions": 7443
+},
+{
+"name": "surf_jusched_beta1",
+"score": 33.4,
+"completions": 7438
+},
+{
+"name": "surf_infected",
+"score": 33.4,
+"completions": 7404
+},
+{
+"name": "surf_network_2013",
+"score": 33.1,
+"completions": 7273
+},
+{
+"name": "surf_selenka2",
+"score": 33.0,
+"completions": 7242
+},
+{
+"name": "surf_hydrogen",
+"score": 33.0,
+"completions": 7238
+},
+{
+"name": "surf_rise",
+"score": 33.0,
+"completions": 7231
+},
+{
+"name": "surf_nikolo",
+"score": 32.9,
+"completions": 7192
+},
+{
+"name": "surf_plethora_fix",
+"score": 32.8,
+"completions": 7143
+},
+{
+"name": "surf_lab",
+"score": 32.7,
+"completions": 7123
+},
+{
+"name": "surf_tequila",
+"score": 32.6,
+"completions": 7075
+},
+{
+"name": "surf_arghmyeyes_retexture",
+"score": 32.6,
+"completions": 7073
+},
+{
+"name": "surf_shade",
+"score": 32.6,
+"completions": 7039
+},
+{
+"name": "surf_tormentor",
+"score": 32.4,
+"completions": 6955
+},
+{
+"name": "surf_monkeys2",
+"score": 32.3,
+"completions": 6942
+},
+{
+"name": "surf_firedancer",
+"score": 32.3,
+"completions": 6940
+},
+{
+"name": "surf_smol",
+"score": 32.3,
+"completions": 6937
+},
+{
+"name": "surf_gigapede",
+"score": 32.2,
+"completions": 6892
+},
+{
+"name": "surf_like_this",
+"score": 32.1,
+"completions": 6818
+},
+{
+"name": "surf_warped",
+"score": 32.0,
+"completions": 6812
+},
+{
+"name": "surf_exurbia2",
+"score": 32.0,
+"completions": 6807
+},
+{
+"name": "surf_unreal_njv",
+"score": 32.0,
+"completions": 6788
+},
+{
+"name": "surf_zoomboys",
+"score": 32.0,
+"completions": 6777
+},
+{
+"name": "surf_monkeys",
+"score": 31.9,
+"completions": 6764
+},
+{
+"name": "surf_hob",
+"score": 31.9,
+"completions": 6757
+},
+{
+"name": "surf_map_h",
+"score": 31.9,
+"completions": 6742
+},
+{
+"name": "surf_tempest4",
+"score": 31.8,
+"completions": 6713
+},
+{
+"name": "surf_ambient_njv",
+"score": 31.8,
+"completions": 6697
+},
+{
+"name": "surf_prolix_fix",
+"score": 31.7,
+"completions": 6681
+},
+{
+"name": "surf_golden_refix",
+"score": 31.6,
+"completions": 6628
+},
+{
+"name": "surf_kartune",
+"score": 31.5,
+"completions": 6583
+},
+{
+"name": "surf_yellow",
+"score": 31.5,
+"completions": 6580
+},
+{
+"name": "surf_replicant",
+"score": 31.4,
+"completions": 6525
+},
+{
+"name": "surf_gauntlet_final",
+"score": 31.3,
+"completions": 6509
+},
+{
+"name": "surf_inferno",
+"score": 31.3,
+"completions": 6495
+},
+{
+"name": "surf_autonomy",
+"score": 31.3,
+"completions": 6477
+},
+{
+"name": "surf_suburbia",
+"score": 31.2,
+"completions": 6470
+},
+{
+"name": "surf_kalium2",
+"score": 31.1,
+"completions": 6435
+},
+{
+"name": "surf_feudal",
+"score": 31.1,
+"completions": 6424
+},
+{
+"name": "surf_damn",
+"score": 31.1,
+"completions": 6411
+},
+{
+"name": "surf_1024",
+"score": 31.1,
+"completions": 6407
+},
+{
+"name": "surf_consistenza_diversa",
+"score": 31.1,
+"completions": 6404
+},
+{
+"name": "surf_vitamin_e",
+"score": 30.9,
+"completions": 6337
+},
+{
+"name": "surf_queen_of_the_ween",
+"score": 30.9,
+"completions": 6336
+},
+{
+"name": "surf_fungus",
+"score": 30.8,
+"completions": 6308
+},
+{
+"name": "surf_castlewalls",
+"score": 30.7,
+"completions": 6271
+},
+{
+"name": "surf_marah",
+"score": 30.6,
+"completions": 6222
+},
+{
+"name": "surf_endeavor",
+"score": 30.6,
+"completions": 6197
+},
+{
+"name": "surf_epithet",
+"score": 30.4,
+"completions": 6143
+},
+{
+"name": "surf_inrage2",
+"score": 30.4,
+"completions": 6117
+},
+{
+"name": "surf_roman_v2",
+"score": 30.2,
+"completions": 6075
+},
+{
+"name": "surf_strafe",
+"score": 30.1,
+"completions": 6009
+},
+{
+"name": "surf_metalwall",
+"score": 30.1,
+"completions": 6009
+},
+{
+"name": "surf_take1",
+"score": 30.1,
+"completions": 6000
+},
+{
+"name": "surf_vienna",
+"score": 30.0,
+"completions": 5995
+},
+{
+"name": "surf_outra",
+"score": 29.7,
+"completions": 5878
+},
+{
+"name": "surf_scarlet_ksf",
+"score": 29.7,
+"completions": 5861
+},
+{
+"name": "surf_skill8_h",
+"score": 29.7,
+"completions": 5855
+},
+{
+"name": "surf_raphaello",
+"score": 29.6,
+"completions": 5846
+},
+{
+"name": "surf_sinsane2",
+"score": 29.6,
+"completions": 5842
+},
+{
+"name": "surf_embrace",
+"score": 29.6,
+"completions": 5838
+},
+{
+"name": "surf_antagonist2",
+"score": 29.3,
+"completions": 5723
+},
+{
+"name": "surf_parrot_selector_h",
+"score": 29.1,
+"completions": 5663
+},
+{
+"name": "surf_cinnamon_fix",
+"score": 29.0,
+"completions": 5625
+},
+{
+"name": "surf_ori_l",
+"score": 29.0,
+"completions": 5597
+},
+{
+"name": "surf_dune",
+"score": 28.9,
+"completions": 5587
+},
+{
+"name": "surf_rewind",
+"score": 28.8,
+"completions": 5556
+},
+{
+"name": "surf_hollow",
+"score": 28.7,
+"completions": 5510
+},
+{
+"name": "surf_again_njv",
+"score": 28.7,
+"completions": 5491
+},
+{
+"name": "surf_perihelion",
+"score": 28.6,
+"completions": 5473
+},
+{
+"name": "surf_crush",
+"score": 28.5,
+"completions": 5433
+},
+{
+"name": "surf_amaro",
+"score": 28.4,
+"completions": 5400
+},
+{
+"name": "surf_dova",
+"score": 28.1,
+"completions": 5308
+},
+{
+"name": "surf_limbo",
+"score": 27.9,
+"completions": 5237
+},
+{
+"name": "surf_celestial",
+"score": 27.9,
+"completions": 5226
+},
+{
+"name": "surf_volcanic",
+"score": 27.8,
+"completions": 5206
+},
+{
+"name": "surf_aphelion",
+"score": 27.7,
+"completions": 5166
+},
+{
+"name": "surf_sylvan",
+"score": 27.4,
+"completions": 5080
+},
+{
+"name": "surf_psychedelia",
+"score": 27.3,
+"completions": 5034
+},
+{
+"name": "surf_executioner",
+"score": 27.3,
+"completions": 5033
+},
+{
+"name": "surf_angelina",
+"score": 27.2,
+"completions": 4991
+},
+{
+"name": "surf_infected_h",
+"score": 26.9,
+"completions": 4911
+},
+{
+"name": "surf_dionysus",
+"score": 26.8,
+"completions": 4865
+},
+{
+"name": "surf_enigma",
+"score": 26.8,
+"completions": 4864
+},
+{
+"name": "surf_hektik",
+"score": 26.5,
+"completions": 4771
+},
+{
+"name": "surf_stitched",
+"score": 26.4,
+"completions": 4766
+},
+{
+"name": "surf_olivia",
+"score": 26.4,
+"completions": 4762
+},
+{
+"name": "surf_petrus",
+"score": 26.4,
+"completions": 4756
+},
+{
+"name": "surf_sirius",
+"score": 26.4,
+"completions": 4754
+},
+{
+"name": "surf_forsaken",
+"score": 26.2,
+"completions": 4707
+},
+{
+"name": "surf_cosmo",
+"score": 26.2,
+"completions": 4704
+},
+{
+"name": "surf_bnw_njv",
+"score": 26.2,
+"completions": 4703
+},
+{
+"name": "surf_haze",
+"score": 26.2,
+"completions": 4700
+},
+{
+"name": "surf_exonic",
+"score": 26.1,
+"completions": 4679
+},
+{
+"name": "surf_happyhands5",
+"score": 26.1,
+"completions": 4655
+},
+{
+"name": "surf_whoknows3",
+"score": 26.0,
+"completions": 4632
+},
+{
+"name": "surf_techslop",
+"score": 26.0,
+"completions": 4626
+},
+{
+"name": "surf_angst",
+"score": 26.0,
+"completions": 4621
+},
+{
+"name": "surf_sketchy",
+"score": 25.7,
+"completions": 4552
+},
+{
+"name": "surf_blackout",
+"score": 25.6,
+"completions": 4513
+},
+{
+"name": "surf_frey2_ksf",
+"score": 25.5,
+"completions": 4488
+},
+{
+"name": "surf_reactor",
+"score": 25.4,
+"completions": 4459
+},
+{
+"name": "surf_gary_barlow",
+"score": 25.4,
+"completions": 4448
+},
+{
+"name": "surf_sirena",
+"score": 25.3,
+"completions": 4425
+},
+{
+"name": "surf_drift",
+"score": 25.2,
+"completions": 4391
+},
+{
+"name": "surf_quake",
+"score": 25.1,
+"completions": 4379
+},
+{
+"name": "surf_damnation",
+"score": 25.0,
+"completions": 4357
+},
+{
+"name": "surf_tycho2",
+"score": 25.0,
+"completions": 4345
+},
+{
+"name": "surf_hellenic",
+"score": 24.9,
+"completions": 4327
+},
+{
+"name": "surf_crimson",
+"score": 24.8,
+"completions": 4295
+},
+{
+"name": "surf_flatliners",
+"score": 24.8,
+"completions": 4283
+},
+{
+"name": "surf_muerto",
+"score": 24.6,
+"completions": 4235
+},
+{
+"name": "surf_shambles",
+"score": 24.4,
+"completions": 4198
+},
+{
+"name": "surf_vacant",
+"score": 24.4,
+"completions": 4194
+},
+{
+"name": "surf_greenhouse",
+"score": 24.4,
+"completions": 4188
+},
+{
+"name": "surf_jitterbug",
+"score": 24.4,
+"completions": 4182
+},
+{
+"name": "surf_theunexpected",
+"score": 24.3,
+"completions": 4172
+},
+{
+"name": "surf_santorini2",
+"score": 24.1,
+"completions": 4118
+},
+{
+"name": "surf_paradigm",
+"score": 24.1,
+"completions": 4099
+},
+{
+"name": "surf_disaster",
+"score": 24.0,
+"completions": 4089
+},
+{
+"name": "surf_oompa2",
+"score": 23.6,
+"completions": 3988
+},
+{
+"name": "surf_vantica",
+"score": 23.6,
+"completions": 3970
+},
+{
+"name": "surf_whynot2",
+"score": 23.1,
+"completions": 3853
+},
+{
+"name": "surf_deity_ksf",
+"score": 23.1,
+"completions": 3843
+},
+{
+"name": "surf_helljumper",
+"score": 22.9,
+"completions": 3796
+},
+{
+"name": "surf_doomsday",
+"score": 22.7,
+"completions": 3756
+},
+{
+"name": "surf_expel",
+"score": 22.7,
+"completions": 3753
+},
+{
+"name": "surf_salvation",
+"score": 22.5,
+"completions": 3706
+},
+{
+"name": "surf_spacemonkeys",
+"score": 22.4,
+"completions": 3676
+},
+{
+"name": "surf_prevail",
+"score": 22.1,
+"completions": 3617
+},
+{
+"name": "surf_dread",
+"score": 21.8,
+"completions": 3543
+},
+{
+"name": "surf_marbleblast_intermediate",
+"score": 21.6,
+"completions": 3510
+},
+{
+"name": "surf_sleeper",
+"score": 21.3,
+"completions": 3440
+},
+{
+"name": "surf_alend",
+"score": 21.3,
+"completions": 3426
+},
+{
+"name": "surf_insects",
+"score": 21.1,
+"completions": 3396
+},
+{
+"name": "surf_starvald",
+"score": 21.0,
+"completions": 3362
+},
+{
+"name": "surf_topology",
+"score": 20.8,
+"completions": 3338
+},
+{
+"name": "surf_kira",
+"score": 20.8,
+"completions": 3317
+},
+{
+"name": "surf_ofsfice",
+"score": 20.7,
+"completions": 3310
+},
+{
+"name": "surf_era",
+"score": 20.3,
+"completions": 3227
+},
+{
+"name": "surf_pandora",
+"score": 20.2,
+"completions": 3204
+},
+{
+"name": "surf_elysium5",
+"score": 20.1,
+"completions": 3190
+},
+{
+"name": "surf_carbon",
+"score": 20.0,
+"completions": 3158
+},
+{
+"name": "surf_offskill",
+"score": 20.0,
+"completions": 3157
+},
+{
+"name": "surf_jive",
+"score": 19.7,
+"completions": 3112
+},
+{
+"name": "surf_fire_eye",
+"score": 19.6,
+"completions": 3085
+},
+{
+"name": "surf_crush2",
+"score": 19.6,
+"completions": 3073
+},
+{
+"name": "surf_metalpipes",
+"score": 19.4,
+"completions": 3049
+},
+{
+"name": "surf_panta_rhei",
+"score": 19.2,
+"completions": 3005
+},
+{
+"name": "surf_conserve",
+"score": 19.1,
+"completions": 2995
+},
+{
+"name": "surf_not_quite_goliath",
+"score": 18.9,
+"completions": 2957
+},
+{
+"name": "surf_atonement",
+"score": 18.7,
+"completions": 2919
+},
+{
+"name": "surf_technical",
+"score": 18.4,
+"completions": 2857
+},
+{
+"name": "surf_techsune_css",
+"score": 18.0,
+"completions": 2779
+},
+{
+"name": "surf_prismatic_ksf",
+"score": 17.7,
+"completions": 2733
+},
+{
+"name": "surf_original",
+"score": 17.5,
+"completions": 2696
+},
+{
+"name": "surf_joutsenlaulu",
+"score": 17.5,
+"completions": 2688
+},
+{
+"name": "surf_salmari",
+"score": 17.2,
+"completions": 2642
+},
+{
+"name": "surf_cavity",
+"score": 17.1,
+"completions": 2629
+},
+{
+"name": "surf_emerald",
+"score": 16.8,
+"completions": 2575
+},
+{
+"name": "surf_polytron",
+"score": 16.6,
+"completions": 2546
+},
+{
+"name": "surf_crank",
+"score": 16.5,
+"completions": 2536
+},
+{
+"name": "surf_raqqit",
+"score": 16.5,
+"completions": 2522
+},
+{
+"name": "surf_breach",
+"score": 16.3,
+"completions": 2493
+},
+{
+"name": "surf_inner",
+"score": 16.2,
+"completions": 2477
+},
+{
+"name": "surf_intra",
+"score": 15.7,
+"completions": 2408
+},
+{
+"name": "surf_deteriorate",
+"score": 15.3,
+"completions": 2337
+},
+{
+"name": "surf_constrictor_remix",
+"score": 15.1,
+"completions": 2315
+},
+{
+"name": "surf_adrift_fix",
+"score": 14.6,
+"completions": 2235
+},
+{
+"name": "surf_lowestbidder",
+"score": 14.6,
+"completions": 2235
+},
+{
+"name": "surf_twist",
+"score": 14.5,
+"completions": 2228
+},
+{
+"name": "surf_anomaly",
+"score": 14.3,
+"completions": 2199
+},
+{
+"name": "surf_torrential",
+"score": 14.1,
+"completions": 2177
+},
+{
+"name": "surf_yolo",
+"score": 12.8,
+"completions": 2001
+},
+{
+"name": "surf_diet_mountain_dew",
+"score": 12.0,
+"completions": 1901
+},
+{
+"name": "surf_crucible",
+"score": 10.2,
+"completions": 1692
+},
+{
+"name": "surf_colony",
+"score": 9.6,
+"completions": 1632
+},
+{
+"name": "surf_shady_h",
+"score": 7.7,
+"completions": 1447
+},
+{
+"name": "surf_frus_njv",
+"score": 6.7,
+"completions": 1357
+},
+{
+"name": "surf_blackheart",
+"score": 6.1,
+"completions": 1303
+},
+{
+"name": "surf_weirdcore",
+"score": 4.3,
+"completions": 1163
+},
+{
+"name": "surf_sidistic",
+"score": 0.8,
+"completions": 932
+},
+{
+"name": "surf_silent",
+"score": 0.0,
+"completions": 884
+}
+],
+"classics": [
+"surf_4head",
+"surf_ace",
+"surf_aircontrol_ksf",
+"surf_beginner",
+"surf_borderlands",
+"surf_calycate_ksf",
+"surf_christmas",
+"surf_classics",
+"surf_forbidden_ways_ksf",
+"surf_fruits",
+"surf_grassland",
+"surf_ing",
+"surf_kitsune",
+"surf_lt_omnific",
+"surf_lux",
+"surf_mesa_fixed",
+"surf_nyx",
+"surf_pantheon",
+"surf_reprise",
+"surf_rookie",
+"surf_sanding_ksf",
+"surf_summer_ksf",
+"surf_utopia_njv",
+"surf_zen",
+"surf_orthodox",
+"surf_kz_protraining",
+"surf_boring",
+"surf_simpsons_source",
+"surf_garden",
+"surf_anzchamps",
+"surf_lessons",
+"surf_classics2",
+"surf_whiteout",
+"surf_me",
+"surf_school_fix",
+"surf_syria",
+"surf_illusion",
+"surf_aura",
+"surf_lore",
+"surf_beyond"
+]
+}

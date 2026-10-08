@@ -30,6 +30,16 @@ Textures packed inside a map are used as-is. Stock CS:S/CS:GO textures are not d
 game, so surfaces that use them get a generated texture with the right average color, lit by the map's
 own baked lightmaps.
 
+### KSF world records
+
+On catalog maps the game shows the KSF world record from [ksf.surf](https://ksf.surf) (fetched on demand through the
+local dev / preview server, never re-hosted): in the HUD side panel, the pause menu, a chat line when the map loads,
+your finish line ("+1.234 vs KSF WR") and the map browser. `!wr` lists the WR and the top 5, `!wrreplay` (or
+`!replay wr`) downloads the record's replay and lets you watch the real WR run on your copy of the map (type it again
+to cancel while it downloads; a run you start meanwhile isn't interrupted), and `!wrghost` races it as a ghost. 100 tick (the default) reads KSF's 100 tick board, other tickrates the 66 tick one.
+The map browser also links each map's record videos on YouTube (@ksfrecords). World records need `npm run dev` /
+`npm run preview`; the static site works without them.
+
 ### Timer zones
 
 Start/end/stage/checkpoint/bonus zones come from SurfTimer's public zone database (GPL-3.0, see
@@ -45,6 +55,7 @@ from your own zones (`!zones` / `zone_*` console commands).
 | Ctrl / Shift | duck / walk |
 | R | `!r` restart |
 | T | `!back` restart stage |
+| G | `!undo` undo an accidental restart (back to your run) |
 | Mouse4 / Mouse5 | `!saveloc` / `!tele` (practice) |
 | Y / U | chat |
 | `` ` `` | developer console |
@@ -53,8 +64,16 @@ from your own zones (`!zones` / `zone_*` console commands).
 Sensitivity uses CS:GO units (`sensitivity`, `m_yaw 0.022`), so your CS:GO sensitivity carries over.
 `bind`, `alias`, `cl_crosshair*` and most familiar console commands work.
 
-Chat commands: `!r`, `!s <n>`, `!b <n>`, `!back`, `!saveloc`, `!tele`, `!prac`, `!noclip`, `!pb`, `!top`,
-`!replay`, `!ghost`, `!hide`, `!showkeys`, `!zones`, `!help`.
+Chat commands: `!r`, `!undo`, `!s <n>`, `!b <n>`, `!back`, `!saveloc`, `!tele`, `!prac`, `!noclip`, `!pb`, `!top`,
+`!replay`, `!ghost`, `!wr`, `!wrreplay`, `!wrghost`, `!hide`, `!showkeys`, `!zones`, `!help`.
+
+Hit R when you meant T? Press G (`!undo`, console `surf_undo`): you are back exactly where you were — position,
+speed, view, stage, splits and the run clock, which stops while you're restarted. The map doesn't stop, though, so a
+ranked run stays ranked (replay and all) only if you undo within 5 seconds (in total for the run) and don't noclip,
+`!tele`, `!end` or otherwise practice in between; otherwise it comes back as practice. It works until you start a
+new run.
+
+ESC pauses the game (the world and the timer freeze; the run still counts when you resume).
 
 ## Physics
 

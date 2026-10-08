@@ -377,6 +377,19 @@ export interface FogControllerState {
   maxDensity: number;
 }
 
+/** EntitySystem.snapshotPlayer(): the player's map-logic state and contacts (opaque outside this module). */
+export interface PlayerEntSnapshot {
+  readonly targetname: string;
+  readonly classname: string;
+  readonly health: number;
+  readonly damageFilter: string;
+  readonly contacts: readonly { readonly trigger: BaseTrigger; readonly filterTouching: boolean }[];
+  readonly buttons: readonly FuncButton[];
+  readonly doors: readonly FuncDoor[];
+  /** The moving brush model the player stood on: where it was and how fast it moved (null: none / static). */
+  readonly ground: { readonly model: number; readonly pose: Pose; readonly velocity: Vec3 | null } | null;
+}
+
 /** Fired after a trigger_teleport moved the player (the timer uses it for stage heuristics). */
 export interface MapTeleportEvent {
   /** Classname of the trigger (trigger_teleport, trigger_teleport_relative, point_teleport...). */
@@ -2582,9 +2595,9 @@ export interface EntityDiagnostics {
  * player exists, tick() every tick after playerMove.
  *
  * Extra API beyond IEntitySystem: `playerClassname`, `playerHealth`, `resetPlayerState()`,
- * `addTeleportListener()`, `pressUse(eye, forward)` (call on +use), `fireInput()` (console ent_fire),
- * `reapplyRender()` (after the renderer rebuilt its meshes), `onFogController` (SetFogController hook),
- * `diagnostics()`, `describe()`, `counterValue()`.
+ * `snapshotPlayer()` / `restorePlayer()` (!undo), `addTeleportListener()`, `pressUse(eye, forward)` (call on
+ * +use), `fireInput()` (console ent_fire), `reapplyRender()` (after the renderer rebuilt its meshes),
+ * `onFogController` (SetFogController hook), `diagnostics()`, `describe()`, `counterValue()`.
  *
  * spawn() pushes brush-entity visibility/alpha/colour to host.renderer, so call it once the renderer has the
  * map (or call reapplyRender() afterwards). Map-driven teleports go through host.teleportPlayer with velocity
@@ -3107,6 +3120,77 @@ export class EntitySystem implements IEntitySystem {
     }
     this.touching = [];
     for (const b of this.buttons) b.touching = false;
+  }
+
+  /**
+   * The player's map-logic state (targetname, classname, health, damage filter: what filters and trigger_hurt read)
+   * and its trigger / button / door contacts, for !undo after an accidental !r (restorePlayer).
+   */
+  snapshotPlayer(): PlayerEntSnapshot {
+    const p = this.player;
+    const ps = this.host.player;
+    const mover = ps.onGround && ps.groundModel > 0 ? this.brushByModel.get(ps.groundModel)?.hier : null;
+    const vel = mover ? this.modelVelocity(ps.groundModel) : null;
+    return {
+      targetname: p.targetname,
+      classname: p.classname,
+      health: p.health,
+      damageFilter: p.damageFilter,
+      contacts: this.touching.filter((t) => !t.killed && t.engineTouching).map((t) => ({ trigger: t, filterTouching: t.filterTouching })),
+      buttons: this.buttons.filter((b) => b.touching),
+      doors: this.doors.filter((d) => d.touching),
+      ground: mover ? { model: ps.groundModel, pose: new Pose().copy(mover.abs), velocity: vel ? v3clone(vel) : null } : null,
+    };
+  }
+
+  /**
+   * Puts a snapshotPlayer() back (the caller has put the player back where it was). The contacts of the moment in
+   * between are dropped silently (like a timer teleport) and the snapshot's come back as ongoing touches: on the next
+   * tick the triggers still overlapping only Touch (no StartTouch / OnStartTouch, no booster sound), the ones left
+   * meanwhile get their natural EndTouch. Triggers disabled or removed since are left out. A moving platform the
+   * player stood on that has moved on since (the map kept running) is let go: the player is back in the air with
+   * the platform's velocity of the moment (as if it had jumped off it then), not carried by wherever it is now.
+   */
+  restorePlayer(snap: PlayerEntSnapshot): void {
+    const p = this.player;
+    const g = snap.ground;
+    const ps = this.host.player;
+    if (g && ps.onGround && ps.groundModel === g.model) {
+      const e = this.brushByModel.get(g.model);
+      const h = e && !e.killed ? e.hier : null;
+      if (!h || !h.abs.equals(g.pose)) {
+        ps.onGround = false;
+        ps.flags &= ~FL_ONGROUND;
+        ps.groundModel = -1;
+        // afterPlayerMove's "left a moving model": its velocity goes into base velocity (z replaced)
+        if (g.velocity) {
+          ps.baseVelocity.x += g.velocity.x;
+          ps.baseVelocity.y += g.velocity.y;
+          ps.baseVelocity.z = g.velocity.z;
+        }
+      }
+    }
+    p.targetname = snap.targetname;
+    p.classname = snap.classname;
+    p.health = snap.health;
+    p.damageFilter = snap.damageFilter;
+    const depth = this.mapTeleportDepth;
+    this.mapTeleportDepth = 0;
+    try {
+      this.onPlayerTeleported();
+    } finally {
+      this.mapTeleportDepth = depth;
+    }
+    for (const d of this.doors) d.touching = false;
+    for (const c of snap.contacts) {
+      const t = c.trigger;
+      if (t.killed || !t.enabled || this.touching.includes(t)) continue;
+      t.engineTouching = true;
+      t.filterTouching = c.filterTouching;
+      this.touching.push(t);
+    }
+    for (const b of snap.buttons) if (!b.killed) b.touching = true;
+    for (const d of snap.doors) if (!d.killed) d.touching = true;
   }
 
   debugTriggers(): { mins: Vec3; maxs: Vec3; classname: string; enabled: boolean }[] {

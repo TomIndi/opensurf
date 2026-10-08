@@ -27,6 +27,7 @@ export const DEFAULT_BINDS: Record<string, string> = {
   u: 'messagemode2',
   r: 'say !r',
   t: 'say !back',
+  g: 'say !undo',
   mouse4: 'say !saveloc',
   mouse5: 'say !tele',
   f2: 'say !prac',
@@ -114,6 +115,8 @@ export class MockGame implements GameApi {
       noclip: false,
       spectating: null,
       now: 0,
+      // a made-up KSF world record (the harness has no server to ask ksf.surf)
+      ksfWr: { time: 76.512, name: 'harness', board: '100 tick' },
     };
     this.registerFallbackCommands();
   }

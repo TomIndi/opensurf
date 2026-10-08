@@ -1,7 +1,7 @@
 // In-game pause menu (Esc / pointer-lock loss): Resume, Restart (!r), Settings, Change Map, Console, Disconnect.
 import type { HudState, SoundApi } from '../game/api';
 import { clear, h } from './dom';
-import { formatTime, mapTypeName } from './format';
+import { formatTime, formatTimeMs, mapTypeName } from './format';
 import { icon, type IconName } from './icons';
 import { brandEl } from './mainmenu';
 import type { MapBrowser } from './mapbrowser';
@@ -29,7 +29,6 @@ export class PauseMenu {
   private visible = false;
   private _page: PausePage = 'root';
   private readonly footState = h('span.pause-state', { text: 'Game paused' });
-  private live: boolean | null = null;
 
   constructor(private readonly deps: PauseMenuDeps) {
     this.mapEl = h('div.pause-map');
@@ -85,7 +84,8 @@ export class PauseMenu {
   renderRun(hud: HudState | null): void {
     if (!hud) return;
     const t = hud.timer;
-    const key = `${t.pb}|${t.wr}|${t.stageCount}|${t.mapType}|${t.state}|${t.state === 'running' ? Math.floor(t.time * 100) : 0}`;
+    const k = hud.ksfWr ?? null;
+    const key = `${t.pb}|${t.wr}|${t.stageCount}|${t.mapType}|${t.state}|${t.state === 'running' ? Math.floor(t.time * 100) : 0}|${k ? `${k.time}|${k.name}|${k.board}` : ''}`;
     if (key === this.runKey) return;
     this.runKey = key;
     clear(this.runEl);
@@ -93,20 +93,11 @@ export class PauseMenu {
     this.runEl.append(
       ...row('Personal best', t.pb ? formatTime(t.pb) : 'None'),
       ...row('Server record', t.wr ? formatTime(t.wr) : 'None'),
+      // the KSF world record (ksf.surf), when the local server could fetch it
+      ...(k ? [h('span', { text: 'KSF WR' }), h('b.pause-ksfwr', { text: `${formatTimeMs(k.time)} · ${k.name}`, attrs: { title: `KSF world record (${k.board}), from ksf.surf` } })] : []),
       ...(t.mapType === 'staged' && t.stageCount ? row('Stages', String(t.stageCount)) : []),
       ...(t.state === 'running' || t.state === 'practice' ? row('Current run', formatTime(t.time)) : []),
     );
-  }
-
-  /**
-   * A ranked run keeps running behind the menu (like CS:GO's ESC menu, which never stops the server): say so
-   * instead of "Game paused".
-   */
-  setLive(live: boolean): void {
-    if (live === this.live) return;
-    this.live = live;
-    this.footState.textContent = live ? 'Your run keeps going — the timer is running' : 'Game paused';
-    this.footState.classList.toggle('live', live);
   }
 
   hide(): void {

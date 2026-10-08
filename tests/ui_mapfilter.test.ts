@@ -39,7 +39,7 @@ describe('map filtering', () => {
   });
 
   it('sorts by name ignoring the surf_ prefix with natural numbers', () => {
-    expect(names(filterMaps(maps, F({})))).toEqual([
+    expect(names(filterMaps(maps, F({ sort: 'name' })))).toEqual([
       'surf_2pac',
       'surf_10x',
       'surf_abyss',
@@ -50,6 +50,27 @@ describe('map filtering', () => {
       'surf_utopia_njv',
     ]);
     expect(compareNames('surf_a', 'b')).toBeLessThan(0);
+  });
+
+  it('sorts by CS:GO-era popularity by default: scored maps first, the rest by tier then name', () => {
+    const pop = maps.map((m) => ({ ...m }));
+    const set = (n: string, p: number) => (pop.find((m) => m.name === n)!.popularity = p);
+    set('surf_kitsune', 97);
+    set('surf_utopia_njv', 99);
+    set('surf_abyss', 40);
+    expect(DEFAULT_FILTER.sort).toBe('popular');
+    expect(names(filterMaps(pop, F({})))).toEqual([
+      'surf_utopia_njv',
+      'surf_kitsune',
+      'surf_abyss',
+      'surf_mesa_fixed',
+      'surf_2pac',
+      'surf_summer_ksf',
+      'surf_10x',
+      'surf_unknown',
+    ]);
+    // a search still puts exact / prefix matches first
+    expect(names(filterMaps(pop, F({ query: 'mesa' })))).toEqual(['surf_mesa_fixed']);
   });
 
   it('sorts by tier (unknown last) and tier descending', () => {
@@ -68,6 +89,8 @@ describe('map filtering', () => {
   });
 
   it('filters by tiers, type, zones and cache', () => {
+    // (name order: without popularity scores the default sort would order by tier)
+    const F = (o: Partial<MapFilterOptions>): MapFilterOptions => ({ ...DEFAULT_FILTER, sort: 'name', tiers: new Set(), cached: new Set(), ...o });
     expect(names(filterMaps(maps, F({ tiers: new Set([2]) })))).toEqual(['surf_2pac', 'surf_summer_ksf']);
     expect(names(filterMaps(maps, F({ tiers: new Set([1, 6]), type: 'linear' })))).toEqual(['surf_abyss', 'surf_mesa_fixed']);
     expect(filterMaps(maps, F({ zonesOnly: true })).every((e) => e.hasZones)).toBe(true);

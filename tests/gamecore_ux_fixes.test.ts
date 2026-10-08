@@ -1,6 +1,6 @@
 // UX review fixes on the game-core side: `map <typo>` keeps the current map, a failed map change brings the old
-// map back, load reports carry a load id, the pause menu keeps a ranked run going (CS:GO's ESC menu), hidden tabs
-// and stalls make the run practice, raw input state + fallback advice, autoexec compatibility (silent cvars,
+// map back, load reports carry a load id, the pause menu freezes the game (hidden tabs pause it, stalls only lose
+// that time), raw input state + fallback advice, autoexec compatibility (silent cvars,
 // exec / cfg_*), r_drawzones modes, the short welcome zone line, !rank / !wrcp and near-miss suggestions, and
 // the PB ghost only after leaving the start zone.
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -239,13 +239,12 @@ describe('map <name> and failed map changes', () => {
   });
 });
 
-describe('pause during a run (CS:GO ESC menu)', () => {
-  it('in the start zone pausing freezes; mid-run the world keeps running with the keys released', async () => {
+describe('pause (ESC menu) freezes the game', () => {
+  it('pausing freezes the world and the timer anywhere; resuming carries on and the run still counts', async () => {
     t = await loadedGame();
     const s = t.game.session!;
     let now = frames(t.game, 1, 100, 1000);
     t.game.pause();
-    expect(t.game.simulatingWhilePaused).toBe(false);
     let n = s.tickCount;
     now = frames(t.game, 20, 100, now);
     expect(s.tickCount).toBe(n);
@@ -255,37 +254,28 @@ describe('pause during a run (CS:GO ESC menu)', () => {
     t.game.runTicks(100);
     expect(s.timer.getHud().state).toBe('running');
     now = frames(t.game, 1, 100, now);
+    const at = { ...s.player.origin };
+    const vel = { ...s.player.velocity };
     t.game.pause();
     expect(t.game.state).toBe('paused');
     expect(t.ui.menus[t.ui.menus.length - 1]).toBe('pause');
     expect(t.game.input.isDown('forward')).toBe(false);
-    expect(t.game.simulatingWhilePaused).toBe(true);
     n = s.tickCount;
     const time0 = s.timer.getHud().time;
     now = frames(t.game, 50, 100, now);
-    expect(s.tickCount - n).toBeGreaterThanOrEqual(49);
-    expect(s.timer.getHud().time - time0).toBeGreaterThan(0.45);
-    expect(s.timer.getHud().state).toBe('running'); // still counts
-    expect(s.timer.inPractice).toBe(false);
-    // no movement input while paused: friction stops the player
-    expect(Math.hypot(s.player.velocity.x, s.player.velocity.y)).toBeLessThan(5);
+    expect(s.tickCount).toBe(n);
+    expect(s.timer.getHud().time).toBe(time0);
+    expect(s.player.origin).toEqual(at);
+    expect(s.player.velocity).toEqual(vel);
     t.game.resume();
     expect(t.game.state).toBe('playing');
+    frames(t.game, 5, 100, now);
+    expect(s.tickCount).toBeGreaterThan(n);
+    expect(s.timer.getHud().state).toBe('running'); // still counts
+    expect(s.timer.inPractice).toBe(false);
   });
 
-  it('a run that ends while paused freezes the world from then on', async () => {
-    t = await loadedGame();
-    const s = t.game.session!;
-    startRun(t);
-    let now = frames(t.game, 1, 100, 1000);
-    t.game.pause();
-    s.timer.restart(0); // e.g. a fail teleport back to the start
-    const n = s.tickCount;
-    now = frames(t.game, 20, 100, now);
-    expect(s.tickCount).toBe(n);
-  });
-
-  it("the debug API's freeze stops the world even mid-run", async () => {
+  it("the debug API's freeze is the same pause (runTicks still steps)", async () => {
     t = await loadedGame();
     const s = t.game.session!;
     startRun(t);
@@ -301,24 +291,27 @@ describe('pause during a run (CS:GO ESC menu)', () => {
 });
 
 describe('hidden tab / stalled frames', () => {
-  it('hiding the page mid-run makes the run practice; the hidden time is not caught up', async () => {
+  it('hiding the page mid-run pauses the game; the run still counts and the hidden time is not caught up', async () => {
     t = await loadedGame();
     const s = t.game.session!;
     startRun(t);
     const now = frames(t.game, 5, 100, 1000);
     t.game.onVisibilityChange(true);
-    expect(s.timer.inPractice).toBe(true);
-    expect(s.timer.getHud().state).toBe('practice');
-    expect(t.ui.lastText()).toBe("[Surf] Timer stopped — run paused, it won't count. Type !r to restart.");
+    expect(t.game.state).toBe('paused');
+    expect(s.timer.inPractice).toBe(false);
+    expect(s.timer.getHud().state).toBe('running');
     t.game.onVisibilityChange(false);
     const n = s.tickCount;
-    t.game.frame(now + 60000); // a minute later: the first frame back simulates nothing
+    t.game.frame(now + 60000); // a minute later, still paused
     expect(s.tickCount).toBe(n);
-    t.game.frame(now + 60010);
-    expect(s.tickCount - n).toBeLessThanOrEqual(1);
+    t.game.resume();
+    t.game.frame(now + 60010); // the first frame after resuming simulates nothing
+    expect(s.tickCount).toBe(n);
+    t.game.frame(now + 60020);
+    expect(s.tickCount - n).toBeLessThanOrEqual(2);
   });
 
-  it('hiding the page in the start zone or in practice changes nothing', async () => {
+  it('hiding the page in the start zone pauses without chat noise', async () => {
     t = await loadedGame();
     const s = t.game.session!;
     const chats = t.ui.chats.length;
@@ -327,17 +320,16 @@ describe('hidden tab / stalled frames', () => {
     expect(t.ui.chats.length).toBe(chats);
   });
 
-  it('a frame gap over a second mid-run (the game stopped ticking) also makes it practice; not in autotest', async () => {
+  it('a frame gap over a second mid-run loses that time but keeps the run ranked; autotest never pauses on hide', async () => {
     t = await loadedGame();
     const s = t.game.session!;
     startRun(t);
     let now = frames(t.game, 5, 100, 1000);
-    now += 300;
-    t.game.frame(now); // a hitch: still ranked
-    expect(s.timer.getHud().state).toBe('running');
+    const n = s.tickCount;
     now += 1500;
     t.game.frame(now);
-    expect(s.timer.getHud().state).toBe('practice');
+    expect(s.timer.getHud().state).toBe('running');
+    expect(s.tickCount - n).toBeLessThanOrEqual(26); // dt is capped, never caught up
 
     const u = await loadedGame();
     u.game.autotest = true;
@@ -346,6 +338,7 @@ describe('hidden tab / stalled frames', () => {
     const m = frames(u.game, 5, 100, 1000);
     u.game.frame(m + 5000);
     u.game.onVisibilityChange(true);
+    expect(u.game.state).toBe('playing');
     expect(su.timer.getHud().state).toBe('running');
     u.game.dispose();
   });
@@ -381,7 +374,8 @@ describe('hidden tab / stalled frames', () => {
       expect(s.timer.getHud().state).toBe('running');
       doc.hidden = true;
       for (const f of listeners.get('visibilitychange') ?? []) f();
-      expect(s.timer.getHud().state).toBe('practice');
+      expect(game.state).toBe('paused'); // hiding the tab pauses the game
+      expect(s.timer.getHud().state).toBe('running');
       game.dispose();
       expect(listeners.get('visibilitychange') ?? []).toHaveLength(0);
     } finally {

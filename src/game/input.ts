@@ -777,6 +777,9 @@ export class InputDevice {
       // auto-repeat of a key pressed while typing / before playing: not ours
       return;
     }
+    // playing without the mouse captured (resumed with Escape, the lock was refused): a key press is a user
+    // gesture browsers accept for the pointer lock (Escape isn't), so capture it now; the key still acts
+    if (key !== 'escape' && key !== '`' && !this.pointerLocked && !this.lockPending && !this.deps.autotest) this.requestPointerLock();
     const bound = this.deps.dispatcher.keyDown(key);
     if (bound) {
       e.preventDefault();

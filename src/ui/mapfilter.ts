@@ -1,7 +1,7 @@
 // Map browser filtering/sorting (pure, unit tested).
 import type { CatalogEntry } from '../maps/catalog';
 
-export type MapSort = 'name' | 'tier' | 'tier-desc';
+export type MapSort = 'popular' | 'name' | 'tier' | 'tier-desc';
 export type MapTypeFilter = 'all' | 'linear' | 'staged';
 
 export interface MapFilterOptions {
@@ -24,7 +24,7 @@ export const DEFAULT_FILTER: MapFilterOptions = {
   query: '',
   tiers: new Set(),
   type: 'all',
-  sort: 'name',
+  sort: 'popular',
   cachedOnly: false,
   zonesOnly: false,
   cached: new Set(),
@@ -82,7 +82,10 @@ export function filterMaps(entries: readonly CatalogEntry[], o: MapFilterOptions
       const rb = relevance(b.name, q);
       if (ra !== rb) return ra - rb;
     }
-    if (o.sort !== 'name') {
+    if (o.sort === 'popular') {
+      const d = comparePopularity(a, b);
+      if (d) return d;
+    } else if (o.sort !== 'name') {
       const ta = a.tier ?? 99;
       const tb = b.tier ?? 99;
       if (ta !== tb) return o.sort === 'tier' ? ta - tb : (b.tier ?? -1) - (a.tier ?? -1);
@@ -90,6 +93,14 @@ export function filterMaps(entries: readonly CatalogEntry[], o: MapFilterOptions
     return compareNames(a.name, b.name);
   });
   return out;
+}
+
+/** Most popular first (CS:GO era); maps without a score after the scored ones, easier tiers first. */
+export function comparePopularity(a: CatalogEntry, b: CatalogEntry): number {
+  const pa = a.popularity ?? -1;
+  const pb = b.popularity ?? -1;
+  if (pa !== pb) return pb - pa;
+  return (a.tier ?? 99) - (b.tier ?? 99);
 }
 
 function relevance(name: string, q: string): number {

@@ -4,11 +4,14 @@
 // Config persistence (config.cfg equivalent): host_writeconfig stores the archived cvars that differ from their
 // default, then `unbindall` + every bind (+ extra lines from providers, e.g. aliases), in localStorage via
 // saveArchivedCvars(). Any bind/alias/archived-cvar change schedules a debounced save. At startup the saved
-// config is executed, so the binds come back exactly as they were (including keys the user unbound).
+// config is executed, so the binds come back exactly as they were (including keys the user unbound). A default
+// bind added in a later version (G = !undo) is bound on top of a config saved before it existed, unless that
+// config binds the key to something else (`bind_defaults_version` in the config tells which defaults it knew).
 import {
   conPrint,
   console_,
   FCVAR_ARCHIVE,
+  FCVAR_HIDDEN,
   loadArchivedConfig,
   registerCommand,
   saveArchivedCvars,
@@ -197,11 +200,21 @@ export const DEFAULT_BINDS: Readonly<Record<string, string>> = Object.freeze({
   u: 'messagemode2',
   r: 'say !r',
   t: 'say !back',
+  g: 'say !undo',
   mouse4: 'say !saveloc',
   mouse5: 'say !tele',
   f2: 'say !prac',
   escape: 'cancelselect',
 });
+
+/**
+ * Version of the default bind set: bumped when a default bind is added. A saved config records the version it was
+ * written with (`bind_defaults_version`); the defaults added after it are bound when that config is loaded.
+ */
+export const BIND_DEFAULTS_VERSION = 2;
+
+/** Default binds added after the first release: key -> the BIND_DEFAULTS_VERSION that added it. */
+const ADDED_DEFAULT_BINDS: Readonly<Record<string, number>> = Object.freeze({ g: 2 });
 
 export class BindTable {
   private readonly map = new Map<string, string>();
@@ -298,9 +311,9 @@ export function addConfigProvider(fn: () => string[]): void {
   configProviders.push(fn);
 }
 
-/** The non-cvar part of the config: `unbindall`, every bind, then provider lines. */
+/** The non-cvar part of the config: `unbindall`, the default binds version, every bind, then provider lines. */
 export function configExtraLines(): string[] {
-  const lines = ['unbindall'];
+  const lines = ['unbindall', `bind_defaults_version ${BIND_DEFAULTS_VERSION}`];
   for (const [k, v] of binds.entries()) lines.push(bindLine(k, v));
   for (const p of configProviders) {
     try {
@@ -361,11 +374,34 @@ export function execConfigText(text: string): number {
   return n;
 }
 
+/** bind_defaults_version of the config being executed (1: a config saved before the version was recorded). */
+let configDefaultsVersion = BIND_DEFAULTS_VERSION;
+
+/**
+ * After a saved config of default-binds version `version` ran: the defaults added since are bound, except on a key
+ * the config bound to something (its `unbindall` removed the defaults it didn't know about). Returns the keys bound.
+ */
+export function applyAddedDefaultBinds(version: number, table: BindTable = binds): string[] {
+  const out: string[] = [];
+  for (const [key, since] of Object.entries(ADDED_DEFAULT_BINDS)) {
+    if (since <= version || table.get(key) !== undefined) continue;
+    table.set(key, DEFAULT_BINDS[key]);
+    out.push(key);
+  }
+  return out;
+}
+
 /** Executes the saved config (startup). Returns false when there is none. */
 export function loadSavedConfig(): boolean {
   const text = loadArchivedConfig();
   if (!text) return false;
-  execConfigText(text);
+  configDefaultsVersion = 1;
+  try {
+    execConfigText(text);
+    applyAddedDefaultBinds(configDefaultsVersion);
+  } finally {
+    configDefaultsVersion = BIND_DEFAULTS_VERSION;
+  }
   return true;
 }
 
@@ -468,6 +504,15 @@ export function registerBindCommands(): void {
         }
       }
       if (!found) conPrint(`No keys bound to anything containing "${q}"`);
+    },
+  });
+  registerCommand({
+    name: 'bind_defaults_version',
+    help: 'Written into the saved config: the version of the default binds it was saved with.',
+    flags: FCVAR_HIDDEN,
+    handler: (args) => {
+      const v = parseInt(args[0] ?? '', 10);
+      configDefaultsVersion = Number.isFinite(v) && v > 0 ? v : 1;
     },
   });
   registerCommand({

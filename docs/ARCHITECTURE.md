@@ -38,11 +38,12 @@ Run: `npm run dev`.
 | materials | `src/bsp/{pakfile,vtf,vmt,materials}.ts`, `tests/materials.test.ts` | materials |
 | BSP render geometry + loader | `src/bsp/{geometry,lightmap,displacement,loadmap,props}.ts`, `tests/geometry.test.ts` | bsp-render |
 | renderer | `src/render/**` | renderer |
-| game core | `src/game/{game,convars,binds,input,commands,debugapi,hud}.ts`, `tests/gamecore*.test.ts` | game-core |
+| game core | `src/game/{game,convars,binds,input,commands,debugapi,hud,undo}.ts`, `tests/gamecore*.test.ts` | game-core |
 | game world | `src/game/{entities,timer,zoneresolve,replay,zoneeditor,records}.ts`, `tests/gameworld*.test.ts` | game-world |
 | UI + audio | `src/ui/**`, `src/audio/**`, `src/styles/**`, `index.html` | ui |
 | built-in maps | `src/map/builtin/**`, `tests/builtin.test.ts` | builtin-maps |
 | map catalog/downloads | `src/maps/**`, `scripts/build-catalog.mjs`, `public/maps/**` | coordinator |
+| KSF world records | `src/maps/{ksf,ksfproxy,ksfreplay}.ts`, `tests/ksf*.test.ts` | coordinator |
 | bootstrap | `src/main.ts` | integration |
 
 ## Contracts (exact exported signatures)
@@ -243,10 +244,10 @@ Render interpolates the origin between the last two ticks. The simulation clock 
 run/stage clocks accumulate the interval of each simulated tick, so a tickrate change never rescales time already
 simulated.
 
-Pause (ESC, `cancelselect`, losing the pointer lock): like CS:GO's ESC menu, the world keeps running during a ranked
-run (every key released; the run still counts) and freezes otherwise (start zone, practice, finished, spectating).
-When the game can't simulate mid-run (the tab is hidden, frames stop for over a second, a map change that failed
-returned to the map) the run goes on as practice ("Timer stopped — run paused, it won't count"); hidden time is
+Pause (ESC, `cancelselect`, losing the pointer lock, hiding the tab): freezes the world — physics, map logic,
+movers, timer — until resume, and the run carries on and still counts (the run clock counts simulated ticks). A frame
+gap only loses that time (dt is capped); a map change that failed and returned to the map turns a ranked run into
+practice ("Timer stopped — run paused, it won't count"). Time the game didn't simulate is
 never caught up. `map <name>` validates the name first (an unknown one is only `map load failed: <name> not found`
 in the console); during a map change the current session is kept aside and comes back if the download/parse
 fails (`LoadProgress.recovered`).
@@ -295,7 +296,7 @@ Video: `mat_fullbright 0`, `r_drawzones 1` (0 off, 1 floor outline, 2 full box �
 `zoneStyle`), `r_drawtriggers 0`, `r_drawclips 0`, `mat_wireframe 0`,
 `r_brightness 1`, `r_renderscale 1`, `r_anisotropy 8`, `fog_enable 1`, `r_3dsky 1`.
 
-Surf/HUD: `surf_hud_speed 1`, `surf_hud_timer 1`, `surf_showkeys 1`, `surf_ghost 1`, `surf_ghost_trail 1`,
+Surf/HUD: `surf_hud_speed 1`, `surf_hud_timer 1`, `surf_showkeys 1`, `surf_ghost 1`, `surf_ghost_trail 1`, `surf_ghost_wr 0`,
 `surf_prespeed 350`, `surf_speedometer_color 1`, `surf_chat_sounds 1`.
 
 Autoexec compatibility (`COMPAT_CVAR_DEFS`, hidden, archived where CS:GO archives them, no effect): `viewmodel_*`,
@@ -305,27 +306,101 @@ netcode (`rate`, `cl_updaterate`, `cl_cmdrate`, `cl_interp*`), `snd_*`, `voice_*
 
 ## Commands
 
-Console (Source names): `map <name>`, `disconnect`, `retry`, `noclip`, `kill`, `setpos x y z`, `setang p y r`,
+Console (Source names): `map <name>`, `disconnect`, `retry`, `noclip`, `kill`, `surf_undo`, `setpos x y z`, `setang p y r`,
 `getpos`, `bind <key> "<cmd>"`, `unbind`, `unbindall`, `binddefaults`, `alias`, `echo`, `clear`, `cvarlist`, `find`,
 `help`, `toggle <cvar> [a b ...]`, `incrementvar`, `say`, `say_team`, `toggleconsole`, `messagemode`,
 `messagemode2`, `quit`, `status`, `host_writeconfig`, `+forward/-forward` etc. `exec <name>` runs a stored cfg
 (localStorage `surf.cfg.<name>`, written by `cfg_save <name> "<cmds>"` or the settings' .cfg import; `cfg_list`,
 `cfg_delete`); `autoexec` runs at startup after the saved config (`src/game/cfgstore.ts`).
 
-Chat (SourceMod/SurfTimer style, also accept `/cmd` silently): `!r` `!restart`, `!s` `!stage [n]`, `!b` `!bonus [n]`,
+Chat (SourceMod/SurfTimer style, also accept `/cmd` silently): `!r` `!restart`, `!undo` (`!undorestart`,
+`!unrestart`), `!s` `!stage [n]`, `!b` `!bonus [n]`,
 `!back`/`!stuck` (restart current stage), `!saveloc`/`!cp`, `!tele`/`!tp`, `!prac`/`!practice`, `!noclip`,
 `!pb`, `!top`, `!rank`/`!mrank`/`!prank` (Rank 1/1, PB, completions), `!stages`/`!wrcp`/`!cpr`/`!srcp`/`!stagetop`
 (stage records), `!mi`/`!tier`, `!replay`, `!ghost`, `!hide`, `!showkeys`, `!speed`, `!zones` (zone editor),
+`!wr` (KSF world record + top 5; `!wr <n>` and maps without KSF data: the local top like `!top`), `!wrreplay` /
+`!ksfreplay` / `!replay wr` (watch the KSF WR replay), `!wrghost` (race it),
 `!end` (practice), `!help`/`!commands`, `!fov <n>`, `!sens <n>`. Unknown commands get a "Did you mean" only for a
 near miss. Reaching stage N+1 prints the completed stage's own time vs its stage best ("Player finished Stage 2 in
 00:12.345 (PB -0.123)", also the HUD split flash) before the run split; the end zone completes the last stage.
 
+Undo restart (`src/game/undo.ts`; R = `!r` sits next to T = `!back`): when `!r` (any alias, the R key, the pause
+menu's Restart) restarts a run in progress (timer `running`, `practice` with time on the clock, or `!s N` stage
+practice) the game first keeps a snapshot in `Session.undo` (`Game.keepRunForUndo`): the whole PlayerState, the input
+view, the session's per-tick bookkeeping (last usercmd yaw, last jump, footsteps), `SurfTimer.snapshotRun()` (state,
+course, stage / checkpoint, run and stage clocks, splits, stage practice, practice + reason, validator, stats,
+stage heuristics, zone contact flags, plus `ReplaySystem.snapshotRecording()`: the frames so far) and
+`EntitySystem.snapshotPlayer()` (targetname, classname, health, damage filter, trigger / button / door contacts),
+then says "[Surf] Restarted. Press G (or type !undo) to go back to your run." (the key actually bound to the undo,
+else only `!undo`). `!undo` / `surf_undo` (`Game.undoRestart`) puts it all back: no interpolation smear, the zone
+flags and trigger contacts are the snapshot's (no StartTouch / EndTouch storm: triggers still overlapping only Touch
+on the next tick, the contacts of the restart period are dropped silently like a timer teleport), the run clock
+carries on from the same time (it stopped while restarted; practice stays practice), and the replay recording
+continues, so a finished run saves its complete replay. The world itself (movers, map logic, the simulation clock)
+keeps going during the restart, unlike the ESC pause, so `restoreRun(snap, practiceReason)` brings a ranked run (or
+`!s N` stage practice, which saves stage times) back as practice when, after the `!r`, practice was entered
+(`SurfTimer.onPracticeEnter`: noclip, `!tele`, `!end`, setpos, `!prac`; marked on the snapshot at once, since a kill
+or the start zone ends practice before the undo) or a server/physics cvar changed, or when the run spent more than
+`UNDO_GRACE_SECONDS` (5 s of simulated time, summed over all its undos: `Session.undoPaused`) restarted. A moving
+platform the player stood on that has moved on since is let go (airborne with its velocity of the snapshot instead
+of being carried from where it is now), a mover that came into the spot meanwhile is stepped out of
+(`unstuckPlayer`; nothing moves otherwise), and a player hanging on a ladder hangs on it again (`keepRunForUndo`
+takes the player off the ladder at once: the movement code keeps the ladder plane outside the PlayerState and only
+forgets it when a ladder move fails). The snapshot ends when new timing starts (`SurfTimer.runGeneration`: a
+run - ranked or practice, e.g. a `!tele` out of the start zone - leaves a start zone, `!s N`), another `!r` mid-run
+replaces it, the zones or the map change, or an undo uses it; `!r` without a run in progress (pressing R twice)
+keeps it. Only `!r` takes one (not `!back`, `!s`, `!b`, `!tele`, deaths or fail teleports). Nothing to undo: one chat
+line "[Surf] Nothing to undo."
+
 Default binds (CS:GO + surf conventions): `w +forward`, `s +back`, `a +moveleft`, `d +moveright`,
 `space +jump`, `mwheeldown +jump`, `mwheelup +jump`, `ctrl +duck`, `shift +speed`, `e +use`, `tab +showscores`,
-`` ` `` `toggleconsole`, `y messagemode`, `u messagemode2`, `r "say !r"`, `t "say !back"`, `mouse4 "say !saveloc"`,
-`mouse5 "say !tele"`, `escape` menu, `f2 "say !prac"`.
+`` ` `` `toggleconsole`, `y messagemode`, `u messagemode2`, `r "say !r"`, `t "say !back"`, `g "say !undo"`,
+`mouse4 "say !saveloc"`, `mouse5 "say !tele"`, `escape` menu, `f2 "say !prac"`. The saved config records the default
+binds version it was written with (`bind_defaults_version`); loading a config from before a default was added binds
+that key unless the config binds it to something else (an older config gets G = `!undo`).
 Key names follow Source: `a`..`z`, `0`..`9`, `space`, `ctrl`, `shift`, `alt`, `tab`, `enter`, `escape`,
 `backspace`, `uparrow`…, `f1`..`f12`, `mouse1`..`mouse5`, `mwheelup`, `mwheeldown`, `kp_*`, `semicolon`, `` ` ``.
+
+## KSF world records (`src/maps/ksf.ts`, `ksfproxy.ts`, `ksfreplay.ts`)
+
+ksf.surf publishes every map's leaderboards and a replay file of each record. Its API sends no CORS headers, so the
+page goes through the dev / preview server (`createKsfProxyHandler` in `ksfproxy.ts`, mounted by vite.config.ts and
+unit-tested in `tests/ksf_proxy.test.ts` with an injected fetch; header `x-surf-ksf-proxy: 1`):
+`/__ksf/records/<map>?game=<66t|100t>` → `https://ksf.surf/api/maps/<map>/records/zone/0/0?game=<css|css100t>&mode=0`
+(main course, normal style; ksf.surf's own `game` values are `css` = 66 tick and `css100t` = 100 tick, an unknown value
+silently answers with the 66 tick board) and `/__ksf/replay/<file>?game=...` → `https://ksf.surf/api/replays/<file>`.
+`parseKsfProxyRequest` validates map (`/^[a-z0-9][a-z0-9_.-]{0,63}$/i`, no `..`), file (`/^replay_[a-z0-9_]+\.rec$/i`)
+and board; only URLs built from them are fetched (GET / HEAD only, 10 / 15 s timeouts over the whole transfer, size
+caps, the upstream request aborted when the page goes away; the upstream status passes through). Without the proxy (static hosting)
+`KsfService` reports `unavailable` once per session: no WR anywhere, commands say "KSF world records need the local
+server (npm run dev / npm run preview)". Record lists are cached per map + board, parsed replays per file (memory).
+Built-in maps are never looked up; catalog maps and other `surf_*` maps are.
+
+Board: tickrate 100 → `100t`, anything else → `66t`; a map without records there falls back to the other board.
+
+Replay file (little endian): int32 @8 frame count N, frames = the last N × 40 bytes (int32 buttons, float32 origin
+xyz (feet), angles pitch yaw roll, velocity xyz); int32 @12 zone block count (one more than there are); zone event i =
+int32 frame, type, index at 540 + 524 i — type 3 left a start zone (index 1 = run start; staged maps: each stage),
+type 1 checkpoint, type 2 reached stage n (staged) / the end (index 99). 100 tick files may lack the run-start event:
+int32 @16 then holds the start frame; the leaderboard time cross-checks it. The tick interval comes from the board and
+is verified from the motion (distance per frame / stored velocity). Frames after the end (and two junk teleport
+frames) are dropped. Each stage teleport of a staged map writes one marker frame at a made-up place near the map
+origin ((0, 0, 1000 × n) on surf_kitsune): a frame more than 1500 units from both neighbours takes the next frame's
+position and view (`markers`). Coordinates are the map's own: the bot runs the real route on our BSP. `sampleReplay`
+(all replays, PB ones too) snaps to the nearer frame across a teleport (two frames > 1000 units apart) instead of
+interpolating through the map.
+
+In game: `replayFromKsf` turns it into a `ReplayData` (its own frame rate, `startFrame` = prestrafe, stored
+`velocities`, ducked = `IN_DUCK`). `Game.loadKsfWrReplay` installs it as the session's WR replay (the WR's, or the
+fastest record with a replay file when the WR has none: `ksfReplayRecord`; it stays installed until the board changes);
+`!wrreplay` spectates it with the replay camera/HUD (prestrafe shown as "Start Zone", clock from the run-start event,
+speed from the stored velocity, keys from the stored buttons, official time at the end; jump / `!r` leaves). While the
+replay downloads the watch is pending: `!wrreplay` / `!replay wr` again cancels it, a PB `!replay` replaces it, and if
+a run started meanwhile the replay is only made ready ("type !wrreplay to watch") instead of taking over the run.
+`surf_ghost_wr` races it as a gold "KSF WR" ghost on the main course (the timer box's "WR" is the KSF WR on the main
+course only; a bonus shows its local best). The WR shows in the HUD side panel, the pause menu, a chat line on map load,
+the finish line (" | +1.234 vs KSF WR") and the map browser's details pane (KSF WR line, Watch WR, a "WR videos" link to
+`https://www.youtube.com/@ksfrecords/search?query=<map>`, credit). Nothing from KSF is stored in the repository.
 
 ## Collision notes
 
@@ -333,6 +408,19 @@ Box traces follow Source's brush clipping rules (DIST_EPSILON pull-back, startso
 enter fraction starts at a "never updated" sentinel (-9999, as in Source; Quake 3 used -1): a box that starts within
 DIST_EPSILON of a face and moves into it is stopped at fraction 0 however small the move. With -1, moves shorter than
 `DIST_EPSILON - gap` passed unchecked and a player sliding along a slightly slanted wall could creep into it.
+Which brushes a sweep touches is Source's rule too (`CM_ClipBoxToBrush`): a brush is skipped when the box is in front
+of one of its planes at both ends of the move (`d1 > 0 && d2 > 0`), so a move that ends within DIST_EPSILON of a face
+without reaching it is no hit, and entering fractions are clamped at 0. When a move starts inside the epsilon shells of
+every face it enters (a hit at 0), Source's reported face and brush come down to side and BSP order; here it is the face
+the box really crosses last (`d1 / (d1 - d2)`: where it would really enter the brush - the next ramp brush's top rather
+than its end face or edge bevel) and the brush it really enters first. Quake 3's "missed" test
+(`d2 >= epsilon || d2 >= d1`) grew every brush by DIST_EPSILON: the next brush along a ramp whose face sits less than
+DIST_EPSILON proud of it (surf_utopia_njv's ramp into the box: 0.016) became a step the hull hovering DIST_EPSILON above
+the ramp ran into. `tests/ramp_seams.test.ts` (synthetic, from that map's planes) and the opt-in
+`tests/ramp_seams_maps.test.ts` (real maps + KSF world-record replays) cover it.
+Static-prop hulls (model -2, from `.phy`) keep Quake 3's touch rule, CLIP_NOISE and face choice, and lose ties at
+fraction 0 to brushes and triangles: Source traces static props through VPhysics, not `CM_ClipBoxToBrush`, and the KSF
+replays on surf_summer_ksf's curved prop ramps match that rule (`PROP_HULL_MODEL`, `tests/prop_hulls.test.ts`).
 Displacements collide as two-sided triangles (see `docs/CONTRACT_CHANGES.md`).
 
 ## Automation & debugging
@@ -346,7 +434,10 @@ URL parameters (parsed by `game/debugapi.ts`):
 | `?bsp=<url>` | download and play a `.bsp` / `.bsp.bz2` / `.rar` / `.zip` from a URL (dev: `/__maps/<name>.bsp`) |
 | `?autotest=1` | automated sessions: no pointer lock needed (mouse buttons/wheel work without it), never pause on focus or pointer-lock loss, no "click to capture" hint, a hidden tab or a slow frame never turns a run into practice |
 
-`vite.config.ts` serves `$SURF_TEST_MAPS` / `$SURF_TEST_MAPS_LARGE` at `/__maps/<file>` in dev and preview.
+`vite.config.ts` serves `$SURF_TEST_MAPS` / `$SURF_TEST_MAPS_LARGE` at `/__maps/<file>` in dev and preview, plus the
+Drive (`/__drive/<id>`) and KSF (`/__ksf/...`) proxies. `$SURF_TEST_KSF_REPLAY` (a downloaded KSF `.rec`, e.g. the
+surf_utopia_njv 66 tick WR) enables the real-file parser test in `tests/ksf.test.ts`, `$SURF_TEST_KSF_REPLAY_STAGED`
+(a staged map's 100 tick replay, e.g. surf_kitsune's WR) the stage-teleport-marker test.
 
 `window.__surf` (`SurfDebugApi`, installed by `Game.start()`): `state()` (plain snapshot: game state, map, origin,
 velocity, speed, ground, timer HUD, tick, practice), `loadBuiltin(id)`, `loadUrl(url)`, `loadMap(name)` (resolve once
@@ -384,6 +475,7 @@ running on the tree (or the browser tests in `npm test`, which do the same) can'
 
 ```
 Drive (.rar) ─► dev/preview server /__drive/<id> (vite.config.ts) ─► maps/downloader (unrar wasm, IndexedDB cache) ─► bsp/loadmap ─► LoadedMap ─► game ─► renderer
+ksf.surf (records, .rec) ─► dev/preview server /__ksf/... ─► maps/ksf (+ksfreplay) ─► game (WR HUD/chat, replay bot, ghost) / ui map browser
                                                                    ▲   ▲                               ▲
                                    maps/zones (SurfTimer presets) ─┘   │           built-in maps ──────┘
       player's CS:S / CS:GO VPKs ─► maps/gamecontent (stock textures) ─┘

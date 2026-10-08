@@ -4,13 +4,15 @@ import type { GameApi, SoundApi } from '../game/api';
 import { BUILTIN_MAPS, type BuiltinMapInfo } from '../map/builtin/list';
 import { type CatalogEntry, loadCatalog, tierColor } from '../maps/catalog';
 import { deleteCachedMap, driveViewUrl, listCachedMaps } from '../maps/downloader';
+import { boardLabel, getKsfService, ksfMapPageUrl, ksfVideosUrl, type KsfWr } from '../maps/ksf';
+import { cvarNum } from './cvardefs';
 import { getCompletions, getPersonalBest, getRecords } from '../game/records';
 import { clear, h, storageGet, storageSet } from './dom';
 import { mapNameEl, tierPill } from './mapui';
-import { formatTime, formatTimeShort, mapTypeName, prettyMapName, tierName } from './format';
+import { formatTime, formatTimeMsShort, formatTimeShort, mapTypeName, prettyMapName, tierName } from './format';
 import { icon } from './icons';
-import { filterMaps, type MapFilterOptions, type MapSort, type MapTypeFilter, tierCounts } from './mapfilter';
-import { mapThumbSvg } from './thumbs';
+import { comparePopularity, filterMaps, type MapFilterOptions, type MapSort, type MapTypeFilter, tierCounts } from './mapfilter';
+import { mapThumbSvg, setMapArt } from './thumbs';
 import { VirtualList } from './virtual';
 
 export type BrowserTab = 'featured' | 'all' | 'builtin' | 'local';
@@ -50,7 +52,7 @@ export class MapBrowser {
   private catalogError: string | null = null;
   private catalogLoading: Promise<void> | null = null;
   private cached = new Set<string>();
-  private filter: MapFilterOptions = { query: '', tiers: new Set(), type: 'all', sort: 'name', cachedOnly: false, zonesOnly: false, cached: this.cached };
+  private filter: MapFilterOptions = { query: '', tiers: new Set(), type: 'all', sort: 'popular', cachedOnly: false, zonesOnly: false, cached: this.cached };
   private readonly search: HTMLInputElement;
   private readonly list: VirtualList<CatalogEntry>;
   private readonly details: HTMLElement;
@@ -60,6 +62,9 @@ export class MapBrowser {
   private readonly allTabCount: HTMLElement;
   private readonly fileInput: HTMLInputElement;
   private busy = false;
+  /** The details pane's KSF request (a newer selection makes older answers stale). */
+  private ksfSeq = 0;
+  private ksfTimer: ReturnType<typeof setTimeout> | null = null;
   /** Called whenever the catalog finished (re)loading successfully. */
   onCatalogLoaded: (() => void) | null = null;
 
@@ -75,7 +80,7 @@ export class MapBrowser {
       tabsEl.appendChild(b);
     };
     this.allTabCount = h('span.tab-count', { text: '' });
-    mkTab('featured', 'Featured', 'star');
+    mkTab('featured', 'Classics', 'star');
     mkTab('all', 'All Maps', 'list', this.allTabCount);
     mkTab('builtin', 'Built-in', 'cube');
     mkTab('local', 'Local File', 'upload');
@@ -135,6 +140,7 @@ export class MapBrowser {
     );
     const sortSel = h('select.select.sort-select', { attrs: { 'aria-label': 'Sort' } }) as HTMLSelectElement;
     for (const [v, l] of [
+      ['popular', 'Most played (CS:GO era)'],
       ['name', 'Name A–Z'],
       ['tier', 'Tier ↑'],
       ['tier-desc', 'Tier ↓'],
@@ -462,11 +468,14 @@ export class MapBrowser {
     }
     const isCached = this.cached.has(e.name.toLowerCase());
     const thumb = h('div.details-thumb');
-    thumb.innerHTML = mapThumbSvg(e.name);
+    setMapArt(thumb, e.name);
     thumb.appendChild(h('div.details-thumb-name', null, h('div.pretty', { text: prettyMapName(e.name) })));
     const playBtn = h('button.btn.btn-primary.btn-lg.details-play', { attrs: { type: 'button' } }, icon('play'), isCached ? 'Play' : 'Download & Play');
     playBtn.addEventListener('click', () => this.playEntry(e));
     const actions = h('div.details-actions', null, playBtn);
+    const ksfCell = h('td.ksf-wr', null);
+    const ksfRow = h('tr.ksf-row', null, h('td', { text: 'KSF WR' }), ksfCell);
+    const ksfBox = h('div.details-ksf');
     if (isCached) {
       const del = h('button.btn.btn-danger', { attrs: { type: 'button', title: 'Delete the downloaded copy' } }, icon('trash'), 'Delete download');
       del.addEventListener('click', () => void this.deleteCached(e.name));
@@ -495,10 +504,94 @@ export class MapBrowser {
         h('tr', null, h('td', { text: 'Layout' }), h('td', { text: layoutBlurb(e.type) })),
         h('tr', null, h('td', { text: 'Timer zones' }), h('td', { text: e.hasZones ? 'SurfTimer zone preset' : 'None — create with !zones' })),
         h('tr', null, h('td', { text: 'Your best' }), h('td', null, pbText(e.name))),
+        ksfRow,
         h('tr', null, h('td', { text: 'Source' }), h('td', { text: isCached ? 'Downloaded (stored in your browser)' : `KSF map archive · ${(e.archive ?? 'rar').toUpperCase()}` })),
       ),
+      ksfBox,
       actions,
     );
+    this.renderKsf(e, ksfRow, ksfCell, ksfBox);
+  }
+
+  /**
+   * The KSF world record of the selected map (ksf.surf through the local server, cached for the session): the
+   * "KSF WR 0:53.364 - name" row, Watch WR (loads the map, then spectates the WR replay), the KSF record videos on
+   * YouTube and the credit. Without the local server only the videos link is shown.
+   */
+  private renderKsf(e: CatalogEntry, row: HTMLElement, cell: HTMLElement, box: HTMLElement): void {
+    const seq = ++this.ksfSeq;
+    if (this.ksfTimer) clearTimeout(this.ksfTimer);
+    this.ksfTimer = null;
+    const svc = getKsfService();
+    const videos = h(
+      'a.btn.btn-ghost.btn-sm.ksf-videos',
+      { attrs: { href: ksfVideosUrl(e.name), target: '_blank', rel: 'noopener noreferrer', title: `KSF record videos of ${e.name} on YouTube` } },
+      icon('external'),
+      'WR videos',
+    );
+    const credit = () =>
+      h('div.ksf-credit', null, 'World records from ', h('a', { attrs: { href: ksfMapPageUrl(e.name), target: '_blank', rel: 'noopener noreferrer' }, text: 'ksf.surf' }));
+    const fill = (res: KsfWr) => {
+      if (seq !== this.ksfSeq) return;
+      clear(cell);
+      clear(box);
+      row.classList.toggle('hidden', res.status === 'unavailable');
+      if (res.status === 'ok') {
+        cell.append(
+          h('b.ksf-time.tnum', { text: formatTimeMsShort(res.wr.time) }),
+          h('span.ksf-holder', { text: ` - ${res.wr.name}` }),
+          h('span.muted', { text: ` · ${boardLabel(res.board)}${res.fallback ? ` (no ${boardLabel(res.preferred)} records)` : ''}` }),
+        );
+        const watch = h(
+          'button.btn.btn-sm.btn-accent.ksf-watch',
+          { attrs: { type: 'button', title: `Load ${e.name} and watch the KSF world record replay` } },
+          icon('play'),
+          'Watch WR',
+        );
+        watch.addEventListener('click', () => this.watchWr(e));
+        box.append(h('div.ksf-actions', null, watch, videos), credit());
+      } else if (res.status === 'none') {
+        cell.append(h('span.muted', { text: 'No KSF records yet' }));
+        box.append(h('div.ksf-actions', null, videos), credit());
+      } else if (res.status === 'error') {
+        cell.append(h('span.muted', { text: `ksf.surf unreachable (${res.message})` }));
+        box.append(h('div.ksf-actions', null, videos));
+      } else box.append(h('div.ksf-actions', null, videos));
+    };
+    const tick = cvarNum('tickrate', 100);
+    const known = svc.available === false ? ({ status: 'unavailable', map: e.name, message: '' } as KsfWr) : svc.peekWorldRecord(e.name, tick);
+    if (known) {
+      fill(known);
+      return;
+    }
+    cell.append(h('span.muted', { text: 'Loading…' }));
+    box.append(h('div.ksf-actions', null, videos));
+    // (a short delay: arrowing through the list doesn't ask for every map on the way)
+    this.ksfTimer = setTimeout(() => {
+      this.ksfTimer = null;
+      if (seq !== this.ksfSeq) return;
+      void svc.worldRecord(e.name, tick).then(fill);
+    }, 200);
+  }
+
+  /** Watch WR: spectate the KSF WR replay (loading the map first unless it is the one being played). */
+  private watchWr(e: CatalogEntry): void {
+    const game = this.deps.getGame();
+    if (!game || this.busy) return;
+    const playing = game.state === 'playing' || game.state === 'paused';
+    const watch = () => {
+      if (game.watchKsfWr) game.watchKsfWr();
+      else game.say('/wrreplay');
+    };
+    if (playing && game.mapName?.toLowerCase() === e.name.toLowerCase()) {
+      this.deps.sound.play('ui_click');
+      if (game.state === 'paused') game.resume();
+      watch();
+      return;
+    }
+    this.playEntry(e, () => {
+      if (game.state === 'playing' && game.mapName?.toLowerCase() === e.name.toLowerCase()) watch();
+    });
   }
 
   private renderFeatured(): void {
@@ -512,14 +605,15 @@ export class MapBrowser {
       for (let i = 0; i < 8; i++) grid.appendChild(h('div.map-card.skeleton'));
       return;
     }
-    const featured = this.catalog.filter((e) => e.featured).sort((a, b) => (a.tier ?? 9) - (b.tier ?? 9) || a.name.localeCompare(b.name));
+    // the classics, most played first
+    const featured = this.catalog.filter((e) => e.featured).sort((a, b) => comparePopularity(a, b) || a.name.localeCompare(b.name));
     for (const e of featured) grid.appendChild(this.card(e));
   }
 
   /** A map card (featured grids, home strip). */
   card(e: CatalogEntry): HTMLElement {
     const thumb = h('div.thumb');
-    thumb.innerHTML = mapThumbSvg(e.name);
+    setMapArt(thumb, e.name);
     const isCached = this.cached.has(e.name.toLowerCase());
     const card = h(
       'button.map-card',
@@ -541,7 +635,7 @@ export class MapBrowser {
   }
 
   featuredEntries(): CatalogEntry[] {
-    return this.catalog.filter((e) => e.featured);
+    return this.catalog.filter((e) => e.featured).sort(comparePopularity);
   }
 
   catalogCounts(): { total: number; zoned: number } | null {
@@ -620,13 +714,14 @@ export class MapBrowser {
     await this.refreshCached();
   }
 
-  playEntry(e: CatalogEntry): void {
+  /** Plays a catalog map; `after` runs once it loaded. */
+  playEntry(e: CatalogEntry, after?: () => void): void {
     const game = this.deps.getGame();
     if (!game || this.busy) return;
     this.deps.sound.play('ui_click');
     storageSet(LAST_MAP_KEY, JSON.stringify({ name: e.name, kind: 'catalog' }));
-    this.deps.onLoadStart(e.name, e.tier, () => this.playEntry(e), e);
-    this.run(() => game.loadCatalogMap(e.name), e.name);
+    this.deps.onLoadStart(e.name, e.tier, () => this.playEntry(e, after), e);
+    this.run(() => game.loadCatalogMap(e.name), e.name, after);
   }
 
   playBuiltin(m: BuiltinMapInfo): void {
@@ -651,7 +746,7 @@ export class MapBrowser {
     this.run(() => game.loadMapFile(f), base);
   }
 
-  private run(fn: () => Promise<void>, name: string): void {
+  private run(fn: () => Promise<void>, name: string, after?: () => void): void {
     this.busy = true;
     let p: Promise<void>;
     try {
@@ -660,7 +755,14 @@ export class MapBrowser {
       p = Promise.reject(e);
     }
     p.then(
-      () => void this.refreshCached(),
+      () => {
+        void this.refreshCached();
+        try {
+          after?.();
+        } catch (e) {
+          console.error(e);
+        }
+      },
       (e: Error) => {
         if (e?.name !== 'AbortError') this.deps.onLoadError(name, String(e?.message ?? e));
       },

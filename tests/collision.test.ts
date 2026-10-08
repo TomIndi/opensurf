@@ -474,14 +474,45 @@ describe('CollisionWorld: box traces', () => {
     expect(world.lastHitBrush).toBe(-1);
   });
 
-  it('ending within DIST_EPSILON of a face pulls back to the epsilon shell', () => {
-    // box face would end 0.01 short of the brush face
-    const tr = world.traceBox(v3(0, 0, 0), v3(100 - 16 - 0.01, 0, 0), MINS, MAXS, MASK_PLAYERSOLID);
-    expect(tr.fraction).toBeLessThan(1);
-    expect(tr.endpos.x).toBeCloseTo(100 - 16 - DIST_EPSILON, 10);
-    // ending further than DIST_EPSILON away: no hit
-    const tr2 = world.traceBox(v3(0, 0, 0), v3(100 - 16 - 0.04, 0, 0), MINS, MAXS, MASK_PLAYERSOLID);
-    expect(tr2.fraction).toBe(1);
+  it('ending within DIST_EPSILON of a face without reaching it is not a hit (Source CM_ClipBoxToBrush)', () => {
+    // box face would end 0.01 short of the brush face: in front of that face at both ends, the brush is never touched
+    const end = v3(100 - 16 - 0.01, 0, 0);
+    const tr = world.traceBox(v3(0, 0, 0), end, MINS, MAXS, MASK_PLAYERSOLID);
+    expect(tr.fraction).toBe(1);
+    expect(tr.endpos).toEqual(end);
+    // the next move into the face from there stops at once (fraction 0, not startsolid)
+    const tr2 = world.traceBox(end, v3(150, 0, 0), MINS, MAXS, MASK_PLAYERSOLID);
+    expect(tr2.fraction).toBe(0);
+    expect(tr2.startsolid).toBe(false);
+    expect(tr2.endpos).toEqual(end);
+    expect(tr2.plane.normal).toEqual(v3(-1, 0, 0));
+    // reaching the face (by any amount) is a hit pulled back to the epsilon shell
+    const tr3 = world.traceBox(v3(0, 0, 0), v3(100 - 16 + 0.001, 0, 0), MINS, MAXS, MASK_PLAYERSOLID);
+    expect(tr3.fraction).toBeLessThan(1);
+    expect(tr3.endpos.x).toBeCloseTo(100 - 16 - DIST_EPSILON, 10);
+    // the same for a face the box only touches with an edge of the move (a corner of the brush)
+    const tr4 = world.traceBox(v3(0, 0, 0), v3(100 - 16 - 0.01, 50 + 16 - 0.01, 0), MINS, MAXS, MASK_PLAYERSOLID);
+    expect(tr4.fraction).toBe(1);
+  });
+
+  it('a box that crept up on a face (moves stopping short of it) is stopped by the move that finally reaches it', () => {
+    // Moves that stop short of a face are no hits, so a box decelerating towards a face (walking into a steep slope
+    // under friction) ends each move a little closer inside its epsilon shell. The move that finally reaches the
+    // face - here from 3.2e-7 units off it by 2.1e-6, its pulled-back crossing ~15000 moves behind the start - is
+    // still a hit at 0: ignoring such "far behind" crossings let the box end in solid (surf_mesa_fixed).
+    const tri = new CollisionWorld([], {
+      triangles: { positions: new Float64Array([100, -200, -100, 100.5, 200, -100, 100, 0, 300]), indices: new Uint32Array([0, 1, 2]) },
+    });
+    for (const w of [world, tri]) {
+      const probe = w.traceBox(v3(0, 0, 0), v3(200, 0, 0), MINS, MAXS, MASK_PLAYERSOLID);
+      const near = w.traceBox(probe.endpos, v3(probe.endpos.x + DIST_EPSILON - 3.2e-7, 0, 0), MINS, MAXS, MASK_PLAYERSOLID);
+      expect(near.fraction).toBe(1); // stops short of the face: no hit
+      const p = v3(near.endpos.x, near.endpos.y, near.endpos.z);
+      const tr = w.traceBox(p, v3(p.x + 2.1e-6, p.y, p.z), MINS, MAXS, MASK_PLAYERSOLID);
+      expect(tr.startsolid).toBe(false);
+      expect(tr.fraction).toBe(0);
+      expect(w.testBox(tr.endpos, MINS, MAXS, MASK_PLAYERSOLID)).toBe(false);
+    }
   });
 
   it('starting on the epsilon shell and moving in: fraction 0', () => {

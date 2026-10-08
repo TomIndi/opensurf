@@ -2,6 +2,7 @@ import { createReadStream, existsSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { Readable } from 'node:stream';
 import { defineConfig, type Plugin } from 'vite';
+import { createKsfProxyHandler } from './src/maps/ksfproxy.js';
 
 /**
  * Dev/preview only: serves BSP files from $SURF_TEST_MAPS at /__maps/<name>.bsp so automated
@@ -81,9 +82,28 @@ function driveProxy(): Plugin {
   };
 }
 
+/**
+ * Dev/preview: KSF world records (src/maps/ksf.ts). ksf.surf's API sends no CORS headers, so the page asks the local
+ * server: /__ksf/records/<map>?game=<66t|100t> (the main course leaderboard, JSON) and /__ksf/replay/<file>?game=...
+ * (a record's replay). The handler (src/maps/ksfproxy.ts createKsfProxyHandler, unit-tested) only fetches URLs built
+ * from the validated map / file / board, with a timeout and a size cap; nothing is stored.
+ */
+function ksfProxy(): Plugin {
+  const handler = createKsfProxyHandler();
+  return {
+    name: 'surf-ksf-proxy',
+    configureServer(server) {
+      server.middlewares.use(handler);
+    },
+    configurePreviewServer(server) {
+      server.middlewares.use(handler);
+    },
+  };
+}
+
 export default defineConfig({
   base: './',
-  plugins: [driveProxy(), testMaps()],
+  plugins: [driveProxy(), ksfProxy(), testMaps()],
   build: {
     target: 'es2022',
     chunkSizeWarningLimit: 4000,
