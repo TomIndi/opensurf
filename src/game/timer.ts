@@ -31,7 +31,8 @@
 //    restart(0) after setZones() on map load.
 //  - !undo (an accidental !r): hasRunInProgress() / snapshotRun() before restart(), restoreRun(snap) later (the
 //    run goes on from the same clock, like after a pause; the caller restores the player); runGeneration changes
-//    when new timing starts (the snapshot is stale then).
+//    when new timing starts (the snapshot is stale then); onPracticeEnter reports practice entered meanwhile
+//    (noclip, !tele, !end, setpos, !prac), which restoreRun(snap, reason) applies to the run that comes back.
 //  - finish messages say "Rank 1/1": SurfTimer ranks players on a map, and a local server has one player.
 import { QAngle, qa } from '../core/angles';
 import { console_ } from '../core/cvars';
@@ -239,6 +240,11 @@ export class SurfTimer implements ISurfTimer {
   onRunFinish: ((ev: RunFinishEvent) => void) | null = null;
   /** Called when a run in progress is abandoned (restart, re-entering the start, stop zone, practice). */
   onRunCancel: (() => void) | null = null;
+  /**
+   * Called whenever practice mode is entered (enterPractice: noclip, !tele, setpos, !prac...; !end; a paused run),
+   * with or without a run in progress: the game marks an !undo snapshot taken before as practice.
+   */
+  onPracticeEnter: ((reason: string) => void) | null = null;
   /**
    * Optional: extra segments for the end of the finish line (the game adds the comparison with the KSF world
    * record: " | +1.234 vs KSF WR"). `ranked` false for practice / custom physics finishes.
@@ -593,6 +599,7 @@ export class SurfTimer implements ISurfTimer {
     this.stagePrac = null;
     this.resetRunData();
     this.state = 'stopped';
+    this.onPracticeEnter?.('end');
     this.chat([{ text: 'Teleported to the end', color: 'lightblue' }, { text: ' (practice — type !r to restart)', color: 'grey' }]);
     return true;
   }
@@ -613,6 +620,7 @@ export class SurfTimer implements ISurfTimer {
     this.practiceReason = 'paused';
     this.state = 'practice';
     this.cancelRecording();
+    this.onPracticeEnter?.('paused');
     this.chat([
       { text: 'Timer stopped', color: 'lightred' },
       { text: " — run paused, it won't count. Type ", color: 'default' },
@@ -644,6 +652,7 @@ export class SurfTimer implements ISurfTimer {
       this.state = 'practice';
       this.cancelRecording();
     }
+    this.onPracticeEnter?.(reason);
   }
 
   // ---------------------------------------------------------------- !undo (an accidental !r)
@@ -719,10 +728,12 @@ export class SurfTimer implements ISurfTimer {
   /**
    * Carries on a run from snapshotRun() as if the time in between had been a pause: same clock, splits, stage,
    * stats and practice state, the replay recording continues (a ranked run stays ranked). The zone contacts are
-   * the snapshot's (the caller puts the player back exactly where it was), so no zone event fires. False when the
-   * zones changed since the snapshot (it belongs to the old zone set) or the timer was disposed.
+   * the snapshot's (the caller puts the player back exactly where it was), so no zone event fires. With a
+   * `practiceReason` (practice entered meanwhile, a server cvar changed, the map ran on too long) a ranked run or
+   * stage practice comes back as plain practice, as if that had happened during the run. False when the zones
+   * changed since the snapshot (it belongs to the old zone set) or the timer was disposed.
    */
-  restoreRun(snap: TimerRunSnapshot): boolean {
+  restoreRun(snap: TimerRunSnapshot, practiceReason: string | null = null): boolean {
     if (this.disposed || snap.zoneSet !== this.zones || snap.inside.length !== this.zones.length) return false;
     if (this.recording) {
       this.recording = false;
@@ -768,6 +779,11 @@ export class SurfTimer implements ISurfTimer {
     if (snap.replay && rep && typeof rep.restoreRecording === 'function') this.recording = rep.restoreRecording(snap.replay as never);
     this.pbCache.clear();
     this.teleportGen++;
+    if (practiceReason && (this.state === 'running' || this.stagePrac)) {
+      // (stage practice, which saves stage times, ends announced like a ranked run turning into practice)
+      this.practice = false;
+      this.enterPractice(practiceReason);
+    }
     return true;
   }
 

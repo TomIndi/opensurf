@@ -72,8 +72,11 @@ export interface TimerExtras {
   hasRunInProgress(): boolean;
   /** !undo: the run in progress (clock, splits, stage, stats, zone contacts, replay recording). */
   snapshotRun(): TimerRunSnapshot;
-  /** !undo: carries on a snapshotRun() (false when the zones changed since). */
-  restoreRun(snap: TimerRunSnapshot): boolean;
+  /**
+   * !undo: carries on a snapshotRun() (false when the zones changed since); with a `practiceReason` a ranked run or
+   * stage practice comes back as practice.
+   */
+  restoreRun(snap: TimerRunSnapshot, practiceReason?: string | null): boolean;
   /** Bumped whenever new timing starts (an !undo snapshot from before is stale). */
   readonly runGeneration: number;
 }

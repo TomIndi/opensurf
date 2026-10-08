@@ -21,8 +21,10 @@
 // with runTicks).
 //
 // !undo (an accidental !r, game/undo.ts): !r keeps a snapshot of the run in progress (Session.undo) that !undo puts
-// back exactly - player, view, timer run (same clock: the time in between counts like a pause), trigger contacts,
-// replay recording - until a new run starts, another !r, a map change or the undo itself.
+// back exactly - player, view, timer run (same clock: the run clock stops while restarted), trigger contacts,
+// replay recording - until a new run starts, another !r, a map change or the undo itself. The map keeps running
+// meanwhile, so the run comes back as practice after practice in between (noclip, !tele, !end...) or more than
+// UNDO_GRACE_SECONDS restarted.
 //
 // Map changes: `map <name>` checks the name first (built-in list, else the catalog) and only prints
 // "map load failed: <name> not found" for an unknown one. While a new map downloads and parses, the current
@@ -44,6 +46,7 @@ import {
   IN_DUCK,
   IN_SPEED,
   IN_USE,
+  MOVETYPE_LADDER,
   MOVETYPE_NOCLIP,
   MOVETYPE_OBSERVER,
   MOVETYPE_WALK,
@@ -100,7 +103,7 @@ import { createHudState, horizontalSpeed, turnFromYawDelta, updateHudState } fro
 import { InputDevice, InputState, KeyDispatcher, readMouseSettings, registerButtonCommands } from './input';
 import { REPLAY_TELEPORT_DISTANCE, ReplayData, ReplaySystem, replayFromKsf, sampleReplay } from './replay';
 import { formatSplitDelta, SurfTimer } from './timer';
-import { assignDeep, deepClone, RunUndoSnapshot } from './undo';
+import { assignDeep, deepClone, RunUndoSnapshot, UNDO_GRACE_SECONDS, UndoPauseTally } from './undo';
 import { ZoneEditor, getEditorDebugBoxes, installZoneEditor, registerZoneCommands } from './zoneeditor';
 import { resolveZones } from './zoneresolve';
 
@@ -440,6 +443,8 @@ export class Session implements TimerHost, CommandSession {
   runStarts = 0;
   /** The run the latest !r restarted, for !undo (null: nothing to undo). */
   undo: RunUndoSnapshot | null = null;
+  /** Simulated time the run in progress spent restarted over its earlier undos (UNDO_GRACE_SECONDS is per run). */
+  undoPaused: UndoPauseTally | null = null;
   private readonly game: Game;
 
   constructor(game: Game, map: LoadedMap, tier: number | null) {
@@ -460,6 +465,11 @@ export class Session implements TimerHost, CommandSession {
     timer.onRunFinish = (ev) => game.emitEvent('runfinished', ev);
     timer.onRunStart = () => {
       this.runStarts++;
+    };
+    // practice entered after an !r (noclip, !tele, !end, setpos, !prac): the run !undo brings back can't count either
+    // (marked now: a kill or the start zone ends practice before the undo)
+    timer.onPracticeEnter = (reason) => {
+      if (this.undo && !this.undo.practiceReason) this.undo.practiceReason = reason;
     };
     timer.finishExtras = (group, time) => game.ksfFinishSegments(this, group, time);
     this.timer = timer;
@@ -1311,6 +1321,7 @@ export class Game implements GameApi, CommandContext {
     if (typeof t.snapshotRun !== 'function' || typeof t.restoreRun !== 'function' || typeof t.hasRunInProgress !== 'function') return false;
     if (!t.hasRunInProgress()) return false;
     const ents = s.entities;
+    const generation = t.runGeneration ?? 0;
     s.undo = {
       player: deepClone(s.player),
       view: { pitch: this.input.view.pitch, yaw: this.input.view.yaw, roll: this.input.view.roll },
@@ -1319,9 +1330,14 @@ export class Game implements GameApi, CommandContext {
       stepDistance: s.stepDistance,
       timer: t.snapshotRun(),
       entities: typeof ents.snapshotPlayer === 'function' ? ents.snapshotPlayer() : null,
-      generation: t.runGeneration ?? 0,
+      generation,
+      takenAt: s.time,
+      pausedBefore: s.undoPaused?.generation === generation ? s.undoPaused.seconds : 0,
       practiceReason: null,
     };
+    // Off a ladder now rather than by the first ladder move that fails at the start: the movement code keeps the
+    // ladder's plane per player outside the PlayerState and forgets it only then, so the undo can hang on it again.
+    if (s.player.moveType === MOVETYPE_LADDER) s.player.moveType = MOVETYPE_WALK;
     return true;
   }
 
@@ -1329,9 +1345,12 @@ export class Game implements GameApi, CommandContext {
    * CommandContext.undoRestart (!undo, surf_undo): puts the run the latest !r restarted back exactly as it was - the
    * whole PlayerState (position, velocity, base velocity, view, duck, ground / water state, map-driven gravity and
    * speed), the view, the player's map-logic name and trigger contacts (no StartTouch / EndTouch storm), and the
-   * timer run on the same clock (the time in between counts like a pause: a ranked run stays ranked, practice stays
-   * practice; splits, stage, stats; the replay recording carries on). Consumes the snapshot. Returns the restored
-   * run's timer HUD, or null when there is nothing to undo (no snapshot, a new run started since, the zones changed).
+   * timer run on the same clock (the run clock stopped while restarted; splits, stage, stats; the replay recording
+   * carries on; practice stays practice). The map kept running meanwhile, so a ranked run (or stage practice) comes
+   * back as practice when practice was entered in between (noclip, !tele, !end, setpos, !prac, a server cvar
+   * change) or the run spent more than UNDO_GRACE_SECONDS restarted over its undos. Consumes the snapshot. Returns
+   * the restored run's timer HUD, or null when there is nothing to undo (no snapshot, a new run started since, the
+   * zones changed).
    */
   undoRestart(): TimerHud | null {
     const s = this._session;
@@ -1340,21 +1359,30 @@ export class Game implements GameApi, CommandContext {
     s.undo = null;
     const t = s.timer;
     if (typeof t.restoreRun !== 'function' || (t.runGeneration ?? 0) !== snap.generation) return null;
-    if (!t.restoreRun(snap.timer)) return null;
+    const paused = snap.pausedBefore + Math.max(0, s.time - snap.takenAt);
+    // (slack for float rounding of the simulation clock)
+    const late = paused > UNDO_GRACE_SECONDS + 1e-6 ? `restarted for ${paused.toFixed(1)} s` : null;
+    if (!t.restoreRun(snap.timer, snap.practiceReason ?? late)) return null;
+    s.undoPaused = { generation: snap.generation, seconds: paused };
     // (watching a replay meanwhile: leave it without the respawn)
     if (this.spec) this.stopSpectate(false);
     const ps = s.player;
     assignDeep(ps, snap.player);
-    // no interpolation from the start zone: the camera is simply back
-    v3copy(s.prevOrigin, ps.origin);
-    s.prevViewOffset = ps.viewOffsetZ;
     this.input.setAngles(snap.view.pitch, snap.view.yaw, snap.view.roll);
     s.lastCmdYaw = snap.lastCmdYaw;
     s.lastJumped = snap.lastJumped;
     s.stepDistance = snap.stepDistance;
+    // (also lets go of a moving platform that has moved on since)
     if (snap.entities && typeof s.entities.restorePlayer === 'function') s.entities.restorePlayer(snap.entities);
-    // a server cvar changed after the restart: like that change mid-run, a ranked run can't count any more
-    if (snap.practiceReason && (t.timerState ?? t.getHud().state) === 'running') t.enterPractice(snap.practiceReason);
+    // a mover that came into the spot meanwhile (a door that closed): out of it, like a teleport (else nothing moves)
+    const ox = ps.origin.x;
+    const oy = ps.origin.y;
+    const oz = ps.origin.z;
+    unstuckPlayer(ps, s.collision);
+    if (ps.origin.x !== ox || ps.origin.y !== oy || ps.origin.z !== oz) categorizePosition(ps, s.collision, getMoveVars());
+    // no interpolation from the start zone: the camera is simply back
+    v3copy(s.prevOrigin, ps.origin);
+    s.prevViewOffset = ps.viewOffsetZ;
     // (a !wrreplay still downloading doesn't take over the run that came back)
     s.runStarts++;
     return t.getHud();

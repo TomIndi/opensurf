@@ -10,8 +10,11 @@ import { registerConvars } from '../src/game/convars';
 import type { Game, Session } from '../src/game/game';
 import { FRAME_STRIDE, frameCount } from '../src/game/replay';
 import { formatRunTime, type RunFinishEvent } from '../src/game/timer';
-import { assignDeep, deepClone, runsUndo, undoKey } from '../src/game/undo';
-import { createPlayerState } from '../src/physics/playertypes';
+import { assignDeep, deepClone, runsUndo, UNDO_GRACE_SECONDS, undoKey } from '../src/game/undo';
+import { brushFromBox } from '../src/physics/brushbuild';
+import { playerHull } from '../src/physics/movement';
+import { createPlayerState, MOVETYPE_LADDER } from '../src/physics/playertypes';
+import { CONTENTS_LADDER, CONTENTS_SOLID, MASK_PLAYERSOLID } from '../src/physics/types';
 import { ZoneDef } from '../src/map/types';
 import { TestGame, loadedGame, makeTestMap, resetGlobals } from './gamecore_helpers';
 
@@ -76,11 +79,15 @@ function runState(game: Game, s: Session) {
   };
 }
 
-/** A ranked run on the linear map with jumps and strafes: past checkpoint 1, ducked and airborne, turning. */
-async function midRun(zones = LINEAR_ZONES, targetX = 700): Promise<{ game: Game; s: Session }> {
+/**
+ * A ranked run on the linear map with jumps and strafes: past checkpoint 1, ducked and airborne, turning.
+ * `atStart` runs in the start zone first.
+ */
+async function midRun(zones = LINEAR_ZONES, targetX = 700, atStart?: (game: Game) => void): Promise<{ game: Game; s: Session }> {
   t = await loadedGame(makeTestMap({ zones }));
   const game = t.game;
   const s = game.session!;
+  atStart?.(game);
   game.executeCommand('+forward');
   runUntil(game, () => s.timer.getHud().state === 'running');
   // some jumps with air strafes (stats: jumps, strafes, sync)
@@ -505,6 +512,323 @@ describe('!undo after an accidental !r', () => {
     game.executeCommand('-forward');
     expect(ents.counterValue('starts')).toBe(1);
     expect(ents.counterValue('ends')).toBe(1); // the natural EndTouch when leaving it
+  });
+});
+
+/** Goes on to the end zone (after an undo); the runfinished events. */
+function finishRun(game: Game, s: Session): RunFinishEvent[] {
+  const finished: RunFinishEvent[] = [];
+  game.on('runfinished', (e) => finished.push(e as RunFinishEvent));
+  game.setViewAngles(0, 0);
+  game.executeCommand('+forward');
+  runUntil(game, () => s.timer.getHud().state === 'finished');
+  game.executeCommand('-forward');
+  return finished;
+}
+
+interface PracticeRoute {
+  name: string;
+  /** In the start zone before the run (a saveloc doesn't make the run practice). */
+  atStart?: (game: Game) => void;
+  /** During the run, before the R. */
+  before?: (game: Game) => void;
+  /** Between the R and the G. */
+  during: (game: Game, s: Session) => void;
+  reason: string;
+}
+
+const PRACTICE_ROUTES: PracticeRoute[] = [
+  {
+    name: '!noclip on and off in the start zone',
+    during: (game) => {
+      game.say('!noclip');
+      game.runTicks(20);
+      game.say('!noclip');
+    },
+    reason: 'noclip',
+  },
+  {
+    name: 'console noclip flying ahead, then kill',
+    during: (game) => {
+      execute('noclip');
+      game.setViewAngles(0, 0);
+      game.executeCommand('+forward');
+      game.runTicks(60);
+      game.executeCommand('-forward');
+      execute('noclip');
+      execute('kill');
+    },
+    reason: 'noclip',
+  },
+  {
+    name: '!end, then kill',
+    during: (game) => {
+      game.say('!end');
+      execute('kill');
+    },
+    reason: 'end',
+  },
+  {
+    // (!end leaves the start zone without starting a run, so the !tele attempts don't start one either)
+    name: '!end, three !tele to a saveloc of the run, then kill',
+    before: (game) => game.say('!saveloc'),
+    during: (game) => {
+      game.say('!end');
+      for (let i = 0; i < 3; i++) {
+        game.say('!tele');
+        game.runTicks(30);
+      }
+      execute('kill');
+    },
+    reason: 'end',
+  },
+  {
+    name: '!tele to a saveloc in the start zone',
+    atStart: (game) => game.say('!saveloc'),
+    during: (game) => {
+      game.say('!tele');
+      game.runTicks(10);
+    },
+    reason: 'saveloc',
+  },
+  {
+    name: 'setpos_exact in the start zone',
+    during: (game) => {
+      execute('setpos_exact 60 40 0');
+      game.runTicks(10);
+    },
+    reason: 'setpos',
+  },
+  {
+    name: '!prac in the start zone',
+    during: (game) => {
+      game.say('!prac');
+      game.runTicks(10);
+    },
+    reason: '!prac',
+  },
+];
+
+describe('!undo: the map keeps running while restarted', () => {
+  it.each(PRACTICE_ROUTES)('practice in between ($name) brings a ranked run back as practice', async (route) => {
+    const { game, s } = await midRun(LINEAR_ZONES, 700, route.atStart);
+    route.before?.(game);
+    const before = runState(game, s);
+    expect(before.practice).toBe(false);
+    game.say('!r');
+    expect(t!.ui.lastText()).toBe(HINT);
+    route.during(game, s);
+    // (a kill or the start zone ends practice by itself: the run must still come back as practice)
+    expect(s.timer.getHud().state).not.toBe('running');
+    game.say('!undo');
+    expect(t!.ui.lastText()).toBe(`[Surf] Back to your run: CP 1 · ${formatRunTime(before.hud.time)} (practice)`);
+    expect(t!.ui.texts().some((l) => l.includes(`Practice mode (${route.reason})`))).toBe(true);
+    const back = runState(game, s);
+    expect(back.practice).toBe(true);
+    expect(back.hud.state).toBe('practice');
+    expect(back.hud.time).toBe(before.hud.time);
+    expect(back.player).toEqual(before.player);
+    expect(s.replay.recording).toBe(false);
+    const finished = finishRun(game, s);
+    expect(finished).toHaveLength(1);
+    expect(finished[0].ranked).toBe(false);
+    expect(t!.ui.texts().some((l) => l.includes('(practice — not saved)'))).toBe(true);
+    expect(s.timer.getRecords(0)).toHaveLength(0);
+    expect(s.replay.getPb(0)).toBeNull();
+  });
+
+  it('!tele out of the start zone starts a practice run: nothing to undo then', async () => {
+    const { game, s } = await midRun();
+    game.say('!saveloc');
+    game.say('!r');
+    game.say('!tele');
+    game.runTicks(5);
+    expect(s.timer.getHud().state).toBe('practice');
+    game.say('!undo');
+    expect(t!.ui.lastText()).toBe(NOTHING);
+  });
+
+  it(`a ranked run stays ranked only within ${UNDO_GRACE_SECONDS} s restarted, counted over all its undos`, async () => {
+    const { game, s } = await midRun();
+    const before = runState(game, s);
+    game.say('!r');
+    game.runTicks(UNDO_GRACE_SECONDS * 100 - 100); // 4 s: in time
+    game.say('!undo');
+    expect(s.timer.inPractice).toBe(false);
+    expect(s.timer.getHud().state).toBe('running');
+    expect(s.timer.getHud().time).toBe(before.hud.time);
+    expect(s.replay.recording).toBe(true);
+    game.say('!r');
+    game.runTicks(150); // 1.5 s more: 5.5 s for this run
+    game.say('!undo');
+    expect(t!.ui.texts().some((l) => l.includes('Practice mode (restarted for 5.5 s)'))).toBe(true);
+    expect(t!.ui.lastText()).toBe(`[Surf] Back to your run: CP 1 · ${formatRunTime(before.hud.time)} (practice)`);
+    expect(s.timer.inPractice).toBe(true);
+    expect(s.player).toEqual(before.player);
+    expect(s.replay.recording).toBe(false);
+    expect(finishRun(game, s)[0].ranked).toBe(false);
+    expect(s.timer.getRecords(0)).toHaveLength(0);
+
+    // the next run has its own allowance
+    game.say('!r');
+    game.executeCommand('+forward');
+    runUntil(game, () => s.timer.getHud().state === 'running');
+    game.runTicks(40);
+    game.executeCommand('-forward');
+    game.say('!r');
+    game.runTicks(300);
+    game.say('!undo');
+    expect(s.timer.getHud().state).toBe('running');
+    expect(finishRun(game, s)[0].ranked).toBe(true);
+    expect(s.timer.getRecords(0)).toHaveLength(1);
+  });
+
+  it('a long wait in one go brings stage practice back as plain practice (no stage time)', async () => {
+    t = await loadedGame(makeTestMap({ zones: STAGED_ZONES }));
+    const game = t.game;
+    const s = game.session!;
+    game.say('!s 2');
+    game.setViewAngles(0, 0);
+    game.executeCommand('+forward');
+    runUntil(game, () => s.player.origin.x > 700);
+    game.executeCommand('-forward');
+    const before = runState(game, s);
+    game.say('!r');
+    game.runTicks(UNDO_GRACE_SECONDS * 100 + 100);
+    game.say('!undo');
+    expect(t.ui.texts().some((l) => l.includes(`Practice mode (restarted for ${(UNDO_GRACE_SECONDS + 1).toFixed(1)} s)`))).toBe(true);
+    expect(s.timer.getHud()).toMatchObject({ state: 'practice', time: before.hud.time });
+    expect(s.player).toEqual(before.player);
+    game.executeCommand('+forward');
+    runUntil(game, () => s.player.origin.x > 1100);
+    game.executeCommand('-forward');
+    expect(t.ui.texts().some((l) => l.includes('finished Stage 2'))).toBe(false);
+  });
+
+  /** Linear map with a func_door platform (x 250..450, y -100..100, 16 high) that slides 400 units along +y at 100 u/s. */
+  async function onPlatform(): Promise<{ game: Game; s: Session }> {
+    t = await loadedGame(
+      makeTestMap({
+        zones: LINEAR_ZONES,
+        extra: [brushFromBox(v3(250, -100, 0), v3(450, 100, 16), CONTENTS_SOLID, 1)],
+        models: { 1: { mins: [250, -100, 0], maxs: [450, 100, 16] } },
+        entities: `{ "classname" "func_door" "targetname" "plat" "model" "*1" "origin" "350 0 8" "movedir" "0 90 0" "speed" "100" "wait" "-1" "lip" "-200" }`,
+      }),
+    );
+    const game = t.game;
+    const s = game.session!;
+    game.setViewAngles(0, 0);
+    game.executeCommand('+forward');
+    runUntil(game, () => s.player.origin.x > 300);
+    game.executeCommand('-forward');
+    game.runTicks(80);
+    expect(s.timer.getHud().state).toBe('running');
+    expect(s.player.onGround).toBe(true);
+    expect(s.player.groundModel).toBe(1);
+    return { game, s };
+  }
+
+  it('standing on a platform that has not moved: back on it exactly', async () => {
+    const { game, s } = await onPlatform();
+    const before = runState(game, s);
+    game.say('!r');
+    game.runTicks(100);
+    game.say('!undo');
+    expect(s.player).toEqual(before.player);
+    game.runTicks(5);
+    expect(s.player.onGround).toBe(true);
+    expect(s.player.groundModel).toBe(1);
+  });
+
+  it('riding a platform that moved on meanwhile: let go of it, with its speed of the moment', async () => {
+    const { game, s } = await onPlatform();
+    s.entities.fireInput!('plat', 'Open');
+    game.runTicks(30);
+    expect(s.player.groundModel).toBe(1);
+    const y0 = s.player.origin.y;
+    expect(y0).toBeGreaterThan(20); // carried
+    const before = runState(game, s);
+    game.say('!r');
+    game.runTicks(420); // the platform got to its end and stopped
+    game.say('!undo');
+    const ps = s.player;
+    expect(ps.origin).toEqual(before.player.origin);
+    expect(ps.velocity).toEqual(before.player.velocity);
+    expect(ps.onGround).toBe(false);
+    expect(ps.groundModel).toBe(-1);
+    expect(ps.baseVelocity.x).toBeCloseTo(0, 6);
+    expect(ps.baseVelocity.y).toBeCloseTo(100, 6);
+    expect(s.timer.getHud().state).toBe('running');
+    // not carried by the platform's position now: off the edge with the platform's speed, onto the floor
+    game.runTicks(1);
+    expect(ps.origin.y).toBeGreaterThan(y0 + 0.5);
+    expect(ps.origin.y).toBeLessThan(y0 + 2);
+    game.runTicks(40);
+    expect(ps.origin.z).toBeCloseTo(1 / 32, 9);
+    expect(ps.onGround).toBe(true);
+    expect(ps.origin.y).toBeGreaterThan(y0 + 15);
+  });
+
+  it('hanging on a ladder: back on it, still hanging with no input', async () => {
+    t = await loadedGame(
+      makeTestMap({
+        zones: LINEAR_ZONES,
+        extra: [brushFromBox(v3(304, -500, 0), v3(400, 500, 1000), CONTENTS_SOLID, 0), brushFromBox(v3(300, -32, 0), v3(304, 32, 600), CONTENTS_LADDER, 0)],
+      }),
+    );
+    const game = t.game;
+    const s = game.session!;
+    game.setViewAngles(0, 0);
+    game.executeCommand('+forward');
+    runUntil(game, () => s.player.origin.z > 150);
+    game.executeCommand('-forward');
+    game.runTicks(20);
+    expect(s.player.moveType).toBe(MOVETYPE_LADDER);
+    expect(s.timer.getHud().state).toBe('running');
+    const before = runState(game, s);
+    game.say('!r');
+    game.runTicks(50);
+    game.say('!undo');
+    expect(s.player).toEqual(before.player);
+    game.runTicks(30);
+    expect(s.player.moveType).toBe(MOVETYPE_LADDER);
+    expect(s.player.origin.z).toBe(before.player.origin.z);
+  });
+
+  it('a wall that appeared at the spot meanwhile: out of it, not stuck inside', async () => {
+    t = await loadedGame(
+      makeTestMap({
+        zones: LINEAR_ZONES,
+        extra: [brushFromBox(v3(200, -200, 0), v3(800, 200, 4), CONTENTS_SOLID, 1)],
+        models: { 1: { mins: [200, -200, 0], maxs: [800, 200, 4] } },
+        entities: `{ "classname" "func_brush" "targetname" "slab" "model" "*1" "StartDisabled" "1" "solidity" "0" }`,
+      }),
+    );
+    const game = t.game;
+    const s = game.session!;
+    const inSolid = () => {
+      const h = playerHull(s.player);
+      return s.collision.testBox(s.player.origin, h.mins, h.maxs, MASK_PLAYERSOLID);
+    };
+    game.setViewAngles(0, 0);
+    game.executeCommand('+forward');
+    runUntil(game, () => s.player.origin.x > 350);
+    game.executeCommand('-forward');
+    game.runTicks(80);
+    expect(s.player.origin.z).toBe(1 / 32);
+    expect(inSolid()).toBe(false);
+    const before = runState(game, s);
+    game.say('!r');
+    s.entities.fireInput!('slab', 'Enable');
+    game.runTicks(5);
+    game.say('!undo');
+    expect(inSolid()).toBe(false);
+    expect(s.player.origin.z).toBeGreaterThanOrEqual(4);
+    expect(s.player.origin.z).toBeLessThan(6);
+    expect(s.player.origin.x).toBeCloseTo(before.player.origin.x, 6);
+    expect(s.player.origin.y).toBeCloseTo(before.player.origin.y, 6);
+    expect(s.prevOrigin).toEqual(s.player.origin);
+    expect(s.timer.getHud().state).toBe('running');
   });
 });
 

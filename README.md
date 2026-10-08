@@ -68,8 +68,10 @@ Chat commands: `!r`, `!undo`, `!s <n>`, `!b <n>`, `!back`, `!saveloc`, `!tele`, 
 `!replay`, `!ghost`, `!wr`, `!wrreplay`, `!wrghost`, `!hide`, `!showkeys`, `!zones`, `!help`.
 
 Hit R when you meant T? Press G (`!undo`, console `surf_undo`): you are back exactly where you were — position,
-speed, view, stage, splits and the run clock (the restart counts like a pause, so a ranked run stays ranked and its
-replay stays whole). It works until you start a new run.
+speed, view, stage, splits and the run clock, which stops while you're restarted. The map doesn't stop, though, so a
+ranked run stays ranked (replay and all) only if you undo within 5 seconds (in total for the run) and don't noclip,
+`!tele`, `!end` or otherwise practice in between; otherwise it comes back as practice. It works until you start a
+new run.
 
 ESC pauses the game (the world and the timer freeze; the run still counts when you resume).
 

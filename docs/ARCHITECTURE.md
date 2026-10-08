@@ -335,13 +335,22 @@ then says "[Surf] Restarted. Press G (or type !undo) to go back to your run." (t
 else only `!undo`). `!undo` / `surf_undo` (`Game.undoRestart`) puts it all back: no interpolation smear, the zone
 flags and trigger contacts are the snapshot's (no StartTouch / EndTouch storm: triggers still overlapping only Touch
 on the next tick, the contacts of the restart period are dropped silently like a timer teleport), the run clock
-carries on from the same time (the restart counts like a pause: ranked stays ranked, practice stays practice), and
-the replay recording continues, so a finished run saves its complete replay. A server/physics cvar changed meanwhile
-turns a ranked run into practice. The snapshot ends when new timing starts (`SurfTimer.runGeneration`: a run leaves
-a start zone, `!s N`), another `!r` mid-run replaces it, the zones or the map change, or an undo uses it; `!r`
-without a run in progress (pressing R twice) keeps it. Only `!r` takes one (not `!back`, `!s`, `!b`, `!tele`,
-deaths or fail teleports). The world itself (movers, map logic, the simulation clock) keeps going during the restart.
-Nothing to undo: one chat line "[Surf] Nothing to undo."
+carries on from the same time (it stopped while restarted; practice stays practice), and the replay recording
+continues, so a finished run saves its complete replay. The world itself (movers, map logic, the simulation clock)
+keeps going during the restart, unlike the ESC pause, so `restoreRun(snap, practiceReason)` brings a ranked run (or
+`!s N` stage practice, which saves stage times) back as practice when, after the `!r`, practice was entered
+(`SurfTimer.onPracticeEnter`: noclip, `!tele`, `!end`, setpos, `!prac`; marked on the snapshot at once, since a kill
+or the start zone ends practice before the undo) or a server/physics cvar changed, or when the run spent more than
+`UNDO_GRACE_SECONDS` (5 s of simulated time, summed over all its undos: `Session.undoPaused`) restarted. A moving
+platform the player stood on that has moved on since is let go (airborne with its velocity of the snapshot instead
+of being carried from where it is now), a mover that came into the spot meanwhile is stepped out of
+(`unstuckPlayer`; nothing moves otherwise), and a player hanging on a ladder hangs on it again (`keepRunForUndo`
+takes the player off the ladder at once: the movement code keeps the ladder plane outside the PlayerState and only
+forgets it when a ladder move fails). The snapshot ends when new timing starts (`SurfTimer.runGeneration`: a
+run - ranked or practice, e.g. a `!tele` out of the start zone - leaves a start zone, `!s N`), another `!r` mid-run
+replaces it, the zones or the map change, or an undo uses it; `!r` without a run in progress (pressing R twice)
+keeps it. Only `!r` takes one (not `!back`, `!s`, `!b`, `!tele`, deaths or fail teleports). Nothing to undo: one chat
+line "[Surf] Nothing to undo."
 
 Default binds (CS:GO + surf conventions): `w +forward`, `s +back`, `a +moveleft`, `d +moveright`,
 `space +jump`, `mwheeldown +jump`, `mwheelup +jump`, `ctrl +duck`, `shift +speed`, `e +use`, `tab +showscores`,

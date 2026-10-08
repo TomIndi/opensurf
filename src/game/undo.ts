@@ -2,9 +2,12 @@
 // miss mid-run throws the run away. Before !r restarts a run in progress (a ranked run, a practice run with time
 // on the clock, stage practice) the game keeps a snapshot of it; !undo (also !undorestart / !unrestart, the
 // console command surf_undo, bound to G by default) puts it back exactly: the player where and how it was, the
-// timer on the same run clock (the time in between counts like a pause: a ranked run stays ranked), the replay
-// recording carrying on. The snapshot lives until a new run starts, another !r replaces it, the map changes or
-// an undo uses it. Game.keepRunForUndo / Game.undoRestart (game.ts) take and apply it; this module holds the
+// timer on the same run clock (the run clock stops while restarted), the replay recording carrying on. The map
+// itself doesn't stop meanwhile (movers, logic timers), so a ranked run stays ranked only when the undo comes
+// quickly - within UNDO_GRACE_SECONDS of simulated time, counted over all the undos of one run - and nothing in
+// between went to practice (noclip, !tele, !end, setpos, !prac, a server cvar change); otherwise the run comes
+// back as practice. The snapshot lives until a new run starts, another !r replaces it, the map changes or an
+// undo uses it. Game.keepRunForUndo / Game.undoRestart (game.ts) take and apply it; this module holds the
 // snapshot type, the plain-data copy helpers and the undo key lookup for the chat hint.
 import { QAngle } from '../core/angles';
 import { console_, tokenizeCommandLine } from '../core/cvars';
@@ -17,6 +20,12 @@ import type { TimerRunSnapshot } from './timer';
 export const UNDO_CHAT_NAMES: readonly string[] = ['undo', 'undorestart', 'unrestart'];
 /** The console command. */
 export const UNDO_CONSOLE_COMMAND = 'surf_undo';
+/**
+ * Simulated seconds a ranked run (or stage practice) may spend restarted, over all its undos, and still come back
+ * ranked: the run clock stops while restarted but the map doesn't (timed doors, platforms, logic timers), so a
+ * longer wait would be a pause that freezes only the run. Past it the undo still works, as practice.
+ */
+export const UNDO_GRACE_SECONDS = 5;
 
 /** What !r keeps of the run it restarts (Session.undo). */
 export interface RunUndoSnapshot {
@@ -34,11 +43,21 @@ export interface RunUndoSnapshot {
   readonly entities: PlayerEntSnapshot | null;
   /** The timer's runGeneration when it was taken: a new run since makes it stale. */
   readonly generation: number;
+  /** Session.time when it was taken (the simulated time spent restarted counts against UNDO_GRACE_SECONDS). */
+  readonly takenAt: number;
+  /** Simulated seconds the same run already spent restarted before earlier undos. */
+  readonly pausedBefore: number;
   /**
-   * Set when a server/physics cvar changed after the restart: a ranked run comes back as practice (the same rule as
-   * a change mid-run).
+   * Set when something after the restart would have made the run practice had it been in progress: a server/physics
+   * cvar change, noclip, !tele, !end, setpos, !prac (SurfTimer.onPracticeEnter). A ranked run comes back as practice.
    */
   practiceReason: string | null;
+}
+
+/** Session.undoPaused: simulated seconds run `generation` spent restarted so far (over its undos). */
+export interface UndoPauseTally {
+  readonly generation: number;
+  readonly seconds: number;
 }
 
 type Plain = Record<string, unknown>;
