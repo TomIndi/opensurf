@@ -118,7 +118,14 @@ export function normalizeMaterialName(name: string): string;
 export function buildMaterials(bsp: BspFile, pak: PakFile | null): Map<string, MaterialDef>; // one per texdata name
 export function fallbackMaterial(name: string, reflectivity?: Vec3, width?: number, height?: number): MaterialDef;
 export function loadSky(skyName: string, pak: PakFile | null): SkyDef;
+// Stock content from linked game files: fetches what buildMaterials/loadSky will read (VMTs, patch includes,
+// base/blend/detail textures, envmap masks, sky faces) that the pakfile lacks; pass [mapFileSource(result)] as
+// opts.extraSources (searched after the pakfile).
+export async function prefetchMaterialFiles(bsp: BspFile, pak: PakFile | null, content: AsyncMaterialFileSource, opts?: PrefetchOptions | string): Promise<Map<string, Uint8Array>>;
 ```
+Procedural stand-ins (stock textures nobody linked): fine grain plus a subtle family pattern (formwork panels and
+tie holes on concrete walls, slabs on floors, ceiling tiles, planks, bricks...) whose average colour is the texdata
+reflectivity. No large low-frequency blotches: tiled over big surf walls those read as fog or dirt.
 ### bsp render + loader (bsp-render)
 Model entities (prop_dynamic, prop_physics…) are drawn the way the engine poses them: single-bone models in the
 first frame of their starting sequence (`DefaultAnim`, else sequence 0; e.g. an "idle" that turns the root 90°), folded
@@ -128,8 +135,12 @@ into `RenderProp.origin/angles`. Static props keep the bind pose.
 export function buildRenderBatches(bsp: BspFile, materials: Map<string, MaterialDef>, areas?: Int32Array):
   { batches: RenderBatch[]; lightmap: LightmapAtlas | null };
 // bsp/loadmap.ts
-export async function loadBspMap(name: string, data: ArrayBuffer, onProgress?: (p: LoadProgress) => void): Promise<LoadedMap>;
+export async function loadBspMap(name: string, data: ArrayBuffer, onProgress?: (p: LoadProgress) => void, opts?: LoadBspOptions): Promise<LoadedMap>;
 ```
+Textures are searched in order: the map's pakfile, `opts.materials.extraSources`, the linked game content
+(`opts.gameContent`, default: `gameContentForLoad()` from `maps/gamecontent.ts`; `null` = none), then procedural
+stand-ins. With game content the textures phase first reports `{ phase: 'textures', message: 'Reading game textures… n/m',
+loaded: n, total: m }` while it reads the files from the player's VPKs.
 ### renderer (renderer)
 ```ts
 // render/renderer.ts
@@ -182,7 +193,43 @@ export async function deleteCachedMap(name: string): Promise<void>;
 export async function getPresetZones(mapName: string): Promise<ZoneDef[] | null>;  // SurfTimer zone presets
 export function loadUserZones(mapName: string): ZoneDef[] | null;
 export function saveUserZones(mapName: string, zones: ZoneDef[] | null): void;
+// maps/vpk.ts — VPK v1/v2 reader (lazy: only the _dir tree is read up front)
+export class VpkArchive { static open(name, dirFile: BlobLike, getArchive: (i: number) => BlobLike | null): Promise<VpkArchive>; has(p): boolean; read(p): Promise<Uint8Array | null>; }
+export class GameContent { archives: VpkArchive[]; label: string; archiveNames: string[]; fileCount: number; has(p): boolean; read(p): Promise<Uint8Array | null>; }
+export async function openGameContentFromFiles(files: Map<string, BlobLike>, opts?: { label?: string; notes?: string[] }): Promise<GameContent | null>;
 ```
+### Linked game content: "use textures from my CS:S / CS:GO install" (`maps/gamecontent.ts`)
+KSF maps reference stock CS:S/HL2 materials (`CONCRETE/CONCRETEWALL011`, `wood/woodshingles002a`...) that aren't packed
+in the BSP and can't be redistributed. A player who owns the game links their install once; its VPKs are then read
+straight from their disk (nothing is uploaded or copied). Module singleton for the UI (Settings) and the loader:
+```ts
+type GameContentState = 'none' | 'linked' | 'needs-permission' | 'error';
+interface GameContentStatus {
+  state: GameContentState;
+  label?: string;       // the linked folder's name, e.g. "Counter-Strike Source"
+  archives?: string[];  // in priority order: "csgo/pak01", "cstrike/cstrike_pak", "hl2/hl2_textures", "hl2/hl2_misc"
+  files?: number;       // files indexed in those archives
+  message?: string;     // error text; advice when partial ("cstrike" picked without "hl2"); what to click for needs-permission
+  source?: 'folder' | 'files';
+}
+isGameFolderPickerSupported(): boolean;          // window.showDirectoryPicker exists (Chromium)
+pickGameContentFolder(): Promise<GameContentStatus>;   // call from a click: opens the picker, links (cancel = no change)
+linkGameContentFromDirectoryHandle(handle: FileSystemDirectoryHandle): Promise<GameContentStatus>; // remembered (IndexedDB)
+linkGameContentFromFiles(files: FileList | File[]): Promise<GameContentStatus>;  // <input type=file webkitdirectory> fallback; this visit only
+restoreGameContent(): Promise<GameContentStatus>;      // at startup: reopen the remembered folder
+requestGameContentPermission(): Promise<GameContentStatus>; // call from a click when state is 'needs-permission'
+unlinkGameContent(): Promise<void>;
+getGameContent(): GameContent | null;
+getGameContentStatus(): GameContentStatus;
+onGameContentChange(cb: (s: GameContentStatus) => void): () => void;  // returns unsubscribe
+gameContentForLoad(): Promise<GameContent | null>;     // the loader's default: waits for a link in progress, restores once
+```
+The player may pick the game root ("Counter-Strike Source"), "cstrike", "steamapps/common" or a Steam library: the walk
+lists only the picked folder and known directories (cstrike, hl2, csgo, common, steamapps, the CS/HL2 game folders) and
+opens the numbered `_NNN.vpk` archives only when a file inside them is read. A link that finds nothing (or only
+Counter-Strike 2's Source 2 VPKs) is state 'error' with a message. Browsers usually want a click before reading a
+remembered folder again: `restoreGameContent()` then resolves to 'needs-permission' and the UI shows a button that
+calls `requestGameContentPermission()`. Maps load with stand-ins until content is linked; the next map load uses it.
 
 ## Game loop & tick order (game-core)
 
@@ -195,6 +242,14 @@ angle change on every tick at any fps — no 1x/2x alternation when fps and tick
 Render interpolates the origin between the last two ticks. The simulation clock (`WorldHost.time`) and the timer's
 run/stage clocks accumulate the interval of each simulated tick, so a tickrate change never rescales time already
 simulated.
+
+Pause (ESC, `cancelselect`, losing the pointer lock): like CS:GO's ESC menu, the world keeps running during a ranked
+run (every key released; the run still counts) and freezes otherwise (start zone, practice, finished, spectating).
+When the game can't simulate mid-run (the tab is hidden, frames stop for over a second, a map change that failed
+returned to the map) the run goes on as practice ("Timer stopped — run paused, it won't count"); hidden time is
+never caught up. `map <name>` validates the name first (an unknown one is only `map load failed: <name> not found`
+in the console); during a map change the current session is kept aside and comes back if the download/parse
+fails (`LoadProgress.recovered`).
 
 Per tick:
 1. Build `UserCmd` from +commands state (forward/side 450 like cl_forwardspeed/cl_sidespeed).
@@ -236,23 +291,34 @@ Crosshair (CS:GO names/semantics): `crosshair 1`, `cl_crosshairstyle 4`, `cl_cro
 `cl_crosshair_outlinethickness 1`, `cl_crosshaircolor 1` (0 red, 1 green, 2 yellow, 3 blue, 4 cyan, 5 custom),
 `cl_crosshaircolor_r 50`, `cl_crosshaircolor_g 250`, `cl_crosshaircolor_b 50`, `cl_crosshairalpha 200`, `cl_crosshairusealpha 1`.
 
-Video: `mat_fullbright 0`, `r_drawzones 1`, `r_drawtriggers 0`, `r_drawclips 0`, `mat_wireframe 0`,
+Video: `mat_fullbright 0`, `r_drawzones 1` (0 off, 1 floor outline, 2 full box → `RenderSettings.drawZones` /
+`zoneStyle`), `r_drawtriggers 0`, `r_drawclips 0`, `mat_wireframe 0`,
 `r_brightness 1`, `r_renderscale 1`, `r_anisotropy 8`, `fog_enable 1`, `r_3dsky 1`.
 
 Surf/HUD: `surf_hud_speed 1`, `surf_hud_timer 1`, `surf_showkeys 1`, `surf_ghost 1`, `surf_ghost_trail 1`,
 `surf_prespeed 350`, `surf_speedometer_color 1`, `surf_chat_sounds 1`.
+
+Autoexec compatibility (`COMPAT_CVAR_DEFS`, hidden, archived where CS:GO archives them, no effect): `viewmodel_*`,
+`cl_bob*`, `r_drawviewmodel`, `cl_draw_only_deathnotices`, `cl_radar_*`, `cl_hud_*` extras, `cl_teamid_overhead_*`,
+netcode (`rate`, `cl_updaterate`, `cl_cmdrate`, `cl_interp*`), `snd_*`, `voice_*`, `joystick`, `mat_queue_mode`,
+`mat_monitorgamma`, `fps_max_menu`, `net_graph*` ...; no-op commands such as `snd_setmixer`, `buy`, `slot1`.
 
 ## Commands
 
 Console (Source names): `map <name>`, `disconnect`, `retry`, `noclip`, `kill`, `setpos x y z`, `setang p y r`,
 `getpos`, `bind <key> "<cmd>"`, `unbind`, `unbindall`, `binddefaults`, `alias`, `echo`, `clear`, `cvarlist`, `find`,
 `help`, `toggle <cvar> [a b ...]`, `incrementvar`, `say`, `say_team`, `toggleconsole`, `messagemode`,
-`messagemode2`, `quit`, `status`, `host_writeconfig`, `+forward/-forward` etc.
+`messagemode2`, `quit`, `status`, `host_writeconfig`, `+forward/-forward` etc. `exec <name>` runs a stored cfg
+(localStorage `surf.cfg.<name>`, written by `cfg_save <name> "<cmds>"` or the settings' .cfg import; `cfg_list`,
+`cfg_delete`); `autoexec` runs at startup after the saved config (`src/game/cfgstore.ts`).
 
 Chat (SourceMod/SurfTimer style, also accept `/cmd` silently): `!r` `!restart`, `!s` `!stage [n]`, `!b` `!bonus [n]`,
 `!back`/`!stuck` (restart current stage), `!saveloc`/`!cp`, `!tele`/`!tp`, `!prac`/`!practice`, `!noclip`,
-`!pb`, `!top`, `!mi`/`!tier`, `!replay`, `!ghost`, `!hide`, `!showkeys`, `!speed`, `!zones` (zone editor),
-`!end` (practice), `!help`/`!commands`, `!fov <n>`, `!sens <n>`.
+`!pb`, `!top`, `!rank`/`!mrank`/`!prank` (Rank 1/1, PB, completions), `!stages`/`!wrcp`/`!cpr`/`!srcp`/`!stagetop`
+(stage records), `!mi`/`!tier`, `!replay`, `!ghost`, `!hide`, `!showkeys`, `!speed`, `!zones` (zone editor),
+`!end` (practice), `!help`/`!commands`, `!fov <n>`, `!sens <n>`. Unknown commands get a "Did you mean" only for a
+near miss. Reaching stage N+1 prints the completed stage's own time vs its stage best ("Player finished Stage 2 in
+00:12.345 (PB -0.123)", also the HUD split flash) before the run split; the end zone completes the last stage.
 
 Default binds (CS:GO + surf conventions): `w +forward`, `s +back`, `a +moveleft`, `d +moveright`,
 `space +jump`, `mwheeldown +jump`, `mwheelup +jump`, `ctrl +duck`, `shift +speed`, `e +use`, `tab +showscores`,
@@ -278,7 +344,7 @@ URL parameters (parsed by `game/debugapi.ts`):
 | `?map=<name>` | load a built-in map or a catalog map at startup (like the `map` command) |
 | `?builtin=<id>` | load a built-in map (`surf_tutorial`, `surf_neon`, `surf_skyline`) |
 | `?bsp=<url>` | download and play a `.bsp` / `.bsp.bz2` / `.rar` / `.zip` from a URL (dev: `/__maps/<name>.bsp`) |
-| `?autotest=1` | automated sessions: no pointer lock needed (mouse buttons/wheel work without it), never pause on focus or pointer-lock loss, no "click to capture" hint |
+| `?autotest=1` | automated sessions: no pointer lock needed (mouse buttons/wheel work without it), never pause on focus or pointer-lock loss, no "click to capture" hint, a hidden tab or a slow frame never turns a run into practice |
 
 `vite.config.ts` serves `$SURF_TEST_MAPS` / `$SURF_TEST_MAPS_LARGE` at `/__maps/<file>` in dev and preview.
 
@@ -287,7 +353,7 @@ velocity, speed, ground, timer HUD, tick, practice), `loadBuiltin(id)`, `loadUrl
 playing or failed), `setAngles(pitch, yaw)`, `teleport(x, y, z)` (zero velocity), `setVelocity(x, y, z)`,
 `press(cmd)` / `release(cmd)` / `releaseAll()` (+commands as from the console), `runTicks(n)` (simulate n ticks now
 with the current input — pause first for deterministic stepping), `exec(line)` (returns the console output),
-`say(text)`, `pause()`, `resume()`, `inSolid()`, `zones()`, `triggers()`, `findRamps(max)` (largest surfable world
+`say(text)`, `pause()` (a hard freeze, also mid-run, unlike the pause menu), `resume()`, `inSolid()`, `zones()`, `triggers()`, `findRamps(max)` (largest surfable world
 ramp faces) and `renderInfo()` (renderer diagnostics: face audit, S3TC, GPU resources), plus `game` itself.
 
 `npm run e2e` (`scripts/e2e.mjs`) starts the Vite dev server on a free port, opens the game in headless Chromium
@@ -299,7 +365,12 @@ builds, never stuck or in solid); (e) chat/console (messagemode, `!help`, silent
 `toggleconsole` key, scoreboard, pause); (f) map switching without page errors or JS-heap / GPU-resource growth;
 (g) complete runs of every built-in map through the real input pipeline, steered by the map's autopilot
 (`src/map/builtin/autopilot.ts` pressing +commands and setting view angles each tick): the timer finishes, the PB is
-saved, `!replay` spectates the replay and the PB ghost shows on the next attempt.
+saved, `!replay` spectates the replay and the PB ghost shows on the next attempt; (h, opt-in `E2E_DOWNLOAD=1`, needs
+the network) the catalog download path: `?map=surf_kitsune` with the browser's requests to drive.usercontent.google.com
+answered through Playwright routing by the real file and real response headers fetched in Node (so the browser's CORS
+check, streamed download, unrar wasm and IndexedDB cache run for real; behind an HTTPS proxy run with
+`NODE_USE_ENV_PROXY=1` and `NODE_EXTRA_CA_CERTS`, or set `E2E_DOWNLOAD_ARCHIVE` to a local copy): the map plays, and a
+reload loads it "from cache" without touching Drive. `E2E_PORT` pins the dev server port.
 Any uncaught page error fails the run. Env: `SURF_TEST_MAPS`, `SURF_TEST_MAPS_LARGE` (+`E2E_LARGE=1`),
 `CHROMIUM_PATH`, `E2E_OUT` (screenshots + `<prefix>results.json`), `E2E_PREFIX`, `E2E_ONLY=a,c`, `E2E_MAPS=...`.
 SwiftShader renders a few fps at 1280x720, so real-time checks poll instead of assuming frame rates; scenario (c)
@@ -311,6 +382,7 @@ running on the tree (or the browser tests in `npm test`, which do the same) can'
 
 ```
 Drive (.rar) ─► maps/downloader (unrar wasm, IndexedDB cache) ─► bsp/loadmap ─► LoadedMap ─► game ─► renderer
-                                                                  ▲                                  ▲
-                                       maps/zones (SurfTimer presets)          built-in maps ─────────┘
+                                                                   ▲   ▲                               ▲
+                                   maps/zones (SurfTimer presets) ─┘   │           built-in maps ──────┘
+      player's CS:S / CS:GO VPKs ─► maps/gamecontent (stock textures) ─┘
 ```

@@ -143,7 +143,7 @@ describe('SurfTimer run flow', () => {
     expect(l2).toContain('[Surf] Stage 2 | 00:00.500 (-0.500)');
     const split = w.host.chats.find((c) => c.some((s) => s.text === '-0.500'))!;
     expect(split.find((s) => s.text === '-0.500')?.color).toBe('lightgreen');
-    expect(l2).toContain('[Surf] Player finished surf_test in 00:02.500 (-0.500) | Rank 1/2');
+    expect(l2).toContain('[Surf] Player finished surf_test in 00:02.500 (-0.500) | Rank 1/1');
     expect(w.timer.getHud().lastSplitDelta).toBeCloseTo(-0.5, 9);
 
     // slower run: red, no PB
@@ -151,8 +151,8 @@ describe('SurfTimer run flow', () => {
     run(w, [100, 100, 100]);
     const l3 = w.host.chatText();
     expect(l3).toContain('[Surf] Stage 2 | 00:01.000 (+0.500)');
-    // equal times: the older run stays ahead
-    expect(l3.at(-1)).toBe('[Surf] Player finished surf_test in 00:03.000 (+0.500) | Rank 3/3');
+    // SurfTimer's rank is among players (one on a local server), not among your own runs
+    expect(l3.at(-1)).toBe('[Surf] Player finished surf_test in 00:03.000 (+0.500) | Rank 1/1');
     expect(w.host.sound.played.at(-1)).toBe('finish');
     expect(getRecords('surf_test', 0).map((r) => r.time)).toEqual([2.5, 3, 3].map((t) => expect.closeTo(t, 9)));
     expect(w.timer.getRecords(0)).toHaveLength(3);

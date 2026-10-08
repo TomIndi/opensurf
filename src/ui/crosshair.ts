@@ -10,6 +10,7 @@
 //   outward. Vertical bars mirror that. The dot is the t×t square at the centre.
 //   Each rect is drawn as: black outline rect grown by cl_crosshair_outlinethickness, then the fill.
 //   cl_crosshairusealpha 0 draws additively with alpha 200 (outline therefore invisible).
+import { decodeCrosshairShareCode, SHARE_CODE_RE, shareDataToCommands } from './crosshaircode';
 
 export interface CrosshairParams {
   enabled: boolean;
@@ -233,23 +234,35 @@ export function drawCrosshair(ctx: CrosshairCtx, g: CrosshairGeometry, ox = 0, o
 
 // ------------------------------------------------------------------ config paste / export
 
-const CROSSHAIR_CMD_RE = /^(crosshair|cl_crosshair[a-z0-9_]*|cl_crosshair_[a-z0-9_]+)$/i;
+const CROSSHAIR_CMD_RE = /^(crosshair|cl_crosshair[a-z0-9_]*|cl_crosshair_[a-z0-9_]+|cl_fixedcrosshairgap)$/i;
 
 export interface ParsedCrosshairConfig {
   /** Normalized `name "value"` console lines to execute. */
   commands: string[];
   /** Commands that were ignored (not crosshair cvars). */
   ignored: string[];
+  /** Valid CS:GO share codes that were decoded into `commands`. */
+  shareCodes: string[];
+  /** Share codes that could not be decoded. */
+  shareCodeErrors: { code: string; error: 'format' | 'checksum' }[];
 }
 
 /**
  * Extracts crosshair cvar assignments from pasted text: autoexec/config.cfg lines, ';'-separated one-liners,
- * quoted or unquoted values, // comments. Only `crosshair` and `cl_crosshair*` names are accepted, values
- * must be numeric. Later assignments of the same cvar win.
+ * quoted or unquoted values, // comments, and CS:GO crosshair share codes ("CSGO-xxxxx-…", alone or as
+ * `apply_crosshair_code CSGO-…`), which expand to the cl_crosshair* cvars they encode. Only `crosshair`,
+ * `cl_crosshair*` and `cl_fixedcrosshairgap` names are accepted, values must be numeric. Later assignments of the
+ * same cvar win.
  */
 export function parseCrosshairConfig(text: string): ParsedCrosshairConfig {
   const ignored: string[] = [];
+  const shareCodes: string[] = [];
+  const shareCodeErrors: ParsedCrosshairConfig['shareCodeErrors'] = [];
   const byName = new Map<string, string>();
+  const set = (name: string, value: string) => {
+    byName.delete(name); // keep last occurrence order
+    byName.set(name, value);
+  };
   const statements = text
     .split(/\r?\n/)
     .map((l) => {
@@ -260,6 +273,20 @@ export function parseCrosshairConfig(text: string): ParsedCrosshairConfig {
   for (const raw of statements) {
     const st = raw.trim();
     if (!st) continue;
+    const code = SHARE_CODE_RE.exec(st);
+    if (code) {
+      const r = decodeCrosshairShareCode(code[0]);
+      if (!r.ok) {
+        shareCodeErrors.push({ code: code[0], error: r.error });
+        continue;
+      }
+      shareCodes.push(code[0]);
+      for (const line of shareDataToCommands(r.data)) {
+        const m = /^(\S+) "(.*)"$/.exec(line)!;
+        set(m[1], m[2]);
+      }
+      continue;
+    }
     const m = /^"?([A-Za-z0-9_]+)"?\s+"?\s*([-+]?(?:\d+\.?\d*|\.\d+))\s*"?$/.exec(st);
     if (!m) {
       ignored.push(st);
@@ -270,11 +297,9 @@ export function parseCrosshairConfig(text: string): ParsedCrosshairConfig {
       ignored.push(st);
       continue;
     }
-    const value = String(parseFloat(m[2]));
-    byName.delete(name); // keep last occurrence order
-    byName.set(name, value);
+    set(name, String(parseFloat(m[2])));
   }
-  return { commands: [...byName].map(([n, v]) => `${n} "${v}"`), ignored };
+  return { commands: [...byName].map(([n, v]) => `${n} "${v}"`), ignored, shareCodes, shareCodeErrors };
 }
 
 /** Exports the current crosshair as a config one-liner (like crosshair generators). */

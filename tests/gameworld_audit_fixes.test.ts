@@ -377,7 +377,7 @@ describe('!s N stage practice (SurfTimer stage times)', () => {
     w.at(1600, 99);
     expect(w.timer.getHud().time).toBeCloseTo(0.99, 9);
     w.at(2100); // stage 3 reached
-    expect(w.host.chatText().at(-1)).toBe('[Surf] Stage 2 | 00:01.000 (first time)');
+    expect(w.host.chatText().at(-1)).toBe('[Surf] Player finished Stage 2 in 00:01.000 (first time)');
     expect(getStageBest('surf_fix', 0, 2, 100)?.time).toBeCloseTo(1, 9);
     expect(w.timer.getHud()).toMatchObject({ state: 'practice', stage: 3, time: 0 });
     // back to stage 2, faster this time
@@ -387,13 +387,13 @@ describe('!s N stage practice (SurfTimer stage times)', () => {
     w.at(1500);
     w.at(1600, 49);
     w.at(2100);
-    expect(w.host.chatText().at(-1)).toBe('[Surf] Stage 2 | 00:00.500 (PB -0.500)');
+    expect(w.host.chatText().at(-1)).toBe('[Surf] Player finished Stage 2 in 00:00.500 (PB -0.500)');
     expect(getStageBest('surf_fix', 0, 2, 100)?.time).toBeCloseTo(0.5, 9);
     // last stage -> end zone completes stage 3
     w.at(2500);
     w.at(2600, 199);
     w.at(3100);
-    expect(w.host.chatText().at(-1)).toBe('[Surf] Stage 3 | 00:02.000 (first time)');
+    expect(w.host.chatText().at(-1)).toBe('[Surf] Player finished Stage 3 in 00:02.000 (first time)');
     expect(w.timer.getHud()).toMatchObject({ state: 'finished', time: 2 });
     expect(getRecords('surf_fix', 0, 100)).toHaveLength(0); // no map record from practice
   });

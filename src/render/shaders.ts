@@ -253,6 +253,14 @@ vec3 synthLight(vec3 n) {
 
 void main() {
 #include <logdepthbuf_fragment>
+#if defined( USE_LOGARITHMIC_DEPTH_BUFFER ) && defined( DEPTH_BIAS )
+  {
+    // logarithmic depth is written by the shader, out of polygonOffset's reach: the same slope-scaled bias
+    // toward the eye here (one pixel's depth slope + a few units), so blended surfaces beat coplanar opaque ones
+    float fd = log2(vFragDepth) * logDepthBufFC * 0.5;
+    gl_FragDepth = fd - (max(abs(dFdx(fd)), abs(dFdy(fd))) + DEPTH_BIAS);
+  }
+#endif
   vec4 albedo = texture(map, vUv);
 #ifdef USE_BLEND2
   vec4 albedo2 = texture(map2, vUv2);
@@ -385,6 +393,14 @@ vec2 waveGradient(vec2 p, float t) {
 
 void main() {
 #include <logdepthbuf_fragment>
+#if defined( USE_LOGARITHMIC_DEPTH_BUFFER ) && defined( DEPTH_BIAS )
+  {
+    // logarithmic depth is written by the shader, out of polygonOffset's reach: the same slope-scaled bias
+    // toward the eye here (one pixel's depth slope + a few units), so blended surfaces beat coplanar opaque ones
+    float fd = log2(vFragDepth) * logDepthBufFC * 0.5;
+    gl_FragDepth = fd - (max(abs(dFdx(fd)), abs(dFdy(fd))) + DEPTH_BIAS);
+  }
+#endif
   vec3 V = normalize(vPosW - cameraPosition);
   // the surface normal on the viewer's side: a top face seen from above, a $bottommaterial face (or a lone
   // double-sided surface) seen from below

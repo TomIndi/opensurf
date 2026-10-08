@@ -40,6 +40,7 @@ import {
   setUvTransform,
   srgbToLinear,
 } from './worldmaterials';
+import { rebaseUvs, uvRebaseStep } from './uvrebase';
 
 /** Opaque draw order groups (three.js sorts by renderOrder, then material, then depth). */
 export const ORDER_SKY_MASK = -10;
@@ -788,7 +789,10 @@ export class MapScene {
     } else {
       const d = def!;
       g.setAttribute('normal', new BufferAttribute(b.normals && b.normals.length >= nv * 3 ? b.normals : defaultNormals(nv), 3));
-      g.setAttribute('uv', new BufferAttribute(b.uvs && b.uvs.length >= nv * 2 ? b.uvs : new Float32Array(nv * 2), 2));
+      // a copy: the batch's own coordinates stay untouched (the map can be loaded again)
+      const uvs = b.uvs && b.uvs.length >= nv * 2 ? b.uvs.slice(0, nv * 2) : new Float32Array(nv * 2);
+      rebaseUvs(uvs, b.indices, nv, uvRebaseStep(d));
+      g.setAttribute('uv', new BufferAttribute(uvs, 2));
       const lit = !!(this.lightmapTex && b.lightmapUVs && b.lightmapUVs.length >= nv * 2 && !d.unlit);
       if (lit) g.setAttribute('lmuv', new BufferAttribute(b.lightmapUVs!, 2));
       const blend = !!(b.alphas && b.alphas.length >= nv && (d.image2 || d.fallbackColor2));
@@ -988,6 +992,8 @@ export class MapScene {
       vb += n;
       ib += b.indices.length;
     }
+    // texture coordinates near zero (float precision across big faces, see uvrebase.ts)
+    if (uvs && q.def) rebaseUvs(uvs, indices, nv, uvRebaseStep(q.def));
     const g = new BufferGeometry();
     g.setAttribute('position', new BufferAttribute(positions, 3));
     if (normals) g.setAttribute('normal', new BufferAttribute(normals, 3));

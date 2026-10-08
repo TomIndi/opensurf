@@ -421,19 +421,23 @@ describe('gameplay', () => {
     expect(finishLine.map((x) => x.text).join('')).toContain('surf_gamecore_test');
     expect(finishLine.slice(0, 3)).toEqual([...CHAT_PREFIX]); // the timer's prefix shown in the shared style
 
-    // next attempt: the ghost runs with us
+    // next attempt: no ghost in the start zone (it would stand in your face), then it runs with us
     t.game.say('!r');
     expect(s.timer.getHud().state).toBe('startzone');
     t.game.frame(5000);
     t.game.frame(5010);
     let g = t.renderer.ghosts[t.renderer.ghosts.length - 1];
-    expect(g).toHaveLength(1);
+    expect(g ?? []).toHaveLength(0);
     t.game.executeCommand('+forward');
     t.game.runTicks(100);
     t.game.frame(5020);
     g = t.renderer.ghosts[t.renderer.ghosts.length - 1];
     expect(g).toHaveLength(1);
     expect(g[0].origin.x).toBeGreaterThan(50);
+    // synced to the run clock: the ghost is where the PB run was at the same run time (within the render
+    // interpolation's one tick: 2.5 units at 250 u/s)
+    const same = s.replay.ghostAt(s.timer.getHud().time)!;
+    expect(Math.abs(g[0].origin.x - same.origin.x)).toBeLessThanOrEqual(2.6);
     // !ghost off hides it
     t.game.say('/ghost');
     t.game.frame(5030);

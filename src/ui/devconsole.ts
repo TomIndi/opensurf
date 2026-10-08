@@ -13,6 +13,10 @@ const MAX_SUGGESTIONS = 12;
 export interface DevConsoleDeps {
   execute: (line: string) => void;
   onOpenChange: (open: boolean) => void;
+  /** "Import .cfg" button: pick CS:GO config files to save (and exec). */
+  importCfg?: () => void;
+  /** Several lines pasted into the input: offer to run / save them as a config. */
+  importCfgText?: (text: string) => void;
 }
 
 export interface Suggestion {
@@ -36,6 +40,16 @@ export function suggestionsFor(partial: string, max = MAX_SUGGESTIONS): Suggesti
     out.push({ text: m, value: cv ? cv.value : null, help: cv?.help ?? cmd?.help ?? '' });
   }
   return out;
+}
+
+/** True for pasted text with at least two command lines (a config, not a single command). */
+export function isMultiLineConfig(text: string): boolean {
+  let n = 0;
+  for (const line of text.split(/\r?\n/)) {
+    const c = line.indexOf('//');
+    if ((c >= 0 ? line.slice(0, c) : line).trim() && ++n >= 2) return true;
+  }
+  return false;
 }
 
 export class DevConsole {
@@ -66,7 +80,11 @@ export class DevConsole {
     submit.addEventListener('click', () => this.submit());
     const closeBtn = h('button.btn.btn-ghost.btn-icon.btn-sm', { attrs: { type: 'button', title: 'Close (~)' } }, icon('close'));
     closeBtn.addEventListener('click', () => this.close());
-    const title = h('div.devcon-title', null, icon('console'), h('span', { text: 'Console' }), h('span.devcon-hint', { text: '~ to toggle · Tab completes · ↑↓ history' }), closeBtn);
+    const cfgBtn = deps.importCfg
+      ? h('button.btn.btn-ghost.btn-sm.devcon-cfg', { attrs: { type: 'button', title: 'Import CS:GO .cfg files (autoexec…): saved for exec <name>. You can also drop them here or paste their lines.' } }, icon('upload'), 'Import .cfg')
+      : null;
+    cfgBtn?.addEventListener('click', () => deps.importCfg?.());
+    const title = h('div.devcon-title', null, icon('console'), h('span', { text: 'Console' }), h('span.devcon-hint', { text: '~ to toggle · Tab completes · ↑↓ history' }), cfgBtn, closeBtn);
     this.el = h(
       'div.devcon.interactive.hidden',
       { attrs: { role: 'dialog', 'aria-label': 'Developer console' } },
@@ -77,6 +95,13 @@ export class DevConsole {
     );
 
     this.input.addEventListener('keydown', (e) => this.onKey(e));
+    // pasting a whole config (several lines) can't go into a one-line input: offer to run / save it instead
+    this.input.addEventListener('paste', (e) => {
+      const text = e.clipboardData?.getData('text/plain') ?? '';
+      if (!deps.importCfgText || !isMultiLineConfig(text)) return;
+      e.preventDefault();
+      deps.importCfgText(text);
+    });
     this.input.addEventListener('input', () => {
       this.histPos = -1;
       this.tabCycle = false;

@@ -81,6 +81,7 @@ export interface SurfDebugApi {
   exec(line: string): string[];
   /** Chat as the local player (handles !commands). */
   say(text: string): void;
+  /** Freezes the simulation (even mid-run, unlike the pause menu) until resume(): step it with runTicks. */
   pause(): void;
   resume(): void;
   /** Sets the player's velocity (u/s). */
@@ -197,7 +198,8 @@ export function createDebugApi(game: Game): SurfDebugApi {
       return out.map((l) => l.text);
     },
     say: (text) => game.say(text),
-    pause: () => game.pause(),
+    // a hard freeze (unlike the pause menu, which keeps a ranked run going): only runTicks advances the world
+    pause: () => game.pause({ freeze: true }),
     resume: () => game.resume(),
     setVelocity: (x, y, z) => {
       const ps = game.session?.player;

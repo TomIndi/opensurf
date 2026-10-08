@@ -433,7 +433,8 @@ describe('surf chat commands', () => {
       }),
     );
     t.game.say('/stages');
-    expect(t.ui.lastText()).toBe('[Surf] surf_staged_test has 3 stages: !s 1 - !s 3.');
+    expect(t.ui.texts().at(-2)).toBe('[Surf] surf_staged_test has 3 stages: !s 1 - !s 3.');
+    expect(t.ui.lastText()).toBe('[Surf] No stage times yet: complete stages in a run, or practice one with !s <n>.');
     t.game.say('/bonuses');
     expect(t.ui.lastText()).toBe('[Surf] surf_staged_test has 1 bonus: !b 1.');
     t.game.say('/wrb');
@@ -536,8 +537,8 @@ describe('map info helpers', () => {
     await g.game.loadBuiltinMap('test');
     const all = g.ui.texts().join('\n');
     expect(all).toContain('Welcome to');
-    // the heuristic gives a start zone around the spawn but no end
-    expect(all).toMatch(/no timer zones|No end zone/);
+    // the heuristic gives a start zone around the spawn but no end: one short "none – type !zones"
+    expect(all).toContain('Zones: none – type !zones');
     g.game.disconnect();
   });
 });

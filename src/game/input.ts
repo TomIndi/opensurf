@@ -14,9 +14,11 @@
 //    0.5 on the first tick after a press in the same frame, 0.25 for a tap that began and ended within that
 //    frame (see KButton.keyState).
 //  - DOM: pointer lock on canvas click (raw input when supported), keys/mouse buttons/wheel run their binds while
-//    playing (ignored while the console/chat has focus), losing the pointer lock pauses the game.
+//    playing (ignored while the console/chat has focus), losing the pointer lock pauses the game. Whether the lock
+//    got raw input (unadjustedMovement) is kept in InputDevice.rawInputActive; the first time a browser only gives
+//    a plain lock, the console says so once, with the OS settings that keep sensitivity CS:GO-identical.
 import { QAngle, normalizeAngle, qa } from '../core/angles';
-import { console_, registerCommand, tokenizeCommandLine } from '../core/cvars';
+import { conPrint, console_, registerCommand, tokenizeCommandLine } from '../core/cvars';
 import {
   IN_ATTACK,
   IN_ATTACK2,
@@ -613,12 +615,28 @@ type LockableCanvas = HTMLCanvasElement & {
   requestPointerLock(options?: { unadjustedMovement?: boolean }): Promise<void> | void;
 };
 
+/** Printed once when the browser gives a plain pointer lock although raw input (m_rawinput 1) was asked for. */
+export const RAW_INPUT_FALLBACK_MESSAGE =
+  'Raw mouse input is not available in this browser: mouse movement goes through OS pointer acceleration and display ' +
+  'scaling. For CS:GO-identical sensitivity turn off "Enhance pointer precision" (Windows) / mouse acceleration ' +
+  '(macOS), and keep display scaling at 100%. Chrome and Edge support raw input.';
+
+function isPromise(x: unknown): x is Promise<void> {
+  return !!x && typeof (x as Promise<void>).then === 'function';
+}
+
 export class InputDevice {
   private readonly deps: InputDeviceDeps;
   private attached = false;
   private wasLocked = false;
   private lockPending = false;
   private readonly cleanups: Array<() => void> = [];
+  /**
+   * Raw input of the latest pointer lock: true with unadjustedMovement (no OS acceleration), false for a plain lock
+   * (the browser can't do raw input, or m_rawinput 0), null before the first lock.
+   */
+  rawInputActive: boolean | null = null;
+  private rawAdviceShown = false;
 
   constructor(deps: InputDeviceDeps) {
     this.deps = deps;
@@ -691,6 +709,15 @@ export class InputDevice {
     this.deps.state.releaseAll();
   }
 
+  /** Records whether the lock is raw; a plain lock that replaced a raw request prints the advice (once). */
+  private setRawInput(active: boolean, fallback: boolean): void {
+    this.rawInputActive = active;
+    if (!active && fallback && !this.rawAdviceShown) {
+      this.rawAdviceShown = true;
+      conPrint(RAW_INPUT_FALLBACK_MESSAGE, 'warn');
+    }
+  }
+
   /** Captures the mouse (raw input when m_rawinput 1 and supported, falling back to a plain lock). */
   requestPointerLock(): void {
     if (this.pointerLocked || this.lockPending || typeof document === 'undefined') return;
@@ -704,21 +731,35 @@ export class InputDevice {
     const plain = () => {
       try {
         const r2 = canvas.requestPointerLock();
-        if (r2 && typeof (r2 as Promise<void>).then === 'function') (r2 as Promise<void>).then(done, done);
-        else done();
+        const locked = () => {
+          done();
+          this.setRawInput(false, true);
+        };
+        if (isPromise(r2)) r2.then(locked, done);
+        else locked();
       } catch {
         done();
       }
     };
     try {
       const r = raw ? canvas.requestPointerLock({ unadjustedMovement: true }) : canvas.requestPointerLock();
-      if (r && typeof (r as Promise<void>).then === 'function') {
-        (r as Promise<void>).then(done, () => {
-          // unadjustedMovement unsupported (or refused): plain pointer lock
-          if (raw) plain();
-          else done();
-        });
-      } else done();
+      if (isPromise(r)) {
+        r.then(
+          () => {
+            done();
+            this.setRawInput(raw, false);
+          },
+          () => {
+            // unadjustedMovement unsupported (or refused): plain pointer lock
+            if (raw) plain();
+            else done();
+          },
+        );
+      } else {
+        // the pre-promise API (Firefox, older Safari) ignores the options: a plain lock
+        done();
+        this.setRawInput(false, raw);
+      }
     } catch {
       if (raw) plain();
       else done();

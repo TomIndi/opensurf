@@ -18,6 +18,10 @@
 //   g  complete runs of every built-in map through the real game (input -> usercmd -> movement -> triggers ->
 //      timer) steered by the map's autopilot: the timer finishes, the PB is recorded, the replay is saved and
 //      can be spectated (!replay), and the PB ghost shows on the next attempt
+//   h  (opt-in, E2E_DOWNLOAD=1: needs the network) the catalog download path: ?map=surf_kitsune with requests to
+//      drive.usercontent.google.com answered (via Playwright routing) by the real file and real response headers
+//      fetched in Node, so the browser's CORS check, streamed download, unrar wasm and IndexedDB cache run for real;
+//      the map plays, and a reload loads it from the cache without touching Drive
 //
 // Environment:
 //   SURF_TEST_MAPS        directory of .bsp files for c/d/f (those scenarios are skipped without it)
@@ -28,7 +32,11 @@
 //   E2E_PREFIX            screenshot name prefix (default "integ-")
 //   E2E_MAPS              comma list restricting the real maps of scenario c
 //   E2E_HEADFUL=1         show the browser
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+//   E2E_PORT              dev server port (default: any free port)
+//   E2E_DOWNLOAD=1        enable scenario h. Node must reach Google Drive: behind an HTTPS proxy run node with
+//                         NODE_USE_ENV_PROXY=1 (and NODE_EXTRA_CA_CERTS=<proxy CA bundle> for a TLS-inspecting one)
+//   E2E_DOWNLOAD_ARCHIVE  local surf_kitsune.rar served (with Drive's headers) when Node can't reach Drive
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -36,7 +44,8 @@ import { fileURLToPath } from 'node:url';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = resolve(process.env.E2E_OUT || join(tmpdir(), 'surf-e2e'));
 const PREFIX = process.env.E2E_PREFIX ?? 'integ-';
-const ONLY = new Set((process.env.E2E_ONLY || 'a,b,c,d,e,f,g').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean));
+const DOWNLOAD = process.env.E2E_DOWNLOAD === '1';
+const ONLY = new Set((process.env.E2E_ONLY || `a,b,c,d,e,f,g${DOWNLOAD ? ',h' : ''}`).split(',').map((s) => s.trim().toLowerCase()).filter(Boolean));
 const MAPS_DIR = process.env.SURF_TEST_MAPS && existsSync(process.env.SURF_TEST_MAPS) ? process.env.SURF_TEST_MAPS : null;
 const LARGE_DIR = process.env.SURF_TEST_MAPS_LARGE && existsSync(process.env.SURF_TEST_MAPS_LARGE) ? process.env.SURF_TEST_MAPS_LARGE : null;
 const VIEW = { width: 1280, height: 720 };
@@ -824,6 +833,188 @@ async function scenarioG(browser) {
   await page.close();
 }
 
+// ------------------------------------------------------------------------------------------ h: catalog download
+
+const KITSUNE_DRIVE_ID = '1Si_L_Ux64R1zOUfyk6z1RVd7IBy2_3UO';
+/** Response headers that describe the transfer, not the file (Node's fetch already decoded the body). */
+const HOP_HEADERS = new Set(['content-encoding', 'transfer-encoding', 'connection', 'keep-alive', 'content-length']);
+
+/**
+ * Fetches a Google Drive download in Node (the sandbox's TLS proxy is trusted by Node with NODE_USE_ENV_PROXY=1 and
+ * NODE_EXTRA_CA_CERTS, not by the browser) and returns the real status, headers and body. With E2E_DOWNLOAD_ARCHIVE
+ * (a local copy of the archive) it falls back to that file, with the headers Drive sends, when Node can't reach Drive.
+ */
+async function fetchDriveInNode(url, origin) {
+  try {
+    const res = await fetch(url, { headers: origin ? { origin } : {}, redirect: 'follow' });
+    const body = Buffer.from(await res.arrayBuffer());
+    const headers = {};
+    for (const [k, v] of res.headers) if (!HOP_HEADERS.has(k)) headers[k] = v;
+    headers['content-length'] = String(body.length);
+    return { status: res.status, headers, body, source: 'google drive' };
+  } catch (e) {
+    const local = process.env.E2E_DOWNLOAD_ARCHIVE;
+    if (!local || !existsSync(local)) {
+      throw new Error(
+        `fetching ${url} from Node failed (${e?.cause?.message ?? e?.message}); run with NODE_USE_ENV_PROXY=1 (+ NODE_EXTRA_CA_CERTS behind a TLS proxy) or set E2E_DOWNLOAD_ARCHIVE to a local surf_kitsune.rar`,
+      );
+    }
+    const body = readFileSync(local);
+    return {
+      status: 200,
+      headers: {
+        'content-type': 'application/octet-stream',
+        'content-disposition': `attachment; filename="${basename(local)}"`,
+        'content-length': String(body.length),
+        'access-control-allow-origin': '*',
+        'access-control-expose-headers': 'Cache-Control, Content-Length, Date, Expires, Server, Transfer-Encoding',
+      },
+      body,
+      source: `local copy ${local}`,
+    };
+  }
+}
+
+/**
+ * The catalog download path in the real browser (opt-in: E2E_DOWNLOAD=1). Requests to drive.usercontent.google.com
+ * are routed through Playwright and answered with the real file and the real response headers (fetched in Node), so
+ * the browser runs its own CORS check, the streamed download with progress, the unrar wasm extraction and the
+ * IndexedDB cache. ?map=surf_kitsune must play; a reload must load it from the cache without touching Drive.
+ */
+async function scenarioH(browser) {
+  const r = { driveRequests: [] };
+  const context = await browser.newContext({ viewport: VIEW });
+  const page = await context.newPage();
+  const errors = [];
+  page.on('pageerror', (e) => {
+    errors.push(e.message);
+    console.log(`  [pageerror] ${e.message}`);
+  });
+  // Record every load progress report: hook window.__surf as soon as the game installs it (before ?map= starts).
+  await page.addInitScript(() => {
+    window.__e2eProgress = [];
+    let api;
+    Object.defineProperty(window, '__surf', {
+      configurable: true,
+      get: () => api,
+      set: (v) => {
+        api = v;
+        try {
+          v.game.on('loadprogress', (p) => window.__e2eProgress.push({ phase: p.phase, message: p.message, loaded: p.loaded, total: p.total }));
+        } catch {
+          // older debug API without .game: progress isn't recorded
+        }
+      },
+    });
+  });
+  let answer = null;
+  await page.route('https://drive.usercontent.google.com/**', async (route) => {
+    const req = route.request();
+    r.driveRequests.push(req.url());
+    try {
+      answer ??= await fetchDriveInNode(req.url(), req.headers()['origin'] ?? base.replace(/\/$/, ''));
+      r.source = answer.source;
+      r.status = answer.status;
+      r.corsHeader = answer.headers['access-control-allow-origin'] ?? null;
+      r.bytes = answer.body.length;
+      await route.fulfill({ status: answer.status, headers: answer.headers, body: answer.body });
+    } catch (e) {
+      r.fetchError = String(e?.message ?? e);
+      await route.abort('failed');
+    }
+  });
+  const url = `${base}?map=surf_kitsune&autotest=1`;
+  const progressOf = () => page.evaluate(() => window.__e2eProgress ?? []);
+
+  // ---- first load: download + extract + cache
+  let t0 = Date.now();
+  await page.goto(url);
+  await page.waitForFunction(() => !!window.__surf, null, { timeout: 60000 });
+  try {
+    await waitPlaying(page, 300000);
+  } catch (e) {
+    check(false, 'surf_kitsune downloads from the catalog and plays', r.fetchError ?? String(e).slice(0, 300));
+    await shot(page, 'h-download-failed');
+    results.scenarios.h = r;
+    await context.close();
+    return;
+  }
+  r.firstLoadMs = Date.now() - t0;
+  const p1 = await progressOf();
+  r.firstMessages = [...new Set(p1.map((p) => `${p.phase}: ${p.message.replace(/[\d.]+ \/ [\d.]+ MB/, 'n / m MB')}`))];
+  log(`first load ${r.firstLoadMs} ms via ${r.source}: ${r.bytes} bytes, HTTP ${r.status}, access-control-allow-origin ${r.corsHeader}`);
+  check(r.driveRequests.length === 1, 'the map is downloaded from Google Drive once', r.driveRequests);
+  check(r.driveRequests[0]?.includes(`id=${KITSUNE_DRIVE_ID}`), 'the catalog entry\'s Drive id is requested', r.driveRequests[0]);
+  check(!!r.corsHeader, 'the Drive response carries access-control-allow-origin (the browser accepted it)', r.corsHeader);
+  const dl = p1.filter((p) => p.phase === 'download' && /^Downloading/.test(p.message));
+  check(dl.length > 0 && dl.at(-1).total === r.bytes, 'the download streams with progress against content-length', dl.at(-1));
+  check(p1.some((p) => p.phase === 'extract'), 'the archive is extracted (unrar wasm)');
+  check(!p1.some((p) => /from cache/i.test(p.message)), 'the first load does not come from the cache');
+  const s1 = await st(page);
+  r.map = s1.mapName;
+  r.spawnTimer = s1.timer?.state;
+  check(/^surf_kitsune$/i.test(String(s1.mapName)), 'surf_kitsune is the loaded map', s1.mapName);
+  check(!(await page.evaluate(() => window.__surf.inSolid())), 'not stuck in solid at spawn');
+  // it plays: holding W moves the player (polled: SwiftShader frame rates vary)
+  await sleep(800);
+  const before = (await st(page)).origin;
+  await page.keyboard.down('w');
+  const moved = await pollPage(
+    page,
+    (b) => {
+      const o = window.__surf.state().origin;
+      const d = Math.hypot(o.x - b.x, o.y - b.y);
+      return d > 24 ? d : 0;
+    },
+    before,
+    15000,
+  );
+  await page.keyboard.up('w');
+  r.moved = r1(moved || 0);
+  check(r.moved > 24, 'keyboard input moves the player on the downloaded map', r.moved);
+  await shot(page, 'h-downloaded');
+  // the BSP lands in the IndexedDB cache
+  const cachedKeys = await pollPage(
+    page,
+    () =>
+      new Promise((res) => {
+        const req = indexedDB.open('surf-maps');
+        req.onerror = () => res(null);
+        req.onsuccess = () => {
+          const db = req.result;
+          if (!db.objectStoreNames.contains('bsp')) return res(null);
+          const k = db.transaction('bsp', 'readonly').objectStore('bsp').getAllKeys();
+          k.onsuccess = () => res(k.result.map(String).includes('surf_kitsune') ? k.result.map(String) : null);
+          k.onerror = () => res(null);
+        };
+      }),
+    null,
+    20000,
+    250,
+  );
+  r.cachedKeys = cachedKeys;
+  check(!!cachedKeys, 'the extracted BSP is cached in IndexedDB', cachedKeys);
+
+  // ---- second load: from the cache, no request to Drive
+  t0 = Date.now();
+  await page.goto(url);
+  await page.waitForFunction(() => !!window.__surf, null, { timeout: 60000 });
+  await waitPlaying(page, 300000);
+  r.cachedLoadMs = Date.now() - t0;
+  const p2 = await progressOf();
+  r.secondMessages = [...new Set(p2.map((p) => `${p.phase}: ${p.message}`))];
+  check(p2.some((p) => p.phase === 'download' && /from cache/i.test(p.message)), 'the second load says it came from the cache', r.secondMessages);
+  check(r.driveRequests.length === 1, 'the second load does not touch Google Drive', r.driveRequests);
+  const s2 = await st(page);
+  check(s2.state === 'playing' && /^surf_kitsune$/i.test(String(s2.mapName)), 'surf_kitsune plays again', s2.mapName);
+  await sleep(500);
+  await shot(page, 'h-cached');
+  log(`cached load ${r.cachedLoadMs} ms (first ${r.firstLoadMs} ms)`);
+  check(errors.length === 0, 'no uncaught page errors', errors);
+  results.scenarios.h = r;
+  await context.close();
+}
+
 // ------------------------------------------------------------------------------------------ main
 
 let base = '';
@@ -842,7 +1033,7 @@ async function main() {
     cacheDir: (viteCache = mkdtempSync(join(tmpdir(), 'surf-e2e-vite-'))),
     logLevel: 'warn',
     // no HMR / file watching: other work in the tree must not reload the page under test
-    server: { port: 0, host: '127.0.0.1', strictPort: false, hmr: false, watch: { ignored: ['**/*'] } },
+    server: { port: Number(process.env.E2E_PORT) || 0, host: '127.0.0.1', strictPort: !!Number(process.env.E2E_PORT), hmr: false, watch: { ignored: ['**/*'] } },
   });
   await server.listen();
   const addr = server.httpServer.address();
@@ -901,6 +1092,8 @@ async function main() {
   await run('e', () => scenarioE(browser));
   if (maps.length) await run('f', () => scenarioF(browser, maps));
   await run('g', () => scenarioG(browser));
+  if (DOWNLOAD) await run('h', () => scenarioH(browser));
+  else if (ONLY.has('h')) note('scenario h (catalog download) needs E2E_DOWNLOAD=1');
   current = '';
 }
 

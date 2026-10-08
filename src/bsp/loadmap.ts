@@ -6,7 +6,8 @@
 //   collision  brush models (brush entities placed in world space), CollisionWorld over world brushes, solid
 //              brush entities and displacement triangles (native two-sided triangle collision; the legacy thin
 //              prism brushes via opts.displacementCollision); brush entities that start disabled are made non-solid
-//   textures   pakfile, materials (VMT/VTF or procedural stand-ins), 2D sky, baked cubemaps
+//   textures   pakfile, files the pakfile lacks read from linked game content (the player's CS:S / CS:GO VPKs,
+//              maps/gamecontent.ts), materials (VMT/VTF or procedural stand-ins), 2D sky, baked cubemaps
 //   geometry   face areas, render batches + lightmap atlas + info_overlay decals, props (static props and
 //              model entities) packed in the map, lit like the engine's light cache (leaf ambient + world lights)
 // followed by the cheap entity-derived data (sky_camera, env_fog_controller, spawns, zones, bounds).
@@ -30,6 +31,7 @@ import type {
   ZoneDef,
   ZoneSource,
 } from '../map/types';
+import { gameContentForLoad } from '../maps/gamecontent';
 import { CollisionWorld } from '../physics/collision';
 import { HULL_MAXS, HULL_MINS } from '../physics/playertypes';
 import { MASK_PLAYERSOLID, newTrace } from '../physics/types';
@@ -37,7 +39,19 @@ import { buildBrushModels, collectCollisionBrushes, createCollisionWorld } from 
 import { faceAreas, pointLeaf } from './bsptree';
 import { parseEntities } from './entities';
 import { BuildRenderOptions, RenderBuildStats, buildRenderBatches } from './geometry';
-import { BuildMaterialsOptions, buildMaterials, fallbackMaterial, loadCubemaps, loadSky, normalizeMaterialName, proceduralSky } from './materials';
+import {
+  AsyncMaterialFileSource,
+  BuildMaterialsOptions,
+  MaterialFileSource,
+  buildMaterials,
+  fallbackMaterial,
+  loadCubemaps,
+  loadSky,
+  mapFileSource,
+  normalizeMaterialName,
+  prefetchMaterialFiles,
+  proceduralSky,
+} from './materials';
 import { PakFile } from './pakfile';
 import { selectLightingSource } from './lightmap';
 import { buildMapProps } from './props';
@@ -63,6 +77,12 @@ export interface LoadBspOptions {
    * displacement-heavy maps; kept for comparison).
    */
   displacementCollision?: 'triangles' | 'prisms';
+  /**
+   * Game content (the player's CS:S / CS:GO VPKs, e.g. a GameContent) searched after the pakfile for the VMTs,
+   * VTFs and sky faces the map references but doesn't pack. Default: what the player linked in Settings
+   * (maps/gamecontent.ts gameContentForLoad()); null: none.
+   */
+  gameContent?: AsyncMaterialFileSource | null;
 }
 
 const SPAWN_CLASSES = ['info_player_terrorist', 'info_player_counterterrorist', 'info_player_start', 'info_player_deathmatch'];
@@ -359,9 +379,46 @@ export async function loadBspMap(
       warnings.push(`pakfile: ${(e as Error).message}`);
     }
   }
+  const worldspawn = entities.find((e) => e.classname.toLowerCase() === 'worldspawn');
+  const skyName = (worldspawn?.kv.skyname ?? '').trim();
+  // Stock content the pakfile lacks, read from the player's linked CS:S / CS:GO VPKs (maps/gamecontent.ts).
+  // Search order: map pakfile > opts.materials.extraSources > game content > procedural stand-ins.
+  let extraSources: MaterialFileSource[] = opts.materials?.extraSources ?? [];
+  let gameContentInfo = '';
+  const content = opts.gameContent !== undefined ? opts.gameContent : await gameContentForLoad();
+  if (content) {
+    const tg = now();
+    let lastReport = 0;
+    progress('textures', 'Reading game textures…', 2);
+    try {
+      const files = await prefetchMaterialFiles(bsp, pak, content, {
+        skyName,
+        detailTextures: opts.materials?.detailTextures,
+        onProgress: (done, total) => {
+          const t = now();
+          if (done < total && t - lastReport < 60) return;
+          lastReport = t;
+          try {
+            onProgress?.({ phase: 'textures', message: `Reading game textures… ${done}/${total}`, loaded: done, total });
+          } catch {
+            // a broken progress callback must not break loading
+          }
+        },
+      });
+      if (files.size) extraSources = [...extraSources, mapFileSource(files)];
+      let bytes = 0;
+      for (const d of files.values()) bytes += d.byteLength;
+      gameContentInfo = `, ${files.size} files (${(bytes / 1048576).toFixed(1)} MB) from game content in ${Math.round(now() - tg)} ms`;
+    } catch (e) {
+      warnings.push(`game content: ${(e as Error).message}`);
+    }
+    progress('textures', 'Loading textures', 2);
+    await yieldToEventLoop();
+  }
+  const materialOpts: BuildMaterialsOptions = { ...opts.materials, extraSources };
   let materials: Map<string, MaterialDef>;
   try {
-    materials = buildMaterials(bsp, pak, opts.materials);
+    materials = buildMaterials(bsp, pak, materialOpts);
   } catch (e) {
     warnings.push(`materials: ${(e as Error).message}; using procedural materials`);
     materials = new Map();
@@ -371,11 +428,9 @@ export async function loadBspMap(
       if (key && !materials.has(key)) materials.set(key, fallbackMaterial(key, td?.reflectivity, td?.width, td?.height));
     });
   }
-  const worldspawn = entities.find((e) => e.classname.toLowerCase() === 'worldspawn');
-  const skyName = (worldspawn?.kv.skyname ?? '').trim();
   let sky: SkyDef = { name: skyName, faces: null };
   try {
-    sky = loadSky(skyName, pak, { extraSources: opts.materials?.extraSources });
+    sky = loadSky(skyName, pak, { extraSources });
   } catch (e) {
     warnings.push(`sky: ${(e as Error).message}`);
   }
@@ -389,7 +444,7 @@ export async function loadBspMap(
   let cubemaps: CubemapDef[] = [];
   if (opts.cubemaps !== false) {
     try {
-      cubemaps = loadCubemaps(bsp, pak, { extraSources: opts.materials?.extraSources });
+      cubemaps = loadCubemaps(bsp, pak, { extraSources });
     } catch (e) {
       warnings.push(`cubemaps: ${(e as Error).message}`);
     }
@@ -416,7 +471,7 @@ export async function loadBspMap(
       const hdrLighting = selectLightingSource(bsp, opts.render?.lighting === 'hdr')?.hdr ?? false;
       props = buildMapProps(bsp, entities, pak, materials, {
         warnings,
-        materials: opts.materials,
+        materials: materialOpts,
         maxTextureSize: opts.propTextureSize,
         hdrLighting,
         world: collision,
@@ -450,7 +505,7 @@ export async function loadBspMap(
   log(
     `[loadmap] ${mapName}: ${total} ms (${timings.join(', ')} ms) - v${bsp.version}, ${bsp.faces.length} faces -> ` +
       `${stats.batches} batches / ${stats.triangles} tris, lightmap ${lightmap ? `${lightmap.width}x${lightmap.height}` : 'none'}, ` +
-      `${set.brushes.length} collision brushes + ${collision.triangleCount} triangles, ${materials.size} materials, ${props.length} props, ${entities.length} entities, ` +
+      `${set.brushes.length} collision brushes + ${collision.triangleCount} triangles, ${materials.size} materials${gameContentInfo}, ${props.length} props, ${entities.length} entities, ` +
       `${spawns.length} spawns, ${zones.length} zones, ${warnings.length} warnings`,
   );
 

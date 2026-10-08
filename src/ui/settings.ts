@@ -2,21 +2,51 @@
 // (read on build, set on input, refreshed through console_.onCvarChange) and changes are persisted.
 import { console_, execute } from '../core/cvars';
 import type { SoundApi } from '../game/api';
+import {
+  type GameContentStatus,
+  getGameContentStatus,
+  isGameFolderPickerSupported,
+  linkGameContentFromFiles,
+  onGameContentChange,
+  pickGameContentFolder,
+  requestGameContentPermission,
+  restoreGameContent,
+  unlinkGameContent,
+} from '../maps/gamecontent';
 import { BindsEditor } from './bindseditor';
+import { deleteCfg, listCfgs } from './cfgfiles';
 import { cvarGetter, cvarNum, cvarStr, customPhysicsActive, persistConfigSoon, PHYSICS_CVARS, setCvar } from './cvardefs';
 import { clear, h, storageGet, storageSet } from './dom';
 import { cmPer360, fmtNum } from './format';
 import { CROSSHAIR_PRESET_COLORS, CROSSHAIR_STYLE_NAMES, crosshairGeometry, drawCrosshair, exportCrosshairConfig, parseCrosshairConfig, readCrosshairParams } from './crosshair';
+import { encodeCrosshairShareCode, shareCodeErrorText, shareDataFromCvars } from './crosshaircode';
 import { HUD_COLOR_NAMES, HUD_COLORS } from './hud';
 import { icon, type IconName } from './icons';
 
 export type SettingsTab = 'game' | 'mouse' | 'video' | 'audio' | 'crosshair' | 'hud' | 'binds';
 
+/** Raw mouse input: active (unadjusted movement), unsupported (browser fell back to a plain lock), off, unknown. */
+export type RawInputStatus = 'active' | 'unsupported' | 'off' | 'unknown';
+
 export interface SettingsDeps {
   sound: SoundApi;
   toast: (msg: string, kind?: 'info' | 'error' | 'success') => void;
   confirm: (title: string, text: string, ok: string) => Promise<boolean>;
+  /** Whether the pointer lock got raw (unadjusted) movement. */
+  rawInputStatus?: () => RawInputStatus;
+  /** Opens the .cfg import (file picker). */
+  importCfg?: () => void;
+  /** Runs `exec <name>`. */
+  execCfg?: (name: string) => void;
 }
+
+const RAW_INPUT_TEXT: Record<RawInputStatus, string> = {
+  active: 'Raw input: active — mouse counts reach the game unaccelerated, like CS:GO with m_rawinput 1.',
+  unsupported:
+    'Raw input: not supported by this browser — OS pointer speed and acceleration apply. For CS:GO-identical sensitivity turn off Windows “Enhance pointer precision” and keep display scaling at 100%, or play in Chrome / Edge.',
+  off: 'Raw input: off — the OS pointer speed and acceleration apply.',
+  unknown: 'Raw input: not checked yet — it is tested when the game captures the mouse.',
+};
 
 export const TICKRATE_PRESETS = ['64', '85.3', '100', '102.4', '128'];
 const DPI_KEY = 'surf.ui.dpi';
@@ -40,6 +70,8 @@ export class Settings {
   private resetBtn!: HTMLButtonElement;
   private previewBg = 0;
   private previewZoom = 1;
+  private cfgList: HTMLElement | null = null;
+  private rawStatusEl: HTMLElement | null = null;
 
   constructor(private readonly deps: SettingsDeps) {
     this.binds = new BindsEditor({ sound: deps.sound, toast: deps.toast, confirm: deps.confirm });
@@ -77,6 +109,7 @@ export class Settings {
       if (cv.name === 'crosshair' || cv.name.startsWith('cl_crosshair')) this.drawPreview();
     });
     window.addEventListener('resize', () => this.drawPreview());
+    document.addEventListener('pointerlockchange', () => this.refreshRawInput());
     const saved = storageGet(TAB_KEY) as SettingsTab | null;
     this.tab = saved && this.tabs.has(saved) ? saved : 'game';
   }
@@ -111,6 +144,8 @@ export class Settings {
     this.resetBtn.classList.toggle('hidden', tab === 'binds');
     if (tab === 'binds') this.binds.refresh();
     if (tab === 'crosshair') requestAnimationFrame(() => this.drawPreview());
+    if (tab === 'mouse') this.refreshRawInput();
+    if (tab === 'game') this.refreshCfgs();
   }
 
   get currentTab(): SettingsTab {
@@ -328,6 +363,61 @@ export class Settings {
 
     const play = this.group(inner, 'Gameplay');
     this.row(play, 'Field of view', 'Horizontal degrees at 4:3, like CS:GO (default 90). Wider screens see more.', this.slider('fov_desired', { min: 60, max: 130, step: 1, decimals: 0 }), 'fov_desired');
+
+    const cfg = this.group(inner, 'Config files', 'Bring your CS:GO autoexec.cfg and other configs: binds, sensitivity, crosshair and aliases work like in CS:GO. Run one with exec <name> in the console; autoexec.cfg runs every time the game starts.');
+    const importBtn = h('button.btn.btn-sm', { attrs: { type: 'button' } }, icon('upload'), 'Import .cfg');
+    importBtn.addEventListener('click', () => this.deps.importCfg?.());
+    importBtn.classList.toggle('hidden', !this.deps.importCfg);
+    this.cfgList = h('div.cfg-list');
+    cfg.append(this.cfgList, h('div.set-actions', null, importBtn, h('span.muted.cfg-hint', { text: 'or drop .cfg files onto the game, or paste their lines into the console' })));
+    this.refreshCfgs();
+  }
+
+  /** Re-lists the saved config files (Settings → Game). */
+  refreshCfgs(): void {
+    const list = this.cfgList;
+    if (!list) return;
+    const cfgs = listCfgs();
+    if (!cfgs.length) {
+      list.replaceChildren(h('div.cfg-empty.muted', { text: 'No config files imported yet.' }));
+      return;
+    }
+    list.replaceChildren(
+      ...cfgs.map((c) => {
+        const exec = h('button.btn.btn-sm', { attrs: { type: 'button', title: `exec ${c.name}` } }, icon('play'), 'Exec');
+        exec.addEventListener('click', () => {
+          this.deps.execCfg?.(c.name);
+          this.deps.toast(`Executed ${c.name}.cfg`, 'success');
+        });
+        exec.classList.toggle('hidden', !this.deps.execCfg);
+        const del = h('button.btn.btn-sm.btn-ghost.btn-icon', { attrs: { type: 'button', title: `Delete ${c.name}.cfg` } }, icon('trash'));
+        del.addEventListener('click', () => {
+          void this.deps.confirm(`Delete ${c.name}.cfg`, `Remove the saved config ${c.name}.cfg? Settings it already applied stay as they are.`, 'Delete').then((ok) => {
+            if (!ok) return;
+            deleteCfg(c.name);
+            this.refreshCfgs();
+          });
+        });
+        return h(
+          'div.cfg-item',
+          null,
+          h('code.cfg-file', { text: `${c.name}.cfg` }),
+          h('span.cfg-meta.muted', { text: `${c.commands} command${c.commands === 1 ? '' : 's'}${c.name === 'autoexec' ? ' · runs at startup' : ''}` }),
+          h('span.spacer'),
+          exec,
+          del,
+        );
+      }),
+    );
+  }
+
+  /** Updates the raw input status line (Settings → Mouse). */
+  refreshRawInput(): void {
+    const el = this.rawStatusEl;
+    if (!el) return;
+    const st = this.deps.rawInputStatus?.() ?? 'unknown';
+    el.textContent = RAW_INPUT_TEXT[st];
+    el.className = `set-status raw-${st}`;
   }
 
   private async resetTab(): Promise<void> {
@@ -377,7 +467,10 @@ export class Settings {
     });
     this.watch('m_pitch', () => (invert.checked = cvarNum('m_pitch', 0.022) < 0));
     this.row(g, 'Invert mouse', null, h('label.switch', null, invert, h('span.knob')));
-    this.row(g, 'Raw input', 'Unaccelerated pointer-lock movement when the browser supports it.', this.toggle('m_rawinput'), 'm_rawinput');
+    const rawRow = this.row(g, 'Raw input', 'Unaccelerated pointer-lock movement when the browser supports it.', this.toggle('m_rawinput'), 'm_rawinput');
+    this.rawStatusEl = h('div.set-status');
+    rawRow.querySelector('.set-label')?.appendChild(this.rawStatusEl);
+    this.watch('m_rawinput', () => this.refreshRawInput());
     this.row(g, 'Mouse acceleration', 'Classic Source m_customaccel.', this.toggle('m_customaccel'), 'm_customaccel');
   }
 
@@ -441,11 +534,90 @@ export class Settings {
     this.row(q, 'Fog', 'Map fog (env_fog_controller).', this.toggle('fog_enable'), 'fog_enable');
     this.row(q, '3D skybox', 'Draw the map’s 3D skybox.', this.toggle('r_3dsky'), 'r_3dsky');
     this.row(q, 'Fullbright', 'Ignore lightmaps (mat_fullbright 1).', this.toggle('mat_fullbright'), 'mat_fullbright');
+    this.buildGameContent(inner);
     const o = this.group(inner, 'Overlays');
-    this.row(o, 'Show zones', 'Timer zone outlines (start, end, stages, checkpoints).', this.toggle('r_drawzones'), 'r_drawzones');
+    this.row(
+      o,
+      'Zone beams',
+      'Timer zones (start, end, stages, checkpoints): beams on the floor like SurfTimer servers, or the full box.',
+      this.segmented('r_drawzones', [
+        ['0', 'Off'],
+        ['1', 'Floor outline'],
+        ['2', 'Full box'],
+      ]),
+      'r_drawzones',
+    );
     this.row(o, 'Show triggers', 'Teleports, boosters and other trigger volumes.', this.toggle('r_drawtriggers'), 'r_drawtriggers');
     this.row(o, 'Show player clips', null, this.toggle('r_drawclips'), 'r_drawclips');
     this.row(o, 'Wireframe', 'Requires sv_cheats 1.', this.toggle('mat_wireframe'), 'mat_wireframe');
+  }
+
+  /** Video → Game textures: link the player's CS:S / CS:GO install for the stock textures maps don't pack. */
+  private buildGameContent(parent: HTMLElement): void {
+    const g = this.group(
+      parent,
+      'Game textures',
+      'Maps use stock Counter-Strike textures they don’t pack. Link your Counter-Strike: Source or CS:GO install folder and they load exactly like in game — read from your disk, nothing is uploaded. Without it, generated stand-ins are used.',
+    );
+    const status = h('div.set-status.gc-status');
+    const link = h('button.btn.btn-sm', { attrs: { type: 'button', title: 'Pick e.g. steamapps/common/Counter-Strike Source' } }, icon('upload'), 'Link game folder…') as HTMLButtonElement;
+    const allow = h('button.btn.btn-sm.btn-accent', { attrs: { type: 'button' } }, icon('check'), 'Allow access') as HTMLButtonElement;
+    const unlink = h('button.btn.btn-sm.btn-ghost', { attrs: { type: 'button' } }, icon('close'), 'Unlink') as HTMLButtonElement;
+    // browsers without showDirectoryPicker: pick the folder's files (this visit only)
+    const files = h('input.hidden', { attrs: { type: 'file', multiple: true, webkitdirectory: true } }) as HTMLInputElement;
+    let busy = false;
+    const render = (st: GameContentStatus) => {
+      const text =
+        busy && st.state !== 'linked'
+          ? 'Reading the folder…'
+          : st.state === 'linked'
+            ? `Linked: ${st.label ?? 'game folder'}${st.archives?.length ? ` — ${st.archives.join(', ')}` : ''}${st.files ? ` (${st.files.toLocaleString('en-US')} files)` : ''}. Applies to maps loaded from now on.${st.message ? ` ${st.message}` : ''}`
+            : st.state === 'needs-permission'
+              ? (st.message ?? `Allow access to "${st.label ?? 'your game folder'}" to use its textures.`)
+              : st.state === 'error'
+                ? (st.message ?? 'The game folder could not be read.')
+                : `Not linked. Pick the game folder, e.g. steamapps/common/Counter-Strike Source or Counter-Strike Global Offensive.${isGameFolderPickerSupported() ? '' : ' (This browser links it for this visit only.)'}`;
+      status.textContent = text;
+      status.className = `set-status gc-status gc-${busy && st.state !== 'linked' ? 'busy' : st.state}`;
+      allow.classList.toggle('hidden', st.state !== 'needs-permission');
+      unlink.classList.toggle('hidden', st.state === 'none' && !st.label);
+      link.lastChild!.textContent = st.state === 'linked' ? 'Change folder…' : 'Link game folder…';
+      link.disabled = allow.disabled = busy;
+    };
+    const run = async (fn: () => Promise<GameContentStatus>) => {
+      busy = true;
+      render(getGameContentStatus());
+      try {
+        const st = await fn();
+        busy = false;
+        render(st);
+        if (st.state === 'linked') this.deps.toast(`Game textures linked from ${st.label ?? 'your game folder'} — they load with the next map`, 'success');
+        else if (st.state === 'error' && st.message) this.deps.toast(st.message, 'error');
+      } catch (e) {
+        busy = false;
+        render(getGameContentStatus());
+        this.deps.toast(`Couldn't link the folder: ${(e as Error)?.message ?? e}`, 'error');
+      }
+    };
+    link.addEventListener('click', () => {
+      if (isGameFolderPickerSupported()) void run(() => pickGameContentFolder());
+      else files.click();
+    });
+    files.addEventListener('change', () => {
+      const list = files.files ? [...files.files] : [];
+      files.value = '';
+      if (list.length) void run(() => linkGameContentFromFiles(list));
+    });
+    allow.addEventListener('click', () => void run(() => requestGameContentPermission()));
+    unlink.addEventListener('click', () => {
+      void unlinkGameContent().then(() => this.deps.toast('Game folder unlinked — stand-in textures from the next map on', 'info'));
+    });
+    onGameContentChange((st) => render(st));
+    render(getGameContentStatus());
+    const r = this.row(g, 'CS:S / CS:GO folder', null, h('div.inline', null, allow, link, unlink, files));
+    r.querySelector('.set-label')?.appendChild(status);
+    // reopen the folder remembered from an earlier visit (one IndexedDB read; asks for nothing)
+    void restoreGameContent().catch(() => undefined);
   }
 
   private buildAudio(p: HTMLElement): void {
@@ -550,8 +722,10 @@ export class Settings {
     const previewInfo = h('div.xh-info');
     const preview = h('div.xh-preview', null, h('div.xh-stage', null, canvas), h('div.xh-tools', null, bgSeg, zoomSeg, previewInfo));
 
-    // paste / copy config
-    const ta = h('textarea.input.xh-paste', { attrs: { rows: 4, placeholder: 'cl_crosshairsize 2; cl_crosshairgap -3; cl_crosshairthickness 0.5; cl_crosshairdot 0; cl_crosshaircolor 1 …', spellcheck: 'false' } }) as HTMLTextAreaElement;
+    // paste / copy config or a CS:GO share code
+    const ta = h('textarea.input.xh-paste', {
+      attrs: { rows: 4, placeholder: 'CSGO-xxxxx-xxxxx-xxxxx-xxxxx-xxxxx share code, or config lines:\ncl_crosshairsize 2; cl_crosshairgap -3; cl_crosshairthickness 0.5; cl_crosshaircolor 1 …', spellcheck: 'false' },
+    }) as HTMLTextAreaElement;
     const apply = h('button.btn.btn-accent.btn-sm', { attrs: { type: 'button' } }, icon('check'), 'Apply');
     apply.addEventListener('click', () => {
       const parsed = parseCrosshairConfig(ta.value);
@@ -559,16 +733,24 @@ export class Settings {
       const known = parsed.commands.filter((c) => console_.getCvar(c.split(' ')[0]));
       const unused = parsed.commands.length - known.length;
       if (!known.length) {
-        this.deps.toast('No cl_crosshair* settings found in the pasted text', 'error');
+        const bad = parsed.shareCodeErrors[0];
+        this.deps.toast(bad ? shareCodeErrorText(bad.error) : 'No crosshair share code or cl_crosshair* settings found in the pasted text', 'error');
         return;
       }
       for (const c of known) execute(c);
       persistConfigSoon();
       this.deps.sound.play('ui_click');
-      const notes = [unused ? `${unused} not used here` : '', parsed.ignored.length ? `${parsed.ignored.length} other line${parsed.ignored.length === 1 ? '' : 's'} ignored` : ''].filter(Boolean).join(', ');
-      this.deps.toast(`Applied ${known.length} crosshair setting${known.length === 1 ? '' : 's'}${notes ? ` (${notes})` : ''}`, 'success');
+      const notes = [
+        unused ? `${unused} not used here` : '',
+        parsed.ignored.length ? `${parsed.ignored.length} other line${parsed.ignored.length === 1 ? '' : 's'} ignored` : '',
+        parsed.shareCodeErrors.length ? `${parsed.shareCodeErrors.length} invalid share code${parsed.shareCodeErrors.length === 1 ? '' : 's'}` : '',
+      ]
+        .filter(Boolean)
+        .join(', ');
+      const what = parsed.shareCodes.length ? `Applied crosshair ${parsed.shareCodes[parsed.shareCodes.length - 1]}` : `Applied ${known.length} crosshair setting${known.length === 1 ? '' : 's'}`;
+      this.deps.toast(`${what}${notes ? ` (${notes})` : ''}`, 'success');
     });
-    const copy = h('button.btn.btn-sm', { attrs: { type: 'button' } }, icon('copy'), 'Copy mine');
+    const copy = h('button.btn.btn-sm', { attrs: { type: 'button', title: 'Copy your crosshair as cl_crosshair* config lines' } }, icon('copy'), 'Copy config');
     copy.addEventListener('click', () => {
       const text = exportCrosshairConfig(cvarGetter);
       ta.value = text;
@@ -577,17 +759,26 @@ export class Settings {
         () => undefined,
       );
     });
+    const copyCode = h('button.btn.btn-sm', { attrs: { type: 'button', title: 'Copy your crosshair as a CS:GO share code' } }, icon('copy'), 'Copy code');
+    copyCode.addEventListener('click', () => {
+      const code = encodeCrosshairShareCode(shareDataFromCvars(cvarGetter));
+      ta.value = code;
+      void navigator.clipboard?.writeText(code).then(
+        () => this.deps.toast(`Share code ${code} copied to the clipboard`, 'success'),
+        () => undefined,
+      );
+    });
     const reset = h('button.btn.btn-sm.btn-ghost', { attrs: { type: 'button' } }, icon('restart'), 'Reset');
     reset.addEventListener('click', () => {
-      for (const cv of console_.allCvars()) if (cv.name === 'crosshair' || cv.name.startsWith('cl_crosshair')) cv.reset();
+      for (const cv of console_.allCvars()) if (cv.name === 'crosshair' || cv.name.startsWith('cl_crosshair') || cv.name === 'cl_fixedcrosshairgap') cv.reset();
       persistConfigSoon();
     });
     const pasteBox = h(
       'div.xh-pastebox',
       null,
-      h('div.xh-paste-title', null, h('b', { text: 'Paste your CS:GO crosshair' }), h('span.muted', { text: 'config.cfg / autoexec lines or a generator one-liner' })),
+      h('div.xh-paste-title', null, h('b', { text: 'Paste your CS:GO crosshair' }), h('span.muted', { text: 'share code, config.cfg / autoexec lines or a generator one-liner' })),
       ta,
-      h('div.set-actions', null, apply, copy, reset),
+      h('div.set-actions', null, apply, copy, copyCode, reset),
     );
     const left = h('div.xh-left', null, preview, pasteBox);
 

@@ -10,7 +10,9 @@ import '../styles/settings.css';
 
 import { console_, registerCommand } from '../core/cvars';
 import type { ChatSegment, GameApi, HudState, LoadProgress, SoundApi, UiApi } from '../game/api';
+import { BUILTIN_MAPS } from '../map/builtin/list';
 import { getCatalogEntry } from '../maps/catalog';
+import { cfgImportProblem, cfgNameForImport, countCfgCommands, loadCfg, normalizeCfgName, saveCfg } from './cfgfiles';
 import { Chat } from './chat';
 import { cvarBool, cvarNum, ensureUiCvars, registerUiOwnedCvars } from './cvardefs';
 import { DevConsole } from './devconsole';
@@ -20,14 +22,26 @@ import { Hud } from './hud';
 import { icon } from './icons';
 import { codeToKeyName } from './keys';
 import { LoadingScreen } from './loading';
+import { PHASE_SPANS } from './loadprogress';
 import { MainMenu } from './mainmenu';
 import { MapBrowser } from './mapbrowser';
 import { PauseMenu } from './pausemenu';
 import { Scoreboard } from './scoreboard';
-import { Settings } from './settings';
+import { type RawInputStatus, Settings } from './settings';
 
 type MenuMode = 'main' | 'pause' | 'none';
 type ToastKind = 'info' | 'error' | 'success';
+
+/** Map names compare case-insensitively (Source map names, catalog lookups). */
+const sameMap = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+
+/** Order of the load phases (to tell a new load, which starts over, from the next step of the current one). */
+function phaseRank(phase: LoadProgress['phase'] | null): number {
+  if (!phase) return -1;
+  if (phase === 'done') return 2;
+  if (phase === 'error') return 3;
+  return PHASE_SPANS[phase][0];
+}
 
 export class Ui implements UiApi {
   private game: GameApi | null = null;
@@ -49,6 +63,15 @@ export class Ui implements UiApi {
   private lastHud: HudState | null = null;
   private pendingMap: { name: string; tier: number | null; type: string | null; hasZones: boolean } | null = null;
   private retry: (() => void) | null = null;
+  /** The loading screen header last shown (name|tier|type|zones), to skip redundant re-renders. */
+  private headerKey = '';
+  /** loadId of the last tagged progress report (LoadProgress.loadId). */
+  private loadId: number | undefined = undefined;
+  /** loadId of the last recovered load failure already reported. */
+  private recoveredId: number | undefined = undefined;
+  /** Whether the UI's own pointer-lock request got unadjusted (raw) movement; null = not tried yet. */
+  private uiRawInput: boolean | null = null;
+  private cfgInput: HTMLInputElement | null = null;
   private scoreboardTimer: ReturnType<typeof setInterval> | null = null;
   private dragDepth = 0;
   private wasLockedBeforeConsole = false;
@@ -91,14 +114,14 @@ export class Ui implements UiApi {
     this.scoreboard = new Scoreboard();
     this.loading = new LoadingScreen({
       onCancel: () => this.cancelLoading(),
-      onRetry: () => this.retry?.(),
+      onRetry: () => this.retryLoad(),
     });
     this.console = new DevConsole({
-      execute: (line) => {
-        if (this.game) this.game.executeCommand(line);
-        else console_.execute(line);
-      },
+      execute: (line) => this.execLine(line),
       onOpenChange: (open) => this.onConsoleOpenChange(open),
+      importCfg: () => this.pickCfgFile(),
+      // a pasted config is most likely an autoexec; don't suggest overwriting a saved one
+      importCfgText: (text) => void this.importCfgText(text, loadCfg('autoexec') === null ? 'autoexec' : 'pasted'),
     });
     this.browser = new MapBrowser({
       getGame: () => this.game,
@@ -112,12 +135,20 @@ export class Ui implements UiApi {
         } else this.toast(`Couldn't load ${name}: ${message}`, 'error', 7);
       },
       onLoadStart: (name, tier, retry, entry) => {
+        // a file (no catalog entry passed) may still be a catalog map: syncLoadingHeader looks it up
         this.pendingMap = { name, tier, type: entry?.type ?? null, hasZones: entry?.hasZones ?? false };
         this.retry = retry;
-        this.loading.setMap(name, tier, entry?.type ?? null, entry?.hasZones ?? false);
+        this.syncLoadingHeader(name);
       },
     });
-    this.settings = new Settings({ sound, toast, confirm });
+    this.settings = new Settings({
+      sound,
+      toast,
+      confirm,
+      rawInputStatus: () => this.rawInputStatus(),
+      importCfg: () => this.pickCfgFile(),
+      execCfg: (name) => this.execLine(`exec ${name}`),
+    });
     this.mainMenu = new MainMenu({
       sound,
       browser: this.browser,
@@ -142,7 +173,11 @@ export class Ui implements UiApi {
       openConsole: () => this.console.show(),
     });
     this.toasts = h('div.toasts');
-    this.dropOverlay = h('div.drop-overlay', null, h('div.drop-box', null, icon('upload'), h('div.drop-title', { text: 'Drop to play' }), h('div.muted', { text: '.bsp · .bsp.bz2 · .rar · .zip' })));
+    this.dropOverlay = h(
+      'div.drop-overlay',
+      null,
+      h('div.drop-box', null, icon('upload'), h('div.drop-title', { text: 'Drop to play' }), h('div.muted', { text: '.bsp · .bsp.bz2 · .rar · .zip' }), h('div.muted.drop-sub', { text: 'or a .cfg (autoexec…) to import it' })),
+    );
     this.modalHost = h('div.modal-layer');
 
     root.append(this.hud.el, this.scoreboard.el, this.mainMenu.el, this.pauseMenu.el, this.loading.el, this.console.el, this.modalHost, this.toasts, this.dropOverlay);
@@ -164,6 +199,7 @@ export class Ui implements UiApi {
     game.on('mapload', () => {
       void this.browser.refreshCached();
       this.pendingMap = null;
+      this.retry = null;
       // a new map starts with an empty chat feed (like the engine's HUD reset on level change); the map's
       // welcome lines follow this event
       this.chatBox.clear();
@@ -206,10 +242,8 @@ export class Ui implements UiApi {
         this.showMenu('main');
         break;
       case 'loading':
-        if (!this.loading.isVisible) {
-          this.prepareLoadingHeader();
-          this.loading.show();
-        }
+        // entering 'loading' always means a new load; the screen may still show the previous (failed) one
+        this.beginLoad(null, true);
         this.showMenu('none');
         break;
       case 'playing':
@@ -273,7 +307,8 @@ export class Ui implements UiApi {
       this.dragDepth = 0;
       this.dropOverlay.classList.remove('show');
       const f = e.dataTransfer?.files?.[0];
-      if (f) void this.browser.playFile(f);
+      if (f && /\.(cfg|txt)$/i.test(f.name)) void this.importCfgFile(f);
+      else if (f) void this.browser.playFile(f);
     });
   }
 
@@ -358,8 +393,13 @@ export class Ui implements UiApi {
     try {
       const raw = cvarNum('m_rawinput', 1) !== 0;
       const r = canvas.requestPointerLock(raw ? { unadjustedMovement: true } : undefined);
+      // browsers without the promise-returning API (and options) can't do unadjusted movement
+      if (raw && !(r && typeof (r as Promise<void>).then === 'function')) this.uiRawInput = false;
       if (r && typeof (r as Promise<void>).catch === 'function') {
-        (r as Promise<void>).catch(() => {
+        if (raw) (r as Promise<void>).then(() => (this.uiRawInput = true), () => undefined);
+        (r as Promise<void>).catch((err: unknown) => {
+          // NotSupportedError: no unadjusted movement here; other failures (no user gesture) say nothing about it
+          if (raw && (err as { name?: string } | null)?.name === 'NotSupportedError') this.uiRawInput = false;
           try {
             const r2 = canvas.requestPointerLock();
             if (r2 && typeof (r2 as Promise<void>).catch === 'function') (r2 as Promise<void>).catch(() => undefined);
@@ -405,14 +445,87 @@ export class Ui implements UiApi {
     if (this.game?.state === 'menu' || !this.game) this.showMenu('main');
   }
 
-  /** Fills the loading screen header from the map the UI asked for, or the game's current map name. */
-  private prepareLoadingHeader(): void {
-    if (this.loading.hasMap) return;
-    const pm = this.pendingMap;
-    const name = pm?.name ?? this.game?.mapName ?? '';
+  /** Retry on the loading screen: the map browser's own retry for its loads, else the game's `retry` command. */
+  private retryLoad(): void {
+    if (this.retry) this.retry();
+    else if (this.game && console_.hasCommand('retry')) this.game.executeCommand('retry');
+  }
+
+  /**
+   * The map a progress report belongs to: the name on the report when the game tags it, else the map the game is
+   * loading, else the one the UI asked for.
+   */
+  private loadName(p: LoadProgress | null): string {
+    if (p?.mapName) return p.mapName;
+    const g = this.game;
+    if (g && g.state === 'loading' && g.mapName) return g.mapName;
+    return this.pendingMap?.name ?? '';
+  }
+
+  /**
+   * Shows the loading screen for a load that is starting or progressing. A new load (the game entered 'loading',
+   * a new load id, progress after a failure, or another map starting over) resets the steps, the bar and the
+   * error state, and the header always follows the map being loaded.
+   */
+  private beginLoad(p: LoadProgress | null, stateEntered = false): void {
+    const name = this.loadName(p);
+    if (!this.loading.isVisible) {
+      if (name) {
+        this.adoptLoad(name);
+        this.syncLoadingHeader(name);
+      } else if (!this.loading.hasMap) this.loading.setMap('', null);
+      this.loading.show();
+      this.showMenu('none');
+      this.noteLoadId(p);
+      return;
+    }
+    if (p?.phase === 'error') return;
+    const id = this.noteLoadId(p);
+    const fresh =
+      stateEntered ||
+      id === 'new' ||
+      this.loading.hasFailed ||
+      (id === 'none' && !!p && !!name && this.loading.hasMap && !sameMap(name, this.loading.currentMap) && phaseRank(p.phase) <= phaseRank(this.loading.currentPhaseName));
+    if (fresh) {
+      this.loading.restart();
+      if (name) this.adoptLoad(name);
+    }
+    this.syncLoadingHeader(name);
+  }
+
+  /** A load of `name` starts: the map browser's retry and header info only apply if it is the browser's load. */
+  private adoptLoad(name: string): void {
+    if (this.pendingMap && sameMap(this.pendingMap.name, name)) return;
+    this.pendingMap = null;
+    this.retry = null;
+  }
+
+  /** Remembers a tagged report's load id: 'new' when it changed, 'same', or 'none' for untagged reports. */
+  private noteLoadId(p: LoadProgress | null): 'new' | 'same' | 'none' {
+    const id = p?.loadId;
+    if (id === undefined) return 'none';
+    const changed = id !== this.loadId;
+    this.loadId = id;
+    return changed ? 'new' : 'same';
+  }
+
+  /**
+   * Header of the loading screen (name, tier, type, zones) for the map being loaded. Tier/type come from what the
+   * UI asked for, else the catalog (also for files and URLs of catalog maps — re-checked on every report, since the
+   * game may load the catalog mid-load), else the built-in map list.
+   */
+  private syncLoadingHeader(name: string): void {
     if (!name) return;
+    const pm = this.pendingMap && sameMap(this.pendingMap.name, name) ? this.pendingMap : null;
     const entry = getCatalogEntry(name);
-    this.loading.setMap(name, pm?.tier ?? entry?.tier ?? null, pm?.type ?? entry?.type ?? null, pm?.hasZones ?? entry?.hasZones ?? false);
+    const builtin = BUILTIN_MAPS.find((b) => sameMap(b.id, name) || sameMap(b.name, name));
+    const tier = pm?.tier ?? entry?.tier ?? builtin?.tier ?? null;
+    const type = pm?.type ?? entry?.type ?? builtin?.type ?? null;
+    const hasZones = pm?.hasZones || entry?.hasZones || false;
+    const key = `${name}|${tier}|${type}|${hasZones}`;
+    if (key === this.headerKey && this.loading.hasMap && sameMap(this.loading.currentMap, name)) return;
+    this.headerKey = key;
+    this.loading.setMap(name, tier, type, hasZones);
   }
 
   private quickPlay(name: string, kind: 'catalog' | 'builtin'): void {
@@ -428,6 +541,159 @@ export class Ui implements UiApi {
       if (e) this.browser.playEntry(e);
       else this.toast(`${name} is not in the map catalog`, 'error');
     });
+  }
+
+  // ================================================================ console lines, config files, raw input
+
+  /** Runs a console line through the game (its commands and aliases), or the bare console without one. */
+  private execLine(line: string): void {
+    if (this.game) this.game.executeCommand(line);
+    else console_.execute(line);
+  }
+
+  /** Opens the file picker for importing CS:GO .cfg files. */
+  private pickCfgFile(): void {
+    if (!this.cfgInput) {
+      const input = h('input.hidden', { attrs: { type: 'file', accept: '.cfg,.txt,text/plain', multiple: true } }) as HTMLInputElement;
+      input.addEventListener('change', () => {
+        const files = [...(input.files ?? [])];
+        input.value = '';
+        void (async () => {
+          for (const f of files) await this.importCfgFile(f);
+        })();
+      });
+      this.root.appendChild(input);
+      this.cfgInput = input;
+    }
+    this.cfgInput.click();
+  }
+
+  /** Imports a .cfg file: saved as surf.cfg.<name> (asks first), then offers to exec it. */
+  async importCfgFile(file: File): Promise<void> {
+    if (file.size > 1024 * 1024) {
+      this.toast(`${file.name} is too large to be a config file`, 'error');
+      return;
+    }
+    let text: string;
+    try {
+      text = await file.text();
+    } catch (e) {
+      this.toast(`Couldn't read ${file.name}: ${(e as Error).message}`, 'error');
+      return;
+    }
+    await this.importCfgText(text, cfgNameForImport(file.name), file.name);
+  }
+
+  /**
+   * Imports config text (a dropped/picked .cfg, or several lines pasted into the console): a dialog shows what it
+   * is and lets the user run it once, save it as cfg/<name>.cfg (`exec <name>`; autoexec runs at startup) or
+   * save and exec it.
+   */
+  importCfgText(raw: string, suggestedName: string, fileName?: string): Promise<void> {
+    const text = raw.replace(/^\uFEFF/, '');
+    const problem = cfgImportProblem(text);
+    if (problem) {
+      this.toast(`Can't import ${fileName ?? 'that config'}: ${problem}`, 'error', 6);
+      return Promise.resolve();
+    }
+    this.modalClose?.(false);
+    const commands = countCfgCommands(text);
+    return new Promise((resolve) => {
+      const nameInput = h('input.input.cfg-name', { attrs: { type: 'text', spellcheck: 'false', autocomplete: 'off', 'aria-label': 'Config name' } }) as HTMLInputElement;
+      nameInput.value = suggestedName;
+      const note = h('div.cfg-note');
+      const preview = h('pre.cfg-preview.selectable', { text: text.split(/\r?\n/).slice(0, 14).join('\n') + (text.split(/\r?\n/).length > 14 ? '\n…' : '') });
+      const saveBtn = h('button.btn', { attrs: { type: 'button' }, text: 'Save' }) as HTMLButtonElement;
+      const execBtn = h('button.btn.btn-accent', { attrs: { type: 'button' }, text: 'Save & exec' }) as HTMLButtonElement;
+      const onceBtn = h('button.btn.btn-ghost', { attrs: { type: 'button', title: 'Run the lines now without saving them' }, text: 'Run once' }) as HTMLButtonElement;
+      const cancel = h('button.btn.btn-ghost', { attrs: { type: 'button' }, text: 'Cancel' });
+      const refresh = () => {
+        const n = normalizeCfgName(nameInput.value);
+        const reserved = n === 'config' || n === 'config_default';
+        saveBtn.disabled = execBtn.disabled = !n || reserved;
+        const exists = !!n && loadCfg(n) !== null;
+        note.textContent = !n
+          ? 'Enter a name.'
+          : reserved
+            ? `"${n}" is this game's own saved settings — choose another name.`
+            : `Saved as cfg/${n}.cfg — run it with exec ${n}.${n === 'autoexec' ? ' autoexec.cfg also runs every time the game starts.' : ''}${exists ? ' Replaces the saved one.' : ''}`;
+        note.classList.toggle('warn', exists || reserved || !n);
+      };
+      nameInput.addEventListener('input', refresh);
+      refresh();
+      const done = () => {
+        if (this.modalClose !== done) return;
+        this.modalClose = null;
+        backdrop.remove();
+        if (this.console.isOpen) this.console.input.focus();
+        resolve();
+      };
+      const save = (exec: boolean) => {
+        const n = normalizeCfgName(nameInput.value);
+        if (!n) return;
+        if (!saveCfg(n, text)) {
+          this.toast("Couldn't save the config (browser storage unavailable or full)", 'error', 6);
+          return;
+        }
+        done();
+        console_.print(`Saved cfg/${n}.cfg (${commands} command${commands === 1 ? '' : 's'}).${exec ? '' : ` Type exec ${n} to run it.`}`, 'info');
+        this.settings.refreshCfgs();
+        if (exec) {
+          this.execLine(`exec ${n}`);
+          this.toast(`Saved and executed ${n}.cfg`, 'success');
+        } else this.toast(`Saved ${n}.cfg — exec ${n} runs it`, 'success');
+        this.sound.play('ui_click');
+      };
+      saveBtn.addEventListener('click', () => save(false));
+      execBtn.addEventListener('click', () => save(true));
+      onceBtn.addEventListener('click', () => {
+        done();
+        // line by line like exec (the console's tokenizer drops trailing // comments outside quotes)
+        for (const line of text.split(/\r?\n|\r/)) {
+          const l = line.trim();
+          if (l && !l.startsWith('//')) this.execLine(l);
+        }
+        this.toast(`Ran ${commands} config line${commands === 1 ? '' : 's'}`, 'success');
+      });
+      cancel.addEventListener('click', () => done());
+      nameInput.addEventListener('keydown', (e) => {
+        e.stopPropagation();
+        if (e.key === 'Enter' && !execBtn.disabled) save(true);
+        else if (e.key === 'Escape') done();
+      });
+      const backdrop = h(
+        'div.modal-backdrop',
+        null,
+        h(
+          'div.modal.panel.cfg-modal',
+          null,
+          h('div.h-title', { text: fileName ? `Import ${fileName}` : 'Import config' }),
+          h('p', { text: `${commands} command${commands === 1 ? '' : 's'} (binds, cvars, aliases…). Lines this game doesn't know are skipped with a console message, like in CS:GO.` }),
+          preview,
+          h('label.cfg-name-row', null, h('span', { text: 'cfg/' }), nameInput, h('span', { text: '.cfg' })),
+          note,
+          h('div.actions', null, onceBtn, h('span.spacer'), cancel, saveBtn, execBtn),
+        ),
+      );
+      backdrop.addEventListener('mousedown', (e) => {
+        if (e.target === backdrop) done();
+      });
+      this.modalClose = done;
+      this.modalHost.appendChild(backdrop);
+      nameInput.focus();
+      nameInput.select();
+    });
+  }
+
+  /**
+   * Whether mouse input is raw (unadjusted movement, no OS acceleration): the game's report of its pointer lock
+   * when it gives one, else what the UI's own lock request found out.
+   */
+  rawInputStatus(): RawInputStatus {
+    if (cvarNum('m_rawinput', 1) === 0) return 'off';
+    const fromGame = this.game?.rawInputActive;
+    const v = typeof fromGame === 'boolean' ? fromGame : this.uiRawInput;
+    return v === true ? 'active' : v === false ? 'unsupported' : 'unknown';
   }
 
   toast(msg: string, kind: ToastKind = 'info', seconds = 4.5): void {
@@ -482,11 +748,16 @@ export class Ui implements UiApi {
       if (!this.loading.hasFailed) this.loading.hide();
       return;
     }
-    if (!this.loading.isVisible) {
-      this.prepareLoadingHeader();
-      this.loading.show();
-      this.showMenu('none');
-    } else if (!this.loading.hasMap) this.prepareLoadingHeader();
+    if (p.phase === 'error' && p.recovered) {
+      // a map change failed but the previous map is back (CS:GO keeps you on the server): no error screen
+      if (!this.loading.hasFailed) this.loading.hide();
+      if (p.loadId === undefined || p.loadId !== this.recoveredId) {
+        this.recoveredId = p.loadId;
+        this.toast(`Couldn't load ${p.mapName || 'the map'}: ${p.message}`, 'error', 7);
+      }
+      return;
+    }
+    this.beginLoad(p);
     this.loading.update(p);
     // the loading screen itself shows the error (with Retry / Back); toast only if it is somehow hidden
     if (p.phase === 'error' && !this.loading.isVisible) this.toast(p.message || 'The map failed to load', 'error', 7);
@@ -577,6 +848,9 @@ export class Ui implements UiApi {
         !this.chatBox.isOpen &&
         !hud.spectating,
     );
-    if (this.pauseMenu.isVisible) this.pauseMenu.renderRun(hud);
+    if (this.pauseMenu.isVisible) {
+      this.pauseMenu.renderRun(hud);
+      this.pauseMenu.setLive(!!this.game?.simulatingWhilePaused);
+    }
   }
 }

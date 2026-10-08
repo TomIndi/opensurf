@@ -147,6 +147,89 @@
   margin-top: 0.7rem;
 }
 
+/* status line under a setting (raw input) */
+.surf-ui .set-status {
+  position: relative;
+  margin-top: 0.35rem;
+  padding-left: 0.95rem;
+  font-size: 0.8rem;
+  line-height: 1.35;
+  color: var(--text-3);
+}
+
+.surf-ui .set-status::before {
+  content: '';
+  position: absolute;
+  left: 0.1rem;
+  top: 0.38em;
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.surf-ui .set-status.raw-active {
+  color: #7ee787;
+}
+
+.surf-ui .set-status.raw-unsupported {
+  color: #ffcf66;
+}
+
+.surf-ui .set-status.gc-linked {
+  color: #7ee787;
+}
+
+.surf-ui .set-status.gc-needs-permission,
+.surf-ui .set-status.gc-busy {
+  color: #ffcf66;
+}
+
+.surf-ui .set-status.gc-error {
+  color: #ff8a8a;
+}
+
+/* saved config files (Settings → Game) */
+.surf-ui .cfg-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-top: 0.4rem;
+}
+
+.surf-ui .cfg-item {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.4rem 0.5rem 0.4rem 0.8rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.surf-ui .cfg-file {
+  font: 600 0.88rem var(--font-mono);
+  color: var(--text);
+}
+
+.surf-ui .cfg-meta {
+  font-size: 0.8rem;
+}
+
+.surf-ui .cfg-item .spacer {
+  flex: 1;
+}
+
+.surf-ui .cfg-empty {
+  padding: 0.5rem 0;
+  font-size: 0.85rem;
+}
+
+.surf-ui .cfg-hint {
+  align-self: center;
+  font-size: 0.8rem;
+}
+
 .surf-ui .set-warning {
   display: flex;
   align-items: center;

@@ -482,6 +482,44 @@ function readSequencePoses(mdl: Uint8Array, dv: DataView): { byLabel: Map<string
   return { byLabel, first };
 }
 
+/** The studiohdr_t fields collision needs (see readStudioHeader). */
+export interface StudioHeader {
+  version: number;
+  checksum: number;
+  /** Hull box (the engine's model bounds), model space. */
+  hullMin: Vec3;
+  hullMax: Vec3;
+  /** Clipping (view) box, model space; often zero. */
+  viewMin: Vec3;
+  viewMax: Vec3;
+  flags: number;
+  numBones: number;
+  /** $contents (CONTENTS_SOLID by default). */
+  contents: number;
+}
+
+/** Header fields of an .mdl (public studiohdr_t layout), or null when it isn't a studio model. */
+export function readStudioHeader(mdl: Uint8Array): StudioHeader | null {
+  if (mdl.length < 336 || cstr(mdl, 0, 4) !== 'IDST') return null;
+  const dv = new DataView(mdl.buffer, mdl.byteOffset, mdl.byteLength);
+  const vec = (o: number): Vec3 => ({ x: dv.getFloat32(o, true), y: dv.getFloat32(o + 4, true), z: dv.getFloat32(o + 8, true) });
+  const finite = (v: Vec3) => Number.isFinite(v.x) && Number.isFinite(v.y) && Number.isFinite(v.z);
+  const h: StudioHeader = {
+    version: dv.getInt32(4, true),
+    checksum: dv.getInt32(8, true),
+    hullMin: vec(104),
+    hullMax: vec(116),
+    viewMin: vec(128),
+    viewMax: vec(140),
+    flags: dv.getInt32(152, true),
+    numBones: dv.getInt32(156, true),
+    contents: dv.getInt32(332, true),
+  };
+  if (!finite(h.hullMin) || !finite(h.hullMax)) h.hullMin = h.hullMax = { x: 0, y: 0, z: 0 };
+  if (!finite(h.viewMin) || !finite(h.viewMax)) h.viewMin = h.viewMax = { x: 0, y: 0, z: 0 };
+  return h;
+}
+
 /** True when a pose is the identity (within float noise). */
 function isIdentityPose(p: RootPose): boolean {
   const [x, y, z, w] = p.q;
@@ -908,6 +946,30 @@ export function parseWorldLights(data: Uint8Array, bspVersion: number): WorldLig
 /** The ray casts lighting needs (CollisionWorld satisfies it). */
 export interface RayCaster {
   traceRay(start: Vec3, end: Vec3, mask: number, out?: TraceResult): TraceResult;
+  /** CollisionWorld's model switch: prop lighting turns the prop hulls (PROP_COLLISION_MODEL) off while it runs. */
+  setModelSolid?(model: number, solid: boolean): void;
+  isModelSolid?(model: number): boolean;
+}
+
+/**
+ * The brush model number of prop collision hulls (bsp/phy.ts). Not a BSP model: negative, so the game treats a
+ * prop like the world (static props belong to the world entity) - movement reports ground model 0 on it and
+ * the entity system ignores it - while CollisionWorld.setModelSolid can still switch all prop hulls at once.
+ */
+export const PROP_COLLISION_MODEL = -2;
+
+/**
+ * Runs `fn` with the prop hulls of `world` non-solid: the engine's light cache traces light visibility against
+ * the world only (and a prop's lighting origin is often inside its own hull).
+ */
+function withoutPropHulls<T>(world: RayCaster | null | undefined, fn: () => T): T {
+  if (!world?.setModelSolid || !world.isModelSolid || !world.isModelSolid(PROP_COLLISION_MODEL)) return fn();
+  world.setModelSolid(PROP_COLLISION_MODEL, false);
+  try {
+    return fn();
+  } finally {
+    world.setModelSolid(PROP_COLLISION_MODEL, true);
+  }
 }
 
 const SKY_GRID = 2048;
@@ -1105,7 +1167,10 @@ export interface PropOptions {
   loader?: MaterialLoader;
   /** Prop lighting from the HDR lumps (match the lightmaps' choice). Default false (LDR). */
   hdrLighting?: boolean;
-  /** Ray caster (the map's CollisionWorld) for light visibility; without it every light reaches every prop. */
+  /**
+   * Ray caster (the map's CollisionWorld) for light visibility; without it every light reaches every prop. Prop
+   * collision hulls (PROP_COLLISION_MODEL) are switched off while props are built.
+   */
   world?: RayCaster | null;
   warnings?: string[];
 }
@@ -1412,17 +1477,21 @@ export function buildMapProps(
 ): RenderProp[] {
   const b = new PropBuilder(bsp, pak, materials, opts);
   if (!b.hasSources) return [];
-  for (const p of staticInstances(bsp, opts.warnings)) b.add(p);
-  for (const p of entityPropInstances(entities)) b.add(p);
-  b.report();
-  return b.out;
+  return withoutPropHulls(opts.world, () => {
+    for (const p of staticInstances(bsp, opts.warnings)) b.add(p);
+    for (const p of entityPropInstances(entities)) b.add(p);
+    b.report();
+    return b.out;
+  });
 }
 
 /** RenderProps for the static props only (the 'sprp' game lump). */
 export function buildStaticProps(bsp: BspFile, pak: PakFile | null, materials: Map<string, MaterialDef>, opts: PropOptions = {}): RenderProp[] {
   const b = new PropBuilder(bsp, pak, materials, opts);
   if (!b.hasSources) return [];
-  for (const p of staticInstances(bsp, opts.warnings)) b.add(p);
-  b.report();
-  return b.out;
+  return withoutPropHulls(opts.world, () => {
+    for (const p of staticInstances(bsp, opts.warnings)) b.add(p);
+    b.report();
+    return b.out;
+  });
 }

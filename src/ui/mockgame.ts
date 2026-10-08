@@ -6,6 +6,7 @@ import { v3 } from '../core/vec3';
 import type { ChatSegment, GameApi, GameEvent, GameState, HudState, LoadProgress, ScoreboardData, UiApi } from '../game/api';
 import type { ZoneDef } from '../map/types';
 import { getCatalogEntry } from '../maps/catalog';
+import { loadCfg } from './cfgfiles';
 
 const MB = 1024 * 1024;
 
@@ -69,10 +70,12 @@ export class MockGame implements GameApi {
   noclip = false;
   frozen: number | null;
   /** Split flash: set lastSplitTime to now to trigger. */
-  private split = { delta: -0.42 as number | null, time: 1 };
+  private split = { delta: -0.42 as number | null, time: 1, label: 'Stage 2 00:21.37' };
   private hud: HudState;
   /** Make the next load fail: `viaSetLoading` reports it on the loading screen first, else the promise just rejects. */
   failNext: { message: string; viaSetLoading: boolean } | null = null;
+  /** Like the real game's report of its pointer lock: raw (unadjusted) movement or not; null = not locked yet. */
+  rawInputActive: boolean | null = null;
 
   constructor(
     private readonly ui: UiApi,
@@ -136,8 +139,12 @@ export class MockGame implements GameApi {
 
   // ------------------------------------------------------------ loading simulation
 
+  /** The last load (for the `retry` command). */
+  private lastLoad: (() => Promise<void>) | null = null;
+
   private simulateLoad(name: string, phases: LoadProgress[], stepMs: number): Promise<void> {
     if (this.loadTimer) clearTimeout(this.loadTimer);
+    this.lastLoad = () => this.simulateLoad(name, phases, stepMs);
     this.mapName = name;
     this.setState('loading');
     const fail = this.failNext;
@@ -248,8 +255,8 @@ export class MockGame implements GameApi {
   }
 
   /** Triggers a split-delta flash on the HUD. */
-  flashSplit(delta: number): void {
-    this.split = { delta, time: performance.now() / 1000 };
+  flashSplit(delta: number, label = 'Stage 2 00:21.37'): void {
+    this.split = { delta, time: performance.now() / 1000, label };
   }
 
   getHud(): HudState {
@@ -288,6 +295,7 @@ export class MockGame implements GameApi {
     tm.stageTime = 12.3 + t;
     tm.lastSplitDelta = this.split.delta;
     tm.lastSplitTime = this.split.time;
+    tm.lastSplitLabel = this.split.label;
     h.jumps = 14 + Math.floor(t / 3);
     h.strafes = 37 + Math.floor(t / 0.62);
     h.sync = 87.4;
@@ -347,6 +355,9 @@ export class MockGame implements GameApi {
       if (args[0]) void this.loadCatalogMap(args[0]);
     });
     add('disconnect', 'Back to the main menu', () => this.disconnect());
+    add('retry', 'Load the last map again', () => {
+      if (this.lastLoad) void this.lastLoad().catch(() => undefined);
+    });
     add('cvarlist', 'List console variables', () => {
       const all = console_.allCvars().sort((a, b) => a.name.localeCompare(b.name));
       for (const c of all) conPrint(`${c.name.padEnd(32)} : ${c.value.padEnd(10)} : ${c.flags & FCVAR_ARCHIVE ? 'a' : ' '} : ${c.help}`);
@@ -368,6 +379,17 @@ export class MockGame implements GameApi {
     add('getpos', 'Print position', () => {
       const h = this.getHud();
       conPrint(`setpos ${h.origin.x.toFixed(6)} ${h.origin.y.toFixed(6)} ${h.origin.z.toFixed(6)};setang ${h.angles.pitch.toFixed(6)} ${h.angles.yaw.toFixed(6)} 0.000000`);
+    });
+    add('exec', 'exec <config> : run a saved config file', (args) => {
+      const name = (args[0] ?? '').toLowerCase().replace(/\.cfg$/, '');
+      const text = name ? loadCfg(name) : null;
+      if (text === null) return conPrint(`exec: couldn't exec ${args[0] ?? ''}`, 'warn');
+      conPrint(`execing ${name}.cfg`);
+      for (const line of text.split('\n')) {
+        const c = line.indexOf('//');
+        const l = (c >= 0 ? line.slice(0, c) : line).trim();
+        if (l) console_.execute(l);
+      }
     });
     add('status', 'Server status', () => {
       conPrint(`hostname: SURF Local Server\nversion : 0.1.0\nmap     : ${this.mapName ?? '<none>'}\nplayers : 1 humans, 0 bots (1 max)`);

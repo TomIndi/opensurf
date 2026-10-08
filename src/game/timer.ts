@@ -4,10 +4,13 @@
 // (group 0 = main, N = bonus N):
 //  - start/speedstart: standing in it = "start zone" (clock at 0). Leaving it starts the run; horizontal
 //    speed is capped to the zone's prespeed (or surf_prespeed) at that moment.
-//  - stage N (staged maps): reaching it records a split vs the PB ("[Surf] Stage 3 | 00:42.123 (-0.231)").
+//  - stage N (staged maps): reaching it reports the completed stage's own time vs its stage best ("[Surf] Player
+//    finished Stage 2 in 00:12.345 (PB -0.123)", also the HUD split flash) and the run split vs the PB ("[Surf]
+//    Stage 3 | 00:42.123 (-0.231)"); the last stage is completed at the end zone. The stage clock (HUD stageTime)
+//    shows 0 while the player is in the current stage's zone and starts when leaving it.
 //    !s N is SurfTimer's stage practice: the clock shows 0 while in stage N's zone, starts when leaving it, and
-//    reaching stage N+1 (or the end after the last stage) reports "Stage N | 00:12.345 (PB -0.120)"; the best
-//    time of every stage (stage practice or ranked runs) is kept per tickrate.
+//    reaching stage N+1 (or the end after the last stage) reports "Player finished Stage N in 00:12.345 (PB
+//    -0.120)"; the best time of every stage (stage practice or ranked runs) is kept per tickrate.
 //  - checkpoint N (linear maps): same, "CP N".
 //  - end: finishes the run, saves the record (unless practice/custom physics), PB messages and sounds.
 //  - stop: stops the clock. teletostart: back to the course start. validator/checker: a checker sends the
@@ -23,8 +26,10 @@
 //  - TimerHud.lastSplitTime is on the run clock (compare with TimerHud.time to show a split for a few seconds).
 //  - host.killPlayer(reason) (trigger_hurt) should end in timer.onPlayerKilled().
 //  - extras: gotoEnd() (!end), getStageSpawn(), currentGroup, timerState, invalidateRecords() (after records
-//    were cleared/imported elsewhere), dispose() on map unload. SurfTimer servers spawn joining players in
-//    the start zone: call restart(0) after setZones() on map load.
+//    were cleared/imported elsewhere), interruptRun() (the game stopped simulating mid-run: the run becomes
+//    practice), dispose() on map unload. SurfTimer servers spawn joining players in the start zone: call
+//    restart(0) after setZones() on map load.
+//  - finish messages say "Rank 1/1": SurfTimer ranks players on a map, and a local server has one player.
 import { QAngle, qa } from '../core/angles';
 import { console_ } from '../core/cvars';
 import { Vec3, v3, v3clone } from '../core/vec3';
@@ -184,6 +189,8 @@ export class SurfTimer implements ISurfTimer {
   private checkpointSplits: number[] = [];
   private lastSplitDelta: number | null = null;
   private lastSplitTime = 0;
+  /** What the last split compares ("Stage 2 00:12.345", "CP 3", "Finish"), for the HUD split flash. */
+  private lastSplitLabel = '';
   private validated = false;
   private recording = false;
   /** Finished, then entered the start zone: leaving it starts the next run. */
@@ -508,6 +515,26 @@ export class SurfTimer implements ISurfTimer {
     else this.restart(this.group);
   }
 
+  /**
+   * The game stopped simulating in the middle of a ranked run (tab hidden, a frozen pause, a map change that was
+   * given up): the run can't count any more, so it goes on as practice (SurfTimer's !pause rule). Returns false
+   * when no ranked run was in progress.
+   */
+  interruptRun(): boolean {
+    if (this.state !== 'running' || this.practice) return false;
+    this.practice = true;
+    this.practiceReason = 'paused';
+    this.state = 'practice';
+    this.cancelRecording();
+    this.chat([
+      { text: 'Timer stopped', color: 'lightred' },
+      { text: " — run paused, it won't count. Type ", color: 'default' },
+      { text: '!r', color: 'lightblue' },
+      { text: ' to restart.', color: 'default' },
+    ]);
+    return true;
+  }
+
   enterPractice(reason: string): void {
     const wasRunning = this.state === 'running';
     this.practiceReason = reason;
@@ -538,12 +565,14 @@ export class SurfTimer implements ISurfTimer {
     const staged = this.isStagedGroup(this.group);
     const inRun = this.inRun();
     const pb = this.personalBest(this.group);
+    // like the start zone: standing in the current stage's zone the stage clock shows 0 (it starts on leaving)
+    const inStageZone = staged && this.insideStage(this.group, this.stage);
     return {
       state: this.state,
       time: this.currentTime(),
       stage: staged ? Math.max(1, this.stage) : 0,
       stageCount: staged ? this.stageCount(this.group) : 0,
-      stageTime: inRun && staged ? Math.max(0, this.runTime - this.stageStartTime) : 0,
+      stageTime: inRun && staged && !inStageZone ? Math.max(0, this.runTime - this.stageStartTime) : 0,
       checkpoint: staged ? 0 : this.checkpoint,
       checkpointCount: staged ? 0 : this.checkpointCount(this.group),
       bonus: this.group,
@@ -552,6 +581,7 @@ export class SurfTimer implements ISurfTimer {
       mapType: staged ? 'staged' : 'linear',
       lastSplitDelta: this.lastSplitDelta,
       lastSplitTime: this.lastSplitTime,
+      lastSplitLabel: this.lastSplitLabel,
     };
   }
 
@@ -706,22 +736,37 @@ export class SurfTimer implements ISurfTimer {
     this.finishedInStart = false;
   }
 
-  /** "Stage 3 | 00:12.345 (PB -0.231)" and the stage best (not saved with custom physics). */
+  /** Stage practice: the stage's time is reported (and flashed) like a stage completed in a run. */
   private reportStageTime(n: number, t: number): void {
-    const map = this.host.map.name;
+    const r = this.completeStage(n, t, t);
+    this.play(r.improved && r.delta !== null ? 'pb' : 'stage');
+  }
+
+  /**
+   * Stage `n` was completed in `t` seconds (its own time, from leaving its zone): saves the stage best (not with
+   * custom physics), prints "Player finished Stage 2 in 00:12.345 (PB -0.123)" (SurfTimer's stage time line, worded
+   * like the map's finish line) and puts the delta in the HUD split flash at run time `at`. With `keepRunSplit` (a
+   * stage reached in a run) a stage without a best yet leaves the flash to the run split already set.
+   */
+  private completeStage(n: number, t: number, at: number, keepRunSplit = false): { delta: number | null; improved: boolean } {
     let prev = null as ReturnType<typeof addStageTime>['previous'];
     let improved = false;
     if (!this.host.customPhysics) {
-      const r = addStageTime(map, this.group, n, t, this.tickrate());
+      const r = addStageTime(this.host.map.name, this.group, n, t, this.tickrate());
       prev = r.previous;
       improved = r.improved;
     }
     const delta = prev ? t - prev.time : null;
-    this.lastSplitDelta = delta;
-    this.lastSplitTime = t;
+    if (delta !== null || !keepRunSplit) {
+      this.lastSplitDelta = delta;
+      this.lastSplitTime = at;
+      this.lastSplitLabel = `Stage ${n} ${formatRunTime(t)}`;
+    }
     const segs: ChatSegment[] = [
+      { text: this.playerName(), color: 'lime' },
+      { text: ' finished ', color: 'default' },
       { text: `Stage ${n}`, color: 'lightblue' },
-      { text: ' | ', color: 'grey' },
+      { text: ' in ', color: 'default' },
       { text: formatRunTime(t), color: 'default' },
     ];
     if (delta !== null) {
@@ -729,7 +774,7 @@ export class SurfTimer implements ISurfTimer {
     } else if (!this.host.customPhysics) segs.push({ text: ' (first time)', color: 'grey' });
     else segs.push({ text: ' (custom physics: not saved)', color: 'grey' });
     this.chat(segs);
-    this.play(improved && prev ? 'pb' : 'stage');
+    return { delta, improved };
   }
 
   private enterStart(z: ZoneDef): void {
@@ -772,10 +817,10 @@ export class SurfTimer implements ISurfTimer {
 
   private reachStage(n: number): void {
     const t = this.runTime;
-    // the previous stage's own time (from leaving its zone) counts as a stage best on ranked runs
-    if (!this.practice && !this.host.customPhysics && n === this.stage + 1 && this.stage >= 1) {
-      addStageTime(this.host.map.name, this.group, this.stage, this.runTime - this.stageStartTime, this.tickrate());
-    }
+    const done = this.stage;
+    // the previous stage's own time (from leaving its zone): SurfTimer's stage time, a stage best on ranked runs
+    const doneTime = this.runTime - this.stageStartTime;
+    const completed = n === done + 1 && done >= 1;
     this.stage = n;
     this.stageSplits[n] = t;
     this.markStageStart();
@@ -785,6 +830,8 @@ export class SurfTimer implements ISurfTimer {
     const delta = ref !== null ? t - ref : null;
     this.lastSplitDelta = delta;
     this.lastSplitTime = t;
+    this.lastSplitLabel = `Stage ${n}`;
+    if (completed) this.completeStage(done, doneTime, t, true);
     this.chat([
       { text: `Stage ${n}`, color: 'lightblue' },
       { text: ' | ', color: 'grey' },
@@ -804,6 +851,7 @@ export class SurfTimer implements ISurfTimer {
     const delta = ref !== null ? t - ref : null;
     this.lastSplitDelta = delta;
     this.lastSplitTime = t;
+    this.lastSplitLabel = `CP ${n}`;
     this.chat([
       { text: `CP ${n}`, color: 'lightblue' },
       { text: ' | ', color: 'grey' },
@@ -821,6 +869,11 @@ export class SurfTimer implements ISurfTimer {
     this.finishedTime = time;
     this.finishedInStart = false;
     const where = group > 0 ? `${this.host.map.name} Bonus ${group}` : this.host.map.name;
+    // the end zone completes the last stage (SurfTimer reports its stage time before the finish)
+    const stages = this.stageCount(group);
+    if (!practice && this.isStagedGroup(group) && this.stage === stages && stages > 1) {
+      this.completeStage(this.stage, this.runTime - this.stageStartTime, time);
+    }
     if (practice || this.host.customPhysics) {
       this.cancelRecording();
       this.chat([
@@ -852,13 +905,10 @@ export class SurfTimer implements ISurfTimer {
     const prev = getPersonalBest(this.host.map.name, group, this.tickrate());
     const res = addRecord(record);
     this.pbCache.clear();
-    const stages = this.stageCount(group);
-    if (this.isStagedGroup(group) && this.stage === stages && stages > 1) {
-      addStageTime(this.host.map.name, group, this.stage, this.runTime - this.stageStartTime, this.tickrate());
-    }
     const delta = prev ? time - prev.time : null;
     this.lastSplitDelta = delta;
     this.lastSplitTime = time;
+    this.lastSplitLabel = 'Finish';
     const segs: ChatSegment[] = [
       { text: this.playerName(), color: 'lime' },
       { text: ' finished ', color: 'default' },
@@ -867,9 +917,9 @@ export class SurfTimer implements ISurfTimer {
       { text: formatRunTime(time), color: 'lime' },
       ...this.deltaSegments(delta),
     ];
-    if (res.rank > 0) {
-      segs.push({ text: ' | Rank ', color: 'default' }, { text: `${res.rank}/${res.total}`, color: 'gold' });
-    }
+    // SurfTimer's rank is among the players who finished the map: on a local server that is you alone (your
+    // own runs are a top list, not a ranking: !top, !pb)
+    segs.push({ text: ' | Rank ', color: 'default' }, { text: '1/1', color: 'gold' });
     this.chat(segs);
     if (res.isPb) {
       this.chat([{ text: 'NEW PERSONAL BEST!', color: 'gold' }]);

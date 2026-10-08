@@ -188,12 +188,43 @@ export function scrollOffset(rate: number, time: number): number {
   return v - Math.floor(v);
 }
 
+/**
+ * Depth bias of blended map surfaces (translucent, additive, water, decals), drawn after the opaque world
+ * without depth writes. A translucent face often lies exactly on an opaque one triangulated differently (grid
+ * overlays on neon floors, glass on walls): their interpolated depths cross and the two z-fight in torn bands.
+ * The blended surface is pushed toward the eye by one pixel's depth slope plus a few depth units, so it wins
+ * consistently while anything really in front of it (more than ~a pixel's footprint) still covers it:
+ * polygonOffset with a reversed float depth buffer (three.js negates the factor for reversed depth but not the
+ * units, so their sign is chosen here), and the same offset in the fragment shader with logarithmic depth,
+ * which polygonOffset can't reach (DEPTH_BIAS define: the units' share, in [0, 1] depth).
+ */
+export const BLEND_OFFSET_FACTOR = -1;
+export const BLEND_OFFSET_UNITS = 4;
+/** Logarithmic depth: BLEND_OFFSET_UNITS steps of a 24-bit depth buffer. */
+export const BLEND_LOG_DEPTH_BIAS = BLEND_OFFSET_UNITS / 16777216;
+
+/** Turns the blended-surface depth bias of a map material on or off (see BLEND_OFFSET_FACTOR). */
+export function setBlendDepthBias(m: ShaderMaterial, on: boolean, reversedDepth: boolean): void {
+  m.polygonOffset = on;
+  m.polygonOffsetFactor = on ? BLEND_OFFSET_FACTOR : 0;
+  // toward the eye: larger depth values with reversed Z (three.js passes units through unchanged)
+  m.polygonOffsetUnits = on ? (reversedDepth ? BLEND_OFFSET_UNITS : -BLEND_OFFSET_UNITS) : 0;
+  const has = m.defines.DEPTH_BIAS !== undefined;
+  if (on !== has) {
+    if (on) m.defines.DEPTH_BIAS = BLEND_LOG_DEPTH_BIAS.toExponential(6);
+    else delete m.defines.DEPTH_BIAS;
+    m.needsUpdate = true;
+  }
+}
+
 export interface MaterialFactoryOptions {
   /** Device anisotropy etc. are handled by the TextureCache. */
   textures: TextureCache;
   shared: SharedUniforms;
   /** Alpha-tested surfaces use alpha to coverage (only with an MSAA target). */
   alphaToCoverage?: boolean;
+  /** The depth buffer is reversed (1 = near): decides the sign of the blended surfaces' polygonOffset units. */
+  reversedDepth?: boolean;
 }
 
 function variantDefines(def: MaterialDef, v: SurfaceVariant, hasImage2: boolean): Record<string, string | number | boolean> {
@@ -416,12 +447,9 @@ export class SurfaceMaterials {
       m.blending = NoBlending;
     }
     if (defines.USE_A2C !== undefined && !m.transparent) m.alphaToCoverage = true;
-    if (v.decal) {
-      m.depthWrite = false;
-      m.polygonOffset = true;
-      m.polygonOffsetFactor = -1;
-      m.polygonOffsetUnits = -4;
-    }
+    if (v.decal) m.depthWrite = false;
+    // decals and blended surfaces, drawn over the opaque world, win the depth test against coplanar opaque faces
+    setBlendDepthBias(m, m.transparent || v.decal, this.opts.reversedDepth === true);
     m.userData.surf = this.info(def, m, v);
     return m;
   }
@@ -450,6 +478,7 @@ export class SurfaceMaterials {
     m.depthWrite = false;
     m.blending = NormalBlending;
     m.wireframe = this.wireframe;
+    setBlendDepthBias(m, true, this.opts.reversedDepth === true);
     const info = this.info(def, m, v);
     info.matAlpha = (uniforms.uAlpha.value as number) / (mu ? mu.alpha || 1 : 1);
     m.userData.surf = info;
