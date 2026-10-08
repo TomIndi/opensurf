@@ -793,6 +793,8 @@ export class InputDevice {
   private onMouseMove(e: MouseEvent): void {
     if (!this.pointerLocked) return;
     if (!this.deps.isPlaying()) return;
+    // no mouse look while typing in the chat (or console): CS:GO freezes the view while messagemode is open
+    if (this.deps.ui.isTyping()) return;
     this.deps.state.addMouse(e.movementX, e.movementY);
   }
 

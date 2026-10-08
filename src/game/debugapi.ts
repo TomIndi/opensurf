@@ -5,6 +5,9 @@
 import { QAngle } from '../core/angles';
 import { console_, ConsoleLine } from '../core/cvars';
 import { v3 } from '../core/vec3';
+import { brushWindings } from '../physics/brushbuild';
+import { playerHull } from '../physics/movement';
+import { CONTENTS_SOLID, MASK_PLAYERSOLID } from '../physics/types';
 import type { GameState, TimerHud } from './api';
 import type { Game } from './game';
 
@@ -80,6 +83,45 @@ export interface SurfDebugApi {
   say(text: string): void;
   pause(): void;
   resume(): void;
+  /** Sets the player's velocity (u/s). */
+  setVelocity(x: number, y: number, z: number): void;
+  /** True if the player hull at its current origin overlaps player-solid geometry (stuck). */
+  inSolid(): boolean;
+  /** The timer zones of the current map (plain objects). */
+  zones(): DebugZone[];
+  /** Trigger brush entities (bounds, classname, enabled). */
+  triggers(): DebugTrigger[];
+  /**
+   * The largest surfable ramp faces of the world brushes (0.1 < normal.z < 0.7, steeper than walkable), biggest
+   * first: centre of the face polygon, its outward normal and area. For automated surf tests on real maps.
+   */
+  findRamps(max?: number): DebugRamp[];
+  /** Renderer diagnostics (when the renderer provides debugInfo()). */
+  renderInfo(): unknown;
+}
+
+export interface DebugZone {
+  type: string;
+  group: number;
+  index: number;
+  mins: DebugVec;
+  maxs: DebugVec;
+}
+
+export interface DebugTrigger {
+  classname: string;
+  enabled: boolean;
+  mins: DebugVec;
+  maxs: DebugVec;
+}
+
+export interface DebugRamp {
+  center: DebugVec;
+  normal: DebugVec;
+  area: number;
+  /** Lowest / highest z of the face. */
+  minZ: number;
+  maxZ: number;
 }
 
 function plusName(cmd: string): string {
@@ -146,6 +188,75 @@ export function createDebugApi(game: Game): SurfDebugApi {
     say: (text) => game.say(text),
     pause: () => game.pause(),
     resume: () => game.resume(),
+    setVelocity: (x, y, z) => {
+      const ps = game.session?.player;
+      if (ps) {
+        ps.velocity.x = x;
+        ps.velocity.y = y;
+        ps.velocity.z = z;
+      }
+    },
+    inSolid: () => {
+      const s = game.session;
+      if (!s) return false;
+      const h = playerHull(s.player);
+      return s.collision.testBox(s.player.origin, h.mins, h.maxs, MASK_PLAYERSOLID);
+    },
+    zones: () =>
+      game.getZones().map((z) => ({ type: z.type, group: z.group, index: z.index, mins: { ...z.mins }, maxs: { ...z.maxs } })),
+    triggers: () => {
+      const s = game.session;
+      if (!s || typeof s.entities.debugTriggers !== 'function') return [];
+      return s.entities.debugTriggers().map((t) => ({ classname: t.classname, enabled: t.enabled, mins: { ...t.mins }, maxs: { ...t.maxs } }));
+    },
+    findRamps: (max = 20) => {
+      const s = game.session;
+      if (!s) return [];
+      const out: DebugRamp[] = [];
+      for (const b of s.collision.brushes) {
+        if (b.model !== 0 || !(b.contents & CONTENTS_SOLID)) continue;
+        const ws = brushWindings(b);
+        for (let i = 0; i < b.sides.length; i++) {
+          const side = b.sides[i];
+          const n = side.plane.normal;
+          if (side.bevel || !(n.z > 0.1 && n.z < 0.7)) continue;
+          const w = ws[i];
+          if (!w || w.length < 3) continue;
+          // polygon area and centroid (fan)
+          let ax = 0;
+          let ay = 0;
+          let az = 0;
+          let area = 0;
+          let minZ = Infinity;
+          let maxZ = -Infinity;
+          for (let k = 1; k + 1 < w.length; k++) {
+            const a = w[0];
+            const p = w[k];
+            const q = w[k + 1];
+            const ux = p.x - a.x, uy = p.y - a.y, uz = p.z - a.z;
+            const vx = q.x - a.x, vy = q.y - a.y, vz = q.z - a.z;
+            const cx = uy * vz - uz * vy, cy = uz * vx - ux * vz, cz = ux * vy - uy * vx;
+            const t = Math.sqrt(cx * cx + cy * cy + cz * cz) * 0.5;
+            area += t;
+            ax += ((a.x + p.x + q.x) / 3) * t;
+            ay += ((a.y + p.y + q.y) / 3) * t;
+            az += ((a.z + p.z + q.z) / 3) * t;
+          }
+          for (const p of w) {
+            if (p.z < minZ) minZ = p.z;
+            if (p.z > maxZ) maxZ = p.z;
+          }
+          if (!(area > 0)) continue;
+          out.push({ center: { x: ax / area, y: ay / area, z: az / area }, normal: { x: n.x, y: n.y, z: n.z }, area, minZ, maxZ });
+        }
+      }
+      out.sort((a, b) => b.area - a.area);
+      return out.slice(0, Math.max(0, max));
+    },
+    renderInfo: () => {
+      const r = game.renderer as { debugInfo?: () => unknown };
+      return typeof r.debugInfo === 'function' ? r.debugInfo() : null;
+    },
   };
 }
 

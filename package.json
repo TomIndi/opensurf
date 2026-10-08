@@ -10,6 +10,7 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "e2e": "node scripts/e2e.mjs",
     "catalog": "node scripts/build-catalog.mjs"
   },
   "dependencies": {

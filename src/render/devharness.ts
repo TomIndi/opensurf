@@ -259,8 +259,10 @@ window.__renderHarness = {
     return Array.from(px);
   },
   cullingDiff: () => {
-    // fraction of pixels that change when back-face culling is switched off for every map surface: ~0 when
-    // all faces are wound toward the viewer (or the renderer already draws them double-sided)
+    // fraction of pixels that change when back-face culling is switched off for every opaque map surface: ~0
+    // when all faces are wound toward the viewer (or the renderer already draws them double-sided). Translucent
+    // surfaces are left alone: a glass brush seen from below correctly shows only its downward face (like
+    // Source); drawing its upward face from behind too adds a second glass layer, which isn't a lost wall.
     const gl = renderer.gl;
     const grab = (): Uint8Array => {
       renderer.render(view);
@@ -270,7 +272,7 @@ window.__renderHarness = {
       return px;
     };
     const a = grab();
-    const meshes = renderer.scene?.meshes() ?? [];
+    const meshes = (renderer.scene?.meshes() ?? []).filter((m) => !(m.material as Material).transparent);
     const saved = meshes.map((m) => (m.material as Material).side);
     for (const m of meshes) {
       (m.material as Material).side = DoubleSide;

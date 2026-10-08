@@ -79,6 +79,11 @@ export class Chat {
     this.deps.playSound();
   }
 
+  /** Keeps the newest lines in view (the feed can't scroll while the HUD is hidden). */
+  scrollToBottom(): void {
+    this.feed.scrollTop = this.feed.scrollHeight;
+  }
+
   clear(): void {
     for (const m of this.msgs) m.el.remove();
     this.msgs.length = 0;

@@ -431,6 +431,30 @@ describe('CollisionWorld: box traces', () => {
     }
   });
 
+  it('a box within DIST_EPSILON of a face is stopped by any move into it (no creeping into solid)', () => {
+    // start 0.001 in front of the -x face, then move 0.01 into it: (d1 - eps) / (d1 - d2) ~ -3 (< -1).
+    // Quake 3's -1 sentinel let such moves through; Source counts every entering plane, so the box stays out.
+    const gapX = 100 - 16 - 0.001;
+    const tr = world.traceBox(v3(gapX, 0, 0), v3(gapX + 0.01, 0, 0), MINS, MAXS, MASK_PLAYERSOLID);
+    expect(tr.startsolid).toBe(false);
+    expect(tr.fraction).toBe(0);
+    expect(world.testBox(tr.endpos, MINS, MAXS, MASK_PLAYERSOLID)).toBe(false);
+    // the same against a two-sided triangle (a slanted displacement wall)
+    const tri = new CollisionWorld([], {
+      triangles: { positions: new Float64Array([100, -200, -100, 100.5, 200, -100, 100, 0, 300]), indices: new Uint32Array([0, 1, 2]) },
+    });
+    const probe = v3(0, 0, 0);
+    const far = tri.traceBox(probe, v3(200, 0, 0), MINS, MAXS, MASK_PLAYERSOLID);
+    expect(far.fraction).toBeLessThan(1);
+    const s = v3(far.endpos.x + (DIST_EPSILON - 0.001), 0, 0); // ~0.001 off the face
+    const t2 = tri.traceBox(s, v3(s.x + 0.01, s.y + 1, s.z), MINS, MAXS, MASK_PLAYERSOLID);
+    expect(t2.startsolid).toBe(false);
+    expect(t2.fraction).toBe(0);
+    // a move parallel to the face (along edge a -> b: float noise only) still slides freely
+    const t3 = tri.traceBox(far.endpos, v3(far.endpos.x + 0.0125, far.endpos.y + 10, far.endpos.z), MINS, MAXS, MASK_PLAYERSOLID);
+    expect(t3.fraction).toBeGreaterThan(0.99);
+  });
+
   it('fraction formula matches (d1 - eps) / (d1 - d2)', () => {
     const tr = world.traceBox(v3(0, 0, 0), v3(300, 0, 0), MINS, MAXS, MASK_PLAYERSOLID);
     expect(tr.fraction).toBeCloseTo((84 - DIST_EPSILON) / 300, 14);

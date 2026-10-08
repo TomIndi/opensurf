@@ -14,9 +14,11 @@ import { getCatalogEntry } from '../maps/catalog';
 import { Chat } from './chat';
 import { cvarBool, cvarNum, ensureUiCvars, registerUiOwnedCvars } from './cvardefs';
 import { DevConsole } from './devconsole';
+import { keyBoundTo } from './conutil';
 import { h, isTextInput } from './dom';
 import { Hud } from './hud';
 import { icon } from './icons';
+import { codeToKeyName } from './keys';
 import { LoadingScreen } from './loading';
 import { MainMenu } from './mainmenu';
 import { MapBrowser } from './mapbrowser';
@@ -129,7 +131,8 @@ export class Ui implements UiApi {
       settings: this.settings,
       resume: () => this.resumeGame(),
       restart: () => {
-        this.game?.say('!r');
+        // "/r" like SourceMod's silent trigger: restarting from the menu doesn't echo "!r" into the chat
+        this.game?.say('/r');
         this.resumeGame();
       },
       disconnect: () => {
@@ -274,7 +277,12 @@ export class Ui implements UiApi {
   private onKeyDownCapture(e: KeyboardEvent): void {
     if (this.settings.capturing) return; // the binds editor owns the keyboard
     let handled = false;
-    if (e.code === 'Escape') {
+    const key = e.code !== 'Backquote' && this.console.isOpen && !e.repeat ? codeToKeyName(e.code) : null;
+    if (key && keyBoundTo(key, 'toggleconsole')) {
+      // like Source: whatever key toggleconsole is bound to also closes the console (the input eats bound keys)
+      this.console.close();
+      handled = true;
+    } else if (e.code === 'Escape') {
       handled = this.handleEscape();
     } else if (e.code === 'Backquote' && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey) {
       const active = document.activeElement;
@@ -553,7 +561,10 @@ export class Ui implements UiApi {
 
   updateHud(hud: HudState): void {
     this.lastHud = hud;
+    const wasVisible = this.hud.isVisible;
     this.hud.update(hud);
+    // the feed can't scroll while hidden (menus, loading): show the newest lines when the HUD comes back
+    if (!wasVisible && this.hud.isVisible) this.chatBox.scrollToBottom();
     this.hud.setLockHint(
       this.lockHintEnabled &&
         hud.visible &&

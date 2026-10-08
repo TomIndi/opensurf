@@ -1,7 +1,7 @@
 // Map browser: Featured classics, All maps (virtualized, search/tier/type/sort filters, cache management),
 // Built-in maps and Local files (drag & drop / picker).
 import type { GameApi, SoundApi } from '../game/api';
-import { BUILTIN_MAPS, type BuiltinMapInfo } from '../map/builtin/index';
+import { BUILTIN_MAPS, type BuiltinMapInfo } from '../map/builtin/list';
 import { type CatalogEntry, loadCatalog, tierColor } from '../maps/catalog';
 import { deleteCachedMap, driveViewUrl, listCachedMaps } from '../maps/downloader';
 import { getCompletions, getPersonalBest, getRecords } from '../game/records';

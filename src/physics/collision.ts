@@ -117,6 +117,16 @@ const TRI_MIN_CROSS = 1e-6;
 //   KS[8..10] leading plane normal     KS[11]    leading plane distance (unexpanded)
 //   KS[12]    the trace's best fraction so far: a triangle entered at or after it can't change the result
 const KS = new Float64Array(13);
+/**
+ * Initial enter fraction ("no entering plane yet"). Like Source's "never updated" sentinel (unlike Quake 3's
+ * -1), every entering plane counts, however far before the start its pulled-back crossing lies: a box that starts within DIST_EPSILON of
+ * a face and moves into it is stopped at fraction 0. With -1, moves into a face shorter than
+ * DIST_EPSILON - gap passed unchecked, so a player sliding along a slightly slanted wall (a step or a ground
+ * snap closing the gap each tick) crept into it and ended up stuck in solid. A finite sentinel (not -Infinity)
+ * keeps ignoring the float noise of a move parallel to a face within DIST_EPSILON of it (d1 - d2 ~ 1e-15
+ * gives f ~ -1e13), which must not stop a slide.
+ */
+const NEVER_UPDATED = -9999;
 let kStartOut = false;
 let kGetOut = false;
 
@@ -187,7 +197,7 @@ function clipAxial(axis: number, lo: number, hi: number, e: number, s: number): 
  * The planes are the separating axes of a box and a triangle, so plane pushing is exact.
  */
 function clipTriangleHull(T: Float64Array, t: number, ex: number, ey: number, ez: number): boolean {
-  KS[6] = -1;
+  KS[6] = NEVER_UPDATED;
   KS[7] = 1;
   kStartOut = false;
   kGetOut = false;
@@ -420,7 +430,7 @@ function edgeInside(
  * triangulated surface has no seams for rays. Resets and sets the clip state like clipTriangleHull.
  */
 function clipTriangleRay(T: Float64Array, t: number): boolean {
-  KS[6] = -1;
+  KS[6] = NEVER_UPDATED;
   KS[7] = 1;
   kStartOut = false;
   kGetOut = false;
@@ -454,7 +464,7 @@ function clipTriangleRay(T: Float64Array, t: number): boolean {
   }
   if (d2 >= DIST_EPSILON - CLIP_NOISE || d2 >= d1) return false;
   const f = (d1 - DIST_EPSILON) / (d1 - d2);
-  if (!(f > -1)) return false;
+  if (!(f > NEVER_UPDATED)) return false;
   // where the segment meets the plane (or its end, when that stops short within DIST_EPSILON)
   const fc = d2 > 0 ? 1 : d1 / (d1 - d2);
   const px = KS[0] + (KS[3] - KS[0]) * fc;
@@ -1474,7 +1484,7 @@ export class CollisionWorld implements TraceWorld {
           if (tmin > tmax) continue;
         }
 
-        let enterfrac = -1;
+        let enterfrac = NEVER_UPDATED;
         let leavefrac = 1;
         let startout = false;
         let getout = false;
@@ -1528,7 +1538,7 @@ export class CollisionWorld implements TraceWorld {
           }
           continue;
         }
-        if (enterfrac < leavefrac && enterfrac > -1 && enterfrac < best) {
+        if (enterfrac < leavefrac && enterfrac > NEVER_UPDATED && enterfrac < best) {
           best = enterfrac < 0 ? 0 : enterfrac;
           hitSlot = slot;
           hitSide = lead;
@@ -1638,7 +1648,7 @@ export class CollisionWorld implements TraceWorld {
             }
             continue;
           }
-          if (KS[6] < KS[7] && KS[6] > -1 && KS[6] < best) {
+          if (KS[6] < KS[7] && KS[6] > NEVER_UPDATED && KS[6] < best) {
             best = KS[6] < 0 ? 0 : KS[6];
             KS[12] = best;
             hitSlot = -1;

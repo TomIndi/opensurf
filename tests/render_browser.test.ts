@@ -53,7 +53,7 @@ interface Harness {
     scene: Record<string, number> | null;
     targetSize: number[];
     sky: { procedural: boolean; sky3d: boolean };
-    faces: { audit: { inverted: number; correct: number } | null; doubleSided: boolean } | null;
+    faces: { audit: { inverted: number; correct: number; invertedArea: number; correctArea: number } | null; doubleSided: boolean } | null;
   };
 }
 
@@ -299,6 +299,10 @@ describe.skipIf(!chromiumPath)('renderer in a real browser', () => {
         // culling switched off for every surface (the face orientation audit picks double-sided drawing when
         // the loader emits faces inside-out)
         expect(info.faces).toBeTruthy();
+        // the loader winds brush faces toward their front side now: single-sided culling, like the engine
+        const audit = info.faces!.audit!;
+        expect(audit.invertedArea / (audit.invertedArea + audit.correctArea)).toBeLessThan(0.05);
+        expect(info.faces!.doubleSided).toBe(false);
         for (const turn of [0, 90, 180, 270]) {
           const diff = await page.evaluate((turn) => {
             const h = window.__renderHarness;

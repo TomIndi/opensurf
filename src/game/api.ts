@@ -258,4 +258,17 @@ export interface RendererApi {
   /** Debug lines/boxes (zone editor, triggers), cleared each frame by the caller. */
   setDebugBoxes(boxes: { mins: Vec3; maxs: Vec3; color: [number, number, number] }[]): void;
   stats(): { drawCalls: number; triangles: number; textures: number };
+  /**
+   * Optional: replaces the map's world fog at runtime (map logic `SetFogController`); null restores the map's
+   * own fog. Reset by loadMap/unloadMap.
+   */
+  setFog?(fog: import('../map/types').FogDef | null): void;
+  /** Optional: what the device supports, so the loader can prepare matching data (DXT textures with S3TC). */
+  capabilities?(): RendererCapabilities;
+}
+
+export interface RendererCapabilities {
+  /** S3TC (DXT1/3/5, incl. sRGB) uploads: the loader may keep the VTFs' compressed mip chains. */
+  compressedTextures: boolean;
+  maxTextureSize: number;
 }

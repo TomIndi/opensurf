@@ -13,7 +13,8 @@
 import { QAngle, angleDiff, angleVectors, normalizeAngle, qa } from '../core/angles';
 import { conPrint, console_, Cvar, FCVAR_CHEAT, FCVAR_REPLICATED } from '../core/cvars';
 import { Vec3, v3, v3clone, v3copy } from '../core/vec3';
-import { LoadedMap, ZoneDef, ZoneSource } from '../map/types';
+import { BUILTIN_MAPS } from '../map/builtin/list';
+import { FogDef, LoadedMap, ZoneDef, ZoneSource } from '../map/types';
 import { CatalogEntry, getCatalogEntry, loadCatalog } from '../maps/catalog';
 import { extractMapArchive, fetchCatalogMap } from '../maps/downloader';
 import type { CollisionWorld } from '../physics/collision';
@@ -103,8 +104,14 @@ export interface BuiltinInfo {
 }
 
 /** Map loading back-ends (the defaults import the real modules lazily; tests inject fakes). */
+/** Loader options derived from the renderer's capabilities. */
+export interface BspLoadOptions {
+  /** Keep the VTFs' DXT mip chains (the renderer can upload S3TC): full-resolution textures, 4-8x less memory. */
+  compressedTextures?: boolean;
+}
+
 export interface MapLoaders {
-  loadBsp(name: string, data: ArrayBuffer, onProgress?: (p: LoadProgress) => void): Promise<LoadedMap>;
+  loadBsp(name: string, data: ArrayBuffer, onProgress?: (p: LoadProgress) => void, opts?: BspLoadOptions): Promise<LoadedMap>;
   buildBuiltin(id: string): Promise<LoadedMap>;
   builtinMaps(): Promise<BuiltinInfo[]>;
   catalog(): Promise<CatalogEntry[]>;
@@ -153,17 +160,16 @@ export async function fetchWithProgress(url: string, onProgress?: (p: LoadProgre
 }
 
 export const defaultLoaders: MapLoaders = {
-  async loadBsp(name, data, onProgress) {
+  async loadBsp(name, data, onProgress, opts) {
     const m = await import('../bsp/loadmap');
-    return m.loadBspMap(name, data, onProgress);
+    return m.loadBspMap(name, data, onProgress, opts?.compressedTextures ? { materials: { compressedTextures: true } } : {});
   },
   async buildBuiltin(id) {
     const m = await import('../map/builtin/index');
     return m.buildBuiltinMap(id);
   },
   async builtinMaps() {
-    const m = await import('../map/builtin/index');
-    return m.BUILTIN_MAPS.map((b: BuiltinInfo) => ({ id: b.id, name: b.name, tier: b.tier }));
+    return BUILTIN_MAPS.map((b: BuiltinInfo) => ({ id: b.id, name: b.name, tier: b.tier }));
   },
   catalog: () => loadCatalog(),
   fetchCatalogMap: (entry, onProgress, signal) => fetchCatalogMap(entry, onProgress, signal),
@@ -661,7 +667,7 @@ export class Game implements GameApi, CommandContext {
       this.progress(token, { phase: 'parse', message: 'Reading the map…' });
       await yieldToBrowser();
       this.check(token);
-      const map = await this.loaders.loadBsp(entry.name, got.bsp, (p) => this.progress(token, p));
+      const map = await this.loaders.loadBsp(entry.name, got.bsp, (p) => this.progress(token, p), this.bspLoadOptions());
       return { map, tier: entry.tier };
     });
   }
@@ -774,8 +780,17 @@ export class Game implements GameApi, CommandContext {
     this.progress(token, { phase: 'parse', message: 'Reading the map…' });
     await yieldToBrowser();
     this.check(token);
-    const map = await this.loaders.loadBsp(name, bsp, (p) => this.progress(token, p));
+    const map = await this.loaders.loadBsp(name, bsp, (p) => this.progress(token, p), this.bspLoadOptions());
     return { map, tier };
+  }
+
+  /** What the renderer can take: S3TC-capable devices get the maps' original DXT textures. */
+  private bspLoadOptions(): BspLoadOptions {
+    try {
+      return { compressedTextures: !!this.renderer.capabilities?.().compressedTextures };
+    } catch {
+      return {};
+    }
   }
 
   private async runLoad(req: LoadRequest, name: string, load: (token: LoadToken) => Promise<{ map: LoadedMap; tier: number | null }>): Promise<void> {
@@ -852,6 +867,13 @@ export class Game implements GameApi, CommandContext {
     this._session = s;
     this.input.releaseAll();
     this.dispatcher.releaseAll();
+    // map logic switching the player's fog (SetFogController) drives the renderer's world fog
+    const ents = s.entities as GameEntities & { onFogController?: ((fog: FogDef) => void) | null };
+    if ('onFogController' in ents) {
+      ents.onFogController = (fog) => {
+        if (this._session === s) this.renderer.setFog?.(fog);
+      };
+    }
     try {
       s.entities.spawn();
     } catch (e) {

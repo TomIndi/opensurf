@@ -37,7 +37,7 @@ import {
   WebGLRenderer,
 } from 'three';
 import type { Vec3 } from '../core/vec3';
-import type { GhostState, LoadProgress, RenderSettings, RendererApi, ViewState } from '../game/api';
+import type { GhostState, LoadProgress, RenderSettings, RendererApi, RendererCapabilities, ViewState } from '../game/api';
 import type { FogDef, LoadedMap, ZoneDef } from '../map/types';
 import { CONTENTS_SLIME, CONTENTS_WATER } from '../physics/types';
 import { EYE_PULLBACK, applySourceView, createSourceCamera, sourceVerticalFov } from './camera';
@@ -153,6 +153,8 @@ export class Renderer implements RendererApi {
   private underwater: WaterSurface | null = null;
   private readonly tmpVec = new Vector3();
   private readonly clearColor = new Vector3(0, 0, 0);
+  /** Runtime world fog (SetFogController) replacing the map's own; null = the map's fog. */
+  private fogOverride: FogDef | null = null;
 
   constructor(canvas: HTMLCanvasElement, opts: RendererOptions = {}) {
     const gl = canvas.getContext('webgl2', {
@@ -346,6 +348,7 @@ export class Renderer implements RendererApi {
       this.skyScene.add(scene.sky3d);
       this.waterSurfaces = waterSurfaces(map);
       this.underwater = null;
+      this.fogOverride = null;
       this.arrangeScenes();
       this.applyFog();
       this.clips.reset();
@@ -402,10 +405,24 @@ export class Renderer implements RendererApi {
     this.map = null;
     this.waterSurfaces = [];
     this.underwater = null;
+    this.fogOverride = null;
     this.clips.reset();
     this.clips.setVisible(false, () => []);
     this.arrangeScenes();
     this.applyFog();
+  }
+
+  /** Map logic switched the player's fog (env_fog_controller via SetFogController); null = the map's own fog. */
+  setFog(fog: FogDef | null): void {
+    this.fogOverride = fog
+      ? { enabled: !!fog.enabled, color: [fog.color[0], fog.color[1], fog.color[2]], start: fog.start, end: fog.end, maxDensity: fog.maxDensity }
+      : null;
+    this.applyFog();
+  }
+
+  /** Device capabilities the loader can prepare data for. */
+  capabilities(): RendererCapabilities {
+    return { compressedTextures: this.caps.s3tc, maxTextureSize: this.caps.maxTextureSize };
   }
 
   setModelVisible(model: number, visible: boolean): void {
@@ -502,12 +519,12 @@ export class Renderer implements RendererApi {
       srgbToLinearVec(w.color, this.tmpVec);
       this.sky.setOverlayFog(this.tmpVec, 1);
     } else {
-      this.setFogUniforms(this.shared.world, r?.fog ?? null, 1);
+      this.setFogUniforms(this.shared.world, this.fogOverride ?? r?.fog ?? null, 1);
       this.sky.setOverlayFog(null, 0);
       const s3 = r?.sky3d ?? null;
       this.setFogUniforms(this.shared.sky3d, s3?.fog ?? null, s3 && s3.scale > 0 ? 1 / s3.scale : 1 / 16);
     }
-    this.sky.setFog(r?.fog ?? null, this.settings.fogEnabled);
+    this.sky.setFog(this.fogOverride ?? r?.fog ?? null, this.settings.fogEnabled);
   }
 
   // ------------------------------------------------------------------------------ frame
