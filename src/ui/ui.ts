@@ -56,7 +56,9 @@ export class Ui implements UiApi {
   constructor(root: HTMLElement, private readonly sound: SoundApi) {
     this.root = root;
     root.classList.add('surf-ui');
-    // UI-only cvars exist before the game runs the saved config (documented cvars are the game's: see attachGame)
+    // every cvar exists before the UI first reads one and before the game runs the saved config: the documented
+    // ones from the game's single definition table (registerConvars, idempotent), plus the UI's own
+    ensureUiCvars();
     registerUiOwnedCvars();
     // automated sessions (?autotest=1) play without pointer lock: no "click to capture" prompt
     try {

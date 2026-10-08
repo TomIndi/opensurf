@@ -165,9 +165,20 @@ export class SurfTimer implements ISurfTimer {
   private group = 0;
   private practice = false;
   private runTicks = 0;
+  /**
+   * Seconds on the run clock: the simulated time of the run's ticks, each counted at the tick interval in force
+   * when it ran, so a tickrate change mid-run never rescales the time already run (the HUD can't jump). While the
+   * tickrate stays the same it is exactly clockBase + (runTicks - clockBaseTicks) * clockInterval (no float drift).
+   */
+  private runTime = 0;
+  private clockBase = 0;
+  private clockBaseTicks = 0;
+  private clockInterval = 0;
   private finishedTime = 0;
   private stage = 0;
   private stageStartTicks = 0;
+  /** runTime when the current stage started. */
+  private stageStartTime = 0;
   private checkpoint = 0;
   private stageSplits: number[] = [];
   private checkpointSplits: number[] = [];
@@ -292,7 +303,7 @@ export class SurfTimer implements ISurfTimer {
   // ---------------------------------------------------------------- per tick
 
   tick(): void {
-    if ((this.state === 'running' || this.state === 'practice') && !this.stagePrac?.armed) this.runTicks++;
+    if ((this.state === 'running' || this.state === 'practice') && !this.stagePrac?.armed) this.advanceRunClock();
     if (!this.zones.length) return;
     const ps = this.host.player;
     this.updateBox();
@@ -417,7 +428,7 @@ export class SurfTimer implements ISurfTimer {
     ps.baseVelocity.x = ps.baseVelocity.y = ps.baseVelocity.z = 0;
     ps.flags &= ~FL_BASEVELOCITY;
     this.teleport(sp.origin, sp.angles);
-    this.stageStartTicks = this.runTicks;
+    this.markStageStart();
     if (this.stagePrac) this.armStagePractice(this.stage);
   }
 
@@ -459,8 +470,7 @@ export class SurfTimer implements ISurfTimer {
     this.stagePrac.stage = n;
     this.stage = n;
     this.stagePrac.armed = this.zones.some((z) => z.inside && z.def.type === 'stage' && z.def.group === this.group && z.def.index === n);
-    this.runTicks = 0;
-    this.stageStartTicks = 0;
+    this.resetRunClock();
   }
 
   /** !stop: stops the clock of the run in progress (SurfTimer sm_stop). False when nothing was running. */
@@ -526,7 +536,6 @@ export class SurfTimer implements ISurfTimer {
 
   getHud(): TimerHud {
     const staged = this.isStagedGroup(this.group);
-    const dt = this.host.tickInterval;
     const inRun = this.inRun();
     const pb = this.personalBest(this.group);
     return {
@@ -534,7 +543,7 @@ export class SurfTimer implements ISurfTimer {
       time: this.currentTime(),
       stage: staged ? Math.max(1, this.stage) : 0,
       stageCount: staged ? this.stageCount(this.group) : 0,
-      stageTime: inRun && staged ? Math.max(0, this.runTicks - this.stageStartTicks) * dt : 0,
+      stageTime: inRun && staged ? Math.max(0, this.runTime - this.stageStartTime) : 0,
       checkpoint: staged ? 0 : this.checkpoint,
       checkpointCount: staged ? 0 : this.checkpointCount(this.group),
       bonus: this.group,
@@ -601,7 +610,7 @@ export class SurfTimer implements ISurfTimer {
         if (z.group === this.group && this.inRun() && this.isStagedGroup(this.group)) {
           if (this.stagePrac) this.stagePracticeEnter(z.index);
           else if (z.index > this.stage) this.reachStage(z.index);
-          else if (z.index === this.stage) this.stageStartTicks = this.runTicks;
+          else if (z.index === this.stage) this.markStageStart();
         }
         return;
       case 'checkpoint':
@@ -639,13 +648,12 @@ export class SurfTimer implements ISurfTimer {
         // stage practice: the stage clock starts when leaving the stage's zone (prespeed capped like a start)
         if (z.index === sp.stage && sp.armed && !this.insideStage(z.group, z.index)) {
           sp.armed = false;
-          this.runTicks = 0;
-          this.stageStartTicks = 0;
+          this.resetRunClock();
           if (!this.noclip()) this.capSpeed(z.prespeed !== undefined ? z.prespeed : cvarNum('surf_prespeed', 350));
         }
       } else if (z.index === this.stage) {
         // the stage clock starts when leaving the stage's start zone
-        this.stageStartTicks = this.runTicks;
+        this.markStageStart();
       }
     }
   }
@@ -678,7 +686,7 @@ export class SurfTimer implements ISurfTimer {
       return;
     }
     if (n < sp.stage) return;
-    if (n === sp.stage + 1 && !sp.armed) this.reportStageTime(sp.stage, this.runTicks * this.host.tickInterval);
+    if (n === sp.stage + 1 && !sp.armed) this.reportStageTime(sp.stage, this.runTime);
     this.armStagePractice(n);
   }
 
@@ -686,7 +694,7 @@ export class SurfTimer implements ISurfTimer {
   private stagePracticeEnd(): void {
     const sp = this.stagePrac;
     if (!sp) return;
-    const t = this.runTicks * this.host.tickInterval;
+    const t = this.runTime;
     this.stagePrac = null;
     if (sp.armed || sp.stage !== this.stageCount(this.group)) {
       this.finish(); // skipped stages: a plain practice finish
@@ -763,14 +771,14 @@ export class SurfTimer implements ISurfTimer {
   }
 
   private reachStage(n: number): void {
-    const t = this.runTicks * this.host.tickInterval;
+    const t = this.runTime;
     // the previous stage's own time (from leaving its zone) counts as a stage best on ranked runs
     if (!this.practice && !this.host.customPhysics && n === this.stage + 1 && this.stage >= 1) {
-      addStageTime(this.host.map.name, this.group, this.stage, (this.runTicks - this.stageStartTicks) * this.host.tickInterval, this.tickrate());
+      addStageTime(this.host.map.name, this.group, this.stage, this.runTime - this.stageStartTime, this.tickrate());
     }
     this.stage = n;
     this.stageSplits[n] = t;
-    this.stageStartTicks = this.runTicks;
+    this.markStageStart();
     if (this.practice) return;
     const pb = this.personalBest(this.group);
     const ref = pb && pb.stageSplits[n] !== undefined && pb.stageSplits[n] >= 0 ? pb.stageSplits[n] : null;
@@ -787,7 +795,7 @@ export class SurfTimer implements ISurfTimer {
   }
 
   private reachCheckpoint(n: number): void {
-    const t = this.runTicks * this.host.tickInterval;
+    const t = this.runTime;
     this.checkpoint = n;
     this.checkpointSplits[n] = t;
     if (this.practice) return;
@@ -806,7 +814,7 @@ export class SurfTimer implements ISurfTimer {
   }
 
   private finish(): void {
-    const time = this.runTicks * this.host.tickInterval;
+    const time = this.runTime;
     const group = this.group;
     const practice = this.practice;
     this.state = 'finished';
@@ -846,7 +854,7 @@ export class SurfTimer implements ISurfTimer {
     this.pbCache.clear();
     const stages = this.stageCount(group);
     if (this.isStagedGroup(group) && this.stage === stages && stages > 1) {
-      addStageTime(this.host.map.name, group, this.stage, (this.runTicks - this.stageStartTicks) * this.host.tickInterval, this.tickrate());
+      addStageTime(this.host.map.name, group, this.stage, this.runTime - this.stageStartTime, this.tickrate());
     }
     const delta = prev ? time - prev.time : null;
     this.lastSplitDelta = delta;
@@ -889,18 +897,46 @@ export class SurfTimer implements ISurfTimer {
     if (!this.heuristicStages || this.group !== 0 || !this.inRun() || ev.seamless || ev.destinationIndex < 0) return;
     if (this.seenDest.has(ev.destinationIndex)) {
       // sent back to a known stage start (a fail): the stage clock restarts
-      this.stageStartTicks = this.runTicks;
+      this.markStageStart();
       return;
     }
     this.seenDest.add(ev.destinationIndex);
     const ps = this.host.player;
     this.stage = Math.max(1, this.stage) + 1;
     this.stageDest.set(this.stage, { origin: v3clone(ev.origin), angles: { ...ps.viewAngles, roll: 0 } });
-    this.stageSplits[this.stage] = this.runTicks * this.host.tickInterval;
-    this.stageStartTicks = this.runTicks;
+    this.stageSplits[this.stage] = this.runTime;
+    this.markStageStart();
   }
 
   // ---------------------------------------------------------------- internals
+
+  /** One tick of the run clock (see runTime). */
+  private advanceRunClock(): void {
+    const ti = this.host.tickInterval;
+    if (ti !== this.clockInterval) {
+      this.clockBase = this.runTime;
+      this.clockBaseTicks = this.runTicks;
+      this.clockInterval = ti;
+    }
+    this.runTicks++;
+    this.runTime = this.clockBase + (this.runTicks - this.clockBaseTicks) * ti;
+  }
+
+  /** Run clock back to 0 (new run, stage practice start). */
+  private resetRunClock(): void {
+    this.runTicks = 0;
+    this.runTime = 0;
+    this.clockBase = 0;
+    this.clockBaseTicks = 0;
+    this.stageStartTicks = 0;
+    this.stageStartTime = 0;
+  }
+
+  /** The current stage starts now (on the run clock). */
+  private markStageStart(): void {
+    this.stageStartTicks = this.runTicks;
+    this.stageStartTime = this.runTime;
+  }
 
   private inRun(): boolean {
     return this.state === 'running' || this.state === 'practice';
@@ -934,7 +970,7 @@ export class SurfTimer implements ISurfTimer {
       case 'running':
       case 'practice':
       case 'stopped':
-        return this.runTicks * this.host.tickInterval;
+        return this.runTime;
       case 'finished':
         return this.finishedTime;
       default:
@@ -954,11 +990,10 @@ export class SurfTimer implements ISurfTimer {
   }
 
   private resetRunData(): void {
-    this.runTicks = 0;
+    this.resetRunClock();
     this.finishedTime = 0;
     this.finishedInStart = false;
     this.stage = this.isStagedGroup(this.group) ? 1 : 0;
-    this.stageStartTicks = 0;
     this.checkpoint = 0;
     this.stageSplits = [];
     this.checkpointSplits = [];

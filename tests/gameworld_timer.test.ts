@@ -158,6 +158,24 @@ describe('SurfTimer run flow', () => {
     expect(w.timer.getRecords(0)).toHaveLength(3);
   });
 
+  it('the run clock is simulated time: a tickrate change mid-run does not rescale the time already run', () => {
+    const w = world(STAGED);
+    w.at(0);
+    w.at(300); // run starts (time 0)
+    w.at(500, 100); // 100 ticks at 100 tick = 1 s
+    expect(w.timer.getHud().time).toBeCloseTo(1, 9);
+    w.host.tickInterval = 1 / 64;
+    expect(w.timer.getHud().time).toBeCloseTo(1, 9); // no jump to 100 / 64 s
+    w.at(500, 64); // + 1 s at 64 tick
+    expect(w.timer.getHud().time).toBeCloseTo(2, 9);
+    w.at(1100); // stage 2 at 2 s + 1/64
+    expect(w.host.chatText().at(-1)).toBe('[Surf] Stage 2 | 00:02.015');
+    w.host.tickInterval = 0.01;
+    w.at(1500, 50); // the stage clock starts on the tick that leaves the stage zone
+    expect(w.timer.getHud().stageTime).toBeCloseTo(0.49, 9);
+    expect(w.timer.getHud().time).toBeCloseTo(2 + 1 / 64 + 0.5, 9);
+  });
+
   it('a finished run stays frozen in the start zone until the next run starts', () => {
     const w = world(STAGED);
     run(w, [10, 10, 10]);
