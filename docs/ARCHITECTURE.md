@@ -418,6 +418,9 @@ than its end face or edge bevel) and the brush it really enters first. Quake 3's
 DIST_EPSILON proud of it (surf_utopia_njv's ramp into the box: 0.016) became a step the hull hovering DIST_EPSILON above
 the ramp ran into. `tests/ramp_seams.test.ts` (synthetic, from that map's planes) and the opt-in
 `tests/ramp_seams_maps.test.ts` (real maps + KSF world-record replays) cover it.
+Static-prop hulls (model -2, from `.phy`) keep Quake 3's touch rule, CLIP_NOISE and face choice, and lose ties at
+fraction 0 to brushes and triangles: Source traces static props through VPhysics, not `CM_ClipBoxToBrush`, and the KSF
+replays on surf_summer_ksf's curved prop ramps match that rule (`PROP_HULL_MODEL`, `tests/prop_hulls.test.ts`).
 Displacements collide as two-sided triangles (see `docs/CONTRACT_CHANGES.md`).
 
 ## Automation & debugging

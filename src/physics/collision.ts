@@ -38,6 +38,18 @@
 //  - Real-map brushes should keep the compiler's bevel sides (Source-exact edge behaviour);
 //    addBrushBevels never removes them, it only adds missing ones.
 //
+// Static-prop collision hulls (brush model PROP_HULL_MODEL: the convex pieces of a prop's .phy) are not clipped
+// by those rules. Source doesn't trace props with CM_ClipBoxToBrush but through VPhysics, and on curved prop ramps
+// (surf_summer_ksf's) KSF world-record replays follow the rule this file used for every brush before (Quake 3's):
+//  - a move that ends within DIST_EPSILON of a hull face without reaching it still touches the hull (and is pulled
+//    back to DIST_EPSILON off it), while one that ends within CLIP_NOISE of that shell, or doesn't approach the
+//    face, misses it;
+//  - entering fractions are not clamped at 0 while the hull's faces are compared: the face whose pulled-back
+//    crossing comes last is reported, even when that lies behind the start (the trace's fraction is then 0).
+// Of hulls hit at 0, the last one checked whose pulled-back crossing lies behind the start wins (as before); a brush
+// or triangle hit at 0 wins over a hull hit at 0 (Source traces the world first, and a prop only replaces a strictly
+// shorter trace). Prop hulls never move: the moving-brush pass (setModelTransform) always uses the brush rules.
+//
 // Triangle meshes (displacement terrain, CollisionWorldOptions.triangles) live in their own BVH (a
 // Morton-order tree: linear-time to build, which matters for the ~180k terrain triangles of the heaviest
 // maps) and are traced with the same clipping rules as brushes: for box traces every triangle is a
@@ -77,6 +89,19 @@ import { Brush, BrushSide, CONTENTS_SOLID, DIST_EPSILON, MASK_ALL, TraceResult, 
  * Purely a culling margin: the exact result comes from the planes.
  */
 const BROAD_MARGIN = 1.0;
+/**
+ * Brush model number of static-prop collision hulls (PROP_COLLISION_MODEL in bsp/props.ts; physics doesn't
+ * depend on bsp, tests/prop_hulls.test.ts checks they agree). Their brushes keep Quake 3's touch rule (see the
+ * file comment).
+ */
+export const PROP_HULL_MODEL = -2;
+/**
+ * Float noise allowance of the prop-hull "missed" test (d2 >= DIST_EPSILON - CLIP_NOISE). A box that ended a
+ * previous move DIST_EPSILON off a hull face and now slides parallel to it has d1 ~= d2 ~= DIST_EPSILON; rounding
+ * could make d2 a hair below DIST_EPSILON while d1 - d2 is ~1e-15, which would turn (d1 - eps) / (d1 - d2) into an
+ * arbitrary fraction and stop the player mid-ramp. Five orders of magnitude below anything observable.
+ */
+const CLIP_NOISE = 1e-6;
 /** Boxes with extents smaller than this (length^2 < 1e-6) are traced as rays (like Source's Ray_t). */
 const POINT_EXTENT_SQ = 1e-6;
 const LEAF_MAX = 4;
@@ -1949,8 +1974,11 @@ export class CollisionWorld implements TraceWorld {
     const sideBevel = this.sideBevel;
     const stack = this.stack;
 
+    const slotModel = this.slotModel;
+
     let best = 1;
-    // for a hit at fraction 0: the real (not pulled back) crossing of the face it reports (see below)
+    // for a hit at fraction 0: the real (not pulled back) crossing of the face it reports (see below); Infinity
+    // for a prop hull, which every brush or triangle hit at 0 replaces
     let bestIn = -1;
     let hitSlot = -1;
     let hitSide = -1;
@@ -2064,6 +2092,8 @@ export class CollisionWorld implements TraceWorld {
         let inT = -1;
         let inLead = -1;
         let missed = false;
+        // a static-prop hull: Quake 3's touch rule (see the file comment)
+        const prop = slotModel[slot] === PROP_HULL_MODEL;
         const sEnd = slotSideStart[slot + 1];
         for (let s = slotSideStart[slot]; s < sEnd; s++) {
           if (isPoint && sideBevel[s] !== 0) continue;
@@ -2080,8 +2110,9 @@ export class CollisionWorld implements TraceWorld {
           if (d1 > 0) {
             startout = true;
             // in front of this face at both ends of the move: no contact with this brush (Source; see the
-            // file comment - ending within DIST_EPSILON of the face doesn't count)
-            if (d2 > 0) {
+            // file comment - ending within DIST_EPSILON of the face doesn't count). A prop hull is touched by a
+            // move into the face that ends within DIST_EPSILON of it (Quake 3).
+            if (d2 > 0 && (!prop || d2 >= DIST_EPSILON - CLIP_NOISE || d2 >= d1)) {
               missed = true;
               break;
             }
@@ -2090,9 +2121,9 @@ export class CollisionWorld implements TraceWorld {
           }
           if (d1 > d2) {
             // entering; like Source, a pulled-back crossing behind the start (the box starts inside this face's
-            // epsilon shell) counts as 0
+            // epsilon shell) counts as 0 (not for a prop hull: the latest pulled-back crossing leads, Quake 3)
             let f = (d1 - DIST_EPSILON) / (d1 - d2);
-            if (f <= 0) {
+            if (f <= 0 && !prop) {
               f = 0;
               const t = d1 / (d1 - d2);
               if (t > inT) {
@@ -2129,7 +2160,16 @@ export class CollisionWorld implements TraceWorld {
         // bevel whose shell it also starts in, which would stop it dead), and of brushes hit at 0 the one entered
         // first. Fractions above 0 are Source's.
         if (enterfrac < leavefrac && enterfrac > NEVER_UPDATED) {
-          if (enterfrac < best) {
+          if (prop) {
+            // Quake 3: the fraction clamps to 0 only here, so a hull entered "before the start" replaces another
+            // hull hit at 0 - but not a brush (see the file comment)
+            if (enterfrac < best && (best > 0 || bestIn === Infinity)) {
+              best = enterfrac < 0 ? 0 : enterfrac;
+              bestIn = Infinity;
+              hitSlot = slot;
+              hitSide = lead;
+            }
+          } else if (enterfrac < best) {
             best = enterfrac;
             bestIn = enterfrac === 0 ? inT : -1;
             hitSlot = slot;
