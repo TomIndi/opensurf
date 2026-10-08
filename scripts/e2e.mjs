@@ -15,6 +15,9 @@
 //   e  chat and console: messagemode, !commands, /silent commands, console cvars/commands, a rebound
 //      toggleconsole key
 //   f  map switching (built-in -> real -> real -> real -> built-in) without errors or memory growth
+//   g  complete runs of every built-in map through the real game (input -> usercmd -> movement -> triggers ->
+//      timer) steered by the map's autopilot: the timer finishes, the PB is recorded, the replay is saved and
+//      can be spectated (!replay), and the PB ghost shows on the next attempt
 //
 // Environment:
 //   SURF_TEST_MAPS        directory of .bsp files for c/d/f (those scenarios are skipped without it)
@@ -25,7 +28,7 @@
 //   E2E_PREFIX            screenshot name prefix (default "integ-")
 //   E2E_MAPS              comma list restricting the real maps of scenario c
 //   E2E_HEADFUL=1         show the browser
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -33,7 +36,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = resolve(process.env.E2E_OUT || join(tmpdir(), 'surf-e2e'));
 const PREFIX = process.env.E2E_PREFIX ?? 'integ-';
-const ONLY = new Set((process.env.E2E_ONLY || 'a,b,c,d,e,f').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean));
+const ONLY = new Set((process.env.E2E_ONLY || 'a,b,c,d,e,f,g').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean));
 const MAPS_DIR = process.env.SURF_TEST_MAPS && existsSync(process.env.SURF_TEST_MAPS) ? process.env.SURF_TEST_MAPS : null;
 const LARGE_DIR = process.env.SURF_TEST_MAPS_LARGE && existsSync(process.env.SURF_TEST_MAPS_LARGE) ? process.env.SURF_TEST_MAPS_LARGE : null;
 const VIEW = { width: 1280, height: 720 };
@@ -129,23 +132,6 @@ async function pollPage(page, fn, arg, timeout = 10000, every = 100) {
 
 const inBox = (o, z, m = 1) =>
   !!o && !!z && o.x >= z.mins.x - m && o.x <= z.maxs.x + m && o.y >= z.mins.y - m && o.y <= z.maxs.y + m && o.z >= z.mins.z - 40 && o.z <= z.maxs.z + m;
-
-async function measureFps(page, ms = 3000) {
-  return page.evaluate(
-    (ms) =>
-      new Promise((res) => {
-        let n = 0;
-        const t0 = performance.now();
-        const f = (t) => {
-          n++;
-          if (t - t0 < ms) requestAnimationFrame(f);
-          else res((n * 1000) / (t - t0));
-        };
-        requestAnimationFrame(f);
-      }),
-    ms,
-  );
-}
 
 async function heap(page) {
   return page.evaluate(async () => {
@@ -323,11 +309,12 @@ async function loadRealMap(page, name) {
   return Date.now() - t0;
 }
 
-async function scenarioC(browser, maps) {
+async function scenarioC(_browser, maps) {
   const r = {};
   for (const name of maps) {
     const m = {};
     r[name] = m;
+    const browser = await freshBrowser();
     log(`loading ${name}`);
     const t0 = Date.now();
     const { page, errors, consoleErrors } = await openPage(browser, `bsp=/__maps/${encodeURIComponent(name)}.bsp`);
@@ -365,7 +352,31 @@ async function scenarioC(browser, maps) {
       const a = info.faces.audit;
       check(a.invertedArea / (a.invertedArea + a.correctArea) < 0.05 && !info.faces.doubleSided, `${name}: <5% of the face area inverted, single-sided culling`, m.render.faces);
     }
-    m.fps = r1(await measureFps(page, 2500));
+    // fps, and the main-thread cost of the game's own frames (simulation + HUD + render submission; with a
+    // real GPU this is what limits the frame rate): Game.frame wrapped while the rAF loop runs at its own pace
+    const perf = await page.evaluate(
+      (ms) =>
+        new Promise((res) => {
+          const g = window.__surf.game;
+          const times = [];
+          const orig = g.frame;
+          g.frame = function (t) {
+            const a = performance.now();
+            orig.call(this, t);
+            times.push(performance.now() - a);
+          };
+          const t0 = performance.now();
+          setTimeout(() => {
+            delete g.frame;
+            const n = times.length;
+            times.sort((x, y) => x - y);
+            res({ fps: (n * 1000) / (performance.now() - t0), frameMs: n ? times[Math.floor(n / 2)] : null });
+          }, ms);
+        }),
+      3000,
+    );
+    m.fps = r1(perf.fps);
+    m.cpuFrameMs = perf.frameMs === null ? null : Math.round(perf.frameMs * 100) / 100;
     const stats = await page.evaluate(() => window.__surf.game.renderer.stats());
     m.drawCalls = stats.drawCalls;
     m.triangles = stats.triangles;
@@ -382,19 +393,23 @@ async function scenarioC(browser, maps) {
     await page.evaluate(() => window.__surf.exec('noclip'));
     let vp = 0;
     for (const ramp of ramps.slice(0, 2)) {
-      // a surfer's view: hovering off one end of the ramp, a bit out from the face and above it, looking along it
+      // a 3/4 view of the ramp: out from the face, back along it and above, looking at the face centre
       const t = ramp.tangent;
       const n = ramp.normal;
       const hl = Math.hypot(n.x, n.y) || 1;
-      const back = ramp.along[0] - 300;
+      const len = Math.min(1600, Math.max(400, (ramp.along[1] - ramp.along[0]) * 0.4));
       const eye = {
-        x: ramp.center.x + t.x * back + (n.x / hl) * 160,
-        y: ramp.center.y + t.y * back + (n.y / hl) * 160,
-        z: ramp.center.z + 200,
+        x: ramp.center.x + (n.x / hl) * len * 0.8 - t.x * len,
+        y: ramp.center.y + (n.y / hl) * len * 0.8 - t.y * len,
+        z: ramp.center.z + len * 0.35,
       };
       await page.evaluate((e) => window.__surf.teleport(e.x, e.y, e.z - 64), eye);
-      const yaw = (Math.atan2(t.y, t.x) * 180) / Math.PI - 12 * Math.sign(t.x * n.y - t.y * n.x || 1);
-      await page.evaluate(([p, y]) => window.__surf.setAngles(p, y), [14, yaw]);
+      const dx = ramp.center.x - eye.x;
+      const dy = ramp.center.y - eye.y;
+      const dz = ramp.center.z - eye.z;
+      const yaw = (Math.atan2(dy, dx) * 180) / Math.PI;
+      const pitch = (Math.atan2(-dz, Math.hypot(dx, dy)) * 180) / Math.PI;
+      await page.evaluate(([p, y]) => window.__surf.setAngles(p, y), [pitch, yaw]);
       await sleep(500);
       await shot(page, `c-${name}-ramp${++vp}`);
     }
@@ -402,81 +417,109 @@ async function scenarioC(browser, maps) {
     m.pageErrors = errors.length;
     m.consoleErrors = consoleErrors.slice(0, 5);
     check(errors.length === 0, `${name}: no uncaught page errors`, errors);
-    log(`${name}: load ${m.loadMs} ms, fps ${m.fps}, zones ${m.zones} ${m.zoneTypes.join('/')}, draw calls ${m.drawCalls}`);
+    log(`${name}: load ${m.loadMs} ms, fps ${m.fps} (SwiftShader), main-thread frame ${m.cpuFrameMs} ms, zones ${m.zones} ${m.zoneTypes.join('/')}, draw calls ${m.drawCalls}`);
     await page.close();
   }
   results.scenarios.c = r;
 }
 
-/** Surfs ramp candidates deterministically (paused game, runTicks); returns the per-ramp results. */
-async function surfRamps(page, name, maxRamps = 4) {
-  const ramps = await page.evaluate(() => window.__surf.findRamps(40));
+/**
+ * Surfs ramp candidates deterministically (paused game, runTicks). Each ramp gets two runs from the upstream end
+ * of its face, moving horizontally along it at 700 u/s: "hold" (strafe key into the ramp, the way a surfer stays on
+ * a ramp: speed is kept, never standing, never stuck) and "slide" (no keys: gravity pulls the player down the slope,
+ * so speed must build up). Only ticks spent on the ramp face are measured (a run ends when the player leaves it).
+ */
+async function surfRamps(page, maxRamps = 4) {
+  const ramps = await page.evaluate(() => window.__surf.findRamps(60));
   const out = [];
-  await page.evaluate(() => window.__surf.pause());
+  await page.evaluate(() => {
+    const S = window.__surf;
+    S.pause();
+    if (S.state().moveType !== 2) S.exec('noclip'); // MOVETYPE_WALK
+    // leave the start zone once (its prespeed cap must not touch the test runs)
+    const o = S.state().origin;
+    S.teleport(o.x, o.y, o.z + 4000);
+    S.runTicks(2);
+  });
   for (const ramp of ramps) {
     if (out.length >= maxRamps) break;
-    // only long ramps (room to surf for 2 s)
-    if (ramp.area < 200000) continue;
+    // long faces only: room for ~0.5 s of surfing at 700 u/s
+    if (ramp.along[1] - ramp.along[0] < 500 || ramp.width < 160) continue;
     const res = await page.evaluate((ramp) => {
       const S = window.__surf;
       const n = ramp.normal;
-      const hl = Math.hypot(n.x, n.y) || 1;
-      const tx = -n.y / hl;
-      const ty = n.x / hl;
+      const t = ramp.tangent;
+      const ax = ramp.axis;
+      const planeD = n.x * ramp.center.x + n.y * ramp.center.y + n.z * ramp.center.z;
       const rr = 16 * Math.abs(n.x) + 16 * Math.abs(n.y) + 36 * Math.abs(n.z);
-      // hull centre just off the face, a bit above the face centre
-      const c = { x: ramp.center.x + n.x * (rr + 1), y: ramp.center.y + n.y * (rr + 1), z: ramp.center.z + n.z * (rr + 1) };
-      S.releaseAll();
-      if (S.state().moveType !== 2) S.exec('noclip'); // back to MOVETYPE_WALK
-      S.teleport(c.x, c.y, c.z - 36);
-      if (S.inSolid()) return { skipped: 'in solid at start' };
-      const yaw = (Math.atan2(ty, tx) * 180) / Math.PI;
-      S.setAngles(0, yaw);
-      S.setVelocity(tx * 700, ty * 700, 0);
-      // strafe into the ramp: right = (sin yaw, -cos yaw) = (ty, -tx); into the ramp = -n
-      const rightInto = ty * -n.x + -tx * -n.y > 0;
-      S.press(rightInto ? 'moveright' : 'moveleft');
-      const speeds = [];
-      let maxSpeed = 0;
-      let inSolid = 0;
-      let stuck = 0;
-      let slowRun = 0;
-      let ground = 0;
-      const o0 = S.state().origin;
-      let ticks = 0;
-      for (let i = 0; i < 250; i++) {
-        if (S.runTicks(1) !== 1) break;
-        ticks++;
-        const s = S.state();
-        const v = s.velocity;
-        const sp = Math.hypot(v.x, v.y, v.z);
-        speeds.push(sp);
-        if (sp > maxSpeed) maxSpeed = sp;
-        if (S.inSolid()) inSolid++;
-        if (s.onGround) ground++;
-        slowRun = sp < 30 ? slowRun + 1 : 0;
-        if (slowRun > 15) stuck++;
-        // left the ramp (flew off / landed somewhere): stop measuring
-        if (s.origin.z < ramp.minZ - 400) break;
-      }
-      S.release(rightInto ? 'moveright' : 'moveleft');
-      const o1 = S.state().origin;
-      return {
-        start: o0,
-        ticks,
-        startSpeed: 700,
-        maxSpeed: Math.round(maxSpeed),
-        speedAt100: Math.round(speeds[Math.min(99, speeds.length - 1)] ?? 0),
-        endSpeed: Math.round(speeds[speeds.length - 1] ?? 0),
-        dropped: Math.round(o0.z - o1.z),
-        travelled: Math.round(Math.hypot(o1.x - o0.x, o1.y - o0.y)),
-        inSolid,
-        stuck,
-        groundTicks: ground,
-        normalZ: Math.round(n.z * 1000) / 1000,
+      // in-plane inward edge normals of the face polygon (for "is the hull still over the face")
+      const pts = ramp.points;
+      const edges = pts.map((a, i) => {
+        const b = pts[(i + 1) % pts.length];
+        const ex = b.x - a.x, ey = b.y - a.y, ez = b.z - a.z;
+        const l = Math.hypot(ex, ey, ez) || 1;
+        let qx = (n.y * ez - n.z * ey) / l, qy = (n.z * ex - n.x * ez) / l, qz = (n.x * ey - n.y * ex) / l;
+        if ((ramp.center.x - a.x) * qx + (ramp.center.y - a.y) * qy + (ramp.center.z - a.z) * qz < 0) {
+          qx = -qx;
+          qy = -qy;
+          qz = -qz;
+        }
+        return { a, qx, qy, qz };
+      });
+      const overFace = (c) => {
+        const d = n.x * c.x + n.y * c.y + n.z * c.z - planeD;
+        const px = c.x - n.x * d, py = c.y - n.y * d, pz = c.z - n.z * d;
+        return edges.every((e) => (px - e.a.x) * e.qx + (py - e.a.y) * e.qy + (pz - e.a.z) * e.qz > 24);
       };
+      const run = (hold) => {
+        S.releaseAll();
+        // start on the face, 25% in along its long axis, hull centre just off the face; move level along it
+        const a0 = ramp.along[0] + (ramp.along[1] - ramp.along[0]) * 0.25;
+        const p = { x: ramp.center.x + ax.x * a0, y: ramp.center.y + ax.y * a0, z: ramp.center.z + ax.z * a0 };
+        S.teleport(p.x + n.x * (rr + 0.5), p.y + n.y * (rr + 0.5), p.z + n.z * (rr + 0.5) - 36);
+        if (S.inSolid()) return { skipped: 'in solid at start' };
+        const yaw = (Math.atan2(t.y, t.x) * 180) / Math.PI;
+        S.setAngles(0, yaw);
+        S.setVelocity(t.x * 700, t.y * 700, 0);
+        // strafe into the ramp: right = (sin yaw, -cos yaw) = (t.y, -t.x); into the ramp = -n
+        const key = t.y * -n.x + -t.x * -n.y > 0 ? 'moveright' : 'moveleft';
+        if (hold) S.press(key);
+        let onRamp = 0;
+        let inSolid = 0;
+        let ground = 0;
+        let slow = 0;
+        let stuck = 0;
+        let first = 0;
+        let last = 0;
+        let minSpeed = Infinity;
+        for (let i = 0; i < 300; i++) {
+          if (S.runTicks(1) !== 1) break;
+          const s = S.state();
+          const o = s.origin;
+          const c = { x: o.x, y: o.y, z: o.z + 36 };
+          const gap = n.x * c.x + n.y * c.y + n.z * c.z - planeD - rr;
+          // on the face: touching its plane with the hull over the polygon (not at an edge or an end wall)
+          if (!(Math.abs(gap) < 4 && overFace(c))) break;
+          const v = s.velocity;
+          const sp = Math.hypot(v.x, v.y, v.z);
+          if (!onRamp) first = sp;
+          last = sp;
+          onRamp++;
+          if (sp < minSpeed) minSpeed = sp;
+          if (S.inSolid()) inSolid++;
+          if (s.onGround) ground++;
+          slow = sp < 30 ? slow + 1 : 0;
+          if (slow > 15) stuck++;
+        }
+        S.releaseAll();
+        return { onRamp, first: Math.round(first), last: Math.round(last), minSpeed: Math.round(minSpeed), inSolid, ground, stuck };
+      };
+      const hold = run(true);
+      if (hold.skipped) return hold;
+      const slide = run(false);
+      return { normalZ: Math.round(n.z * 1000) / 1000, length: Math.round(ramp.along[1] - ramp.along[0]), width: Math.round(ramp.width), hold, slide };
     }, ramp);
-    if (res.skipped) continue;
+    if (res.skipped || res.hold.onRamp < 10) continue;
     out.push(res);
   }
   await page.evaluate(() => {
@@ -488,40 +531,46 @@ async function surfRamps(page, name, maxRamps = 4) {
 
 async function scenarioD(browser, maps) {
   const r = {};
-  const want = ['surf_utopia_njv', 'surf_kitsune', 'surf_beginner', 'surf_mesa_fixed'].filter((m) => maps.includes(m));
+  const want = ['surf_utopia_njv', 'surf_kitsune', 'surf_beginner', 'surf_mesa_fixed', 'surf_rookie'].filter((m) => maps.includes(m));
   for (const name of want) {
     const { page, errors } = await openPage(browser, `bsp=/__maps/${name}.bsp`);
     await waitPlaying(page, 600000);
     await sleep(500);
-    const runs = await surfRamps(page, name);
+    const runs = await surfRamps(page);
     r[name] = runs;
     check(runs.length > 0, `${name}: found surfable ramps`);
     let gained = 0;
-    for (const [i, run] of runs.entries()) {
-      log(`${name} ramp ${i + 1}: nz ${run.normalZ} ticks ${run.ticks} speed 700 -> max ${run.maxSpeed} (end ${run.endSpeed}), dropped ${run.dropped}, travelled ${run.travelled}, inSolid ${run.inSolid}, stuck ${run.stuck}, ground ${run.groundTicks}`);
-      check(run.inSolid === 0, `${name} ramp ${i + 1}: never in solid`, run.inSolid);
-      check(run.stuck === 0, `${name} ramp ${i + 1}: never stuck`, run.stuck);
-      check(run.groundTicks <= 2, `${name} ramp ${i + 1}: surfing, not standing on the ramp`, run.groundTicks);
-      if (run.maxSpeed > run.startSpeed * 1.1) gained++;
+    let held = 0;
+    for (const [i, x] of runs.entries()) {
+      log(
+        `${name} ramp ${i + 1} (nz ${x.normalZ}, ${x.length} x ${x.width}): hold ${x.hold.onRamp} ticks ${x.hold.first} -> ${x.hold.last} u/s (min ${x.hold.minSpeed}), ` +
+          `slide ${x.slide.onRamp} ticks ${x.slide.first} -> ${x.slide.last} u/s; inSolid ${x.hold.inSolid + x.slide.inSolid}, ground ${x.hold.ground + x.slide.ground}, stuck ${x.hold.stuck + x.slide.stuck}`,
+      );
+      check(x.hold.inSolid + x.slide.inSolid === 0, `${name} ramp ${i + 1}: never in solid`);
+      check(x.hold.stuck + x.slide.stuck === 0, `${name} ramp ${i + 1}: never stuck`);
+      check(x.hold.ground + x.slide.ground === 0, `${name} ramp ${i + 1}: a surf ramp can't be stood on`, x.hold.ground + x.slide.ground);
+      check(x.hold.minSpeed > 0.8 * 700, `${name} ramp ${i + 1}: holding into the ramp keeps the speed (no rampbug stop)`, x.hold.minSpeed);
+      if (x.hold.onRamp >= 30) held++;
+      if (x.slide.onRamp >= 10 && x.slide.last > x.slide.first * 1.02) gained++;
     }
-    check(gained > 0, `${name}: speed builds up while surfing down a ramp`, runs.map((x) => x.maxSpeed));
-    // real-time: surf a bit and take a picture
+    check(held > 0, `${name}: holding the strafe key keeps the player on a ramp face for 0.3 s+`, runs.map((x) => x.hold.onRamp));
+    check(gained > 0, `${name}: sliding down a ramp builds speed`, runs.map((x) => [x.slide.first, x.slide.last]));
+    // real time: surf the biggest ramp for a moment and take a picture
     const ramp = (await page.evaluate(() => window.__surf.findRamps(1)))[0];
     if (ramp) {
       await page.evaluate((ramp) => {
         const S = window.__surf;
         const n = ramp.normal;
-        const hl = Math.hypot(n.x, n.y) || 1;
-        const tx = -n.y / hl;
-        const ty = n.x / hl;
+        const t = ramp.tangent;
+        const ax = ramp.axis;
         const rr = 16 * Math.abs(n.x) + 16 * Math.abs(n.y) + 36 * Math.abs(n.z);
-        S.teleport(ramp.center.x + n.x * (rr + 1), ramp.center.y + n.y * (rr + 1), ramp.center.z + n.z * (rr + 1) - 36);
-        const yaw = (Math.atan2(ty, tx) * 180) / Math.PI;
-        S.setAngles(8, yaw);
-        S.setVelocity(tx * 900, ty * 900, 0);
-        S.press(ty * -n.x + -tx * -n.y > 0 ? 'moveright' : 'moveleft');
+        const a0 = ramp.along[0] + (ramp.along[1] - ramp.along[0]) * 0.2;
+        S.teleport(ramp.center.x + ax.x * a0 + n.x * (rr + 0.5), ramp.center.y + ax.y * a0 + n.y * (rr + 0.5), ramp.center.z + ax.z * a0 + n.z * (rr + 0.5) - 36);
+        S.setAngles(10, (Math.atan2(t.y, t.x) * 180) / Math.PI);
+        S.setVelocity(t.x * 900, t.y * 900, 0);
+        S.press(t.y * -n.x + -t.x * -n.y > 0 ? 'moveright' : 'moveleft');
       }, ramp);
-      await sleep(600);
+      await sleep(1200);
       await shot(page, `d-${name}-surfing`);
       await page.evaluate(() => window.__surf.releaseAll());
     }
@@ -682,17 +731,115 @@ async function scenarioF(browser, maps) {
   await page.close();
 }
 
+async function scenarioG(browser) {
+  const r = {};
+  const { page, errors } = await openPage(browser);
+  for (const id of ['surf_tutorial', 'surf_neon', 'surf_skyline']) {
+    await page.evaluate((id) => void window.__surf.loadBuiltin(id), id);
+    await waitPlaying(page, 60000);
+    await sleep(300);
+    const res = await page.evaluate(async (id) => {
+      const S = window.__surf;
+      const g = S.game;
+      const { buildBuiltinCourse } = await import('/src/map/builtin/index.ts');
+      const { Autopilot } = await import('/src/map/builtin/autopilot.ts');
+      const bc = buildBuiltinCourse(id);
+      const course = bc.course;
+      const dests = course.sections.map((sec) => bc.builder.destination(sec.dest));
+      S.pause(); // deterministic: only runTicks advances the simulation
+      S.say('/r');
+      const sess = g.session;
+      const pilot = new Autopilot(course, sess.collision);
+      const cmd = { forwardmove: 0, sidemove: 0, upmove: 0, buttons: 0, viewangles: { pitch: 0, yaw: 0, roll: 0 } };
+      const held = new Set();
+      const hold = (name, on) => {
+        if (on && !held.has(name)) {
+          S.press(name);
+          held.add(name);
+        } else if (!on && held.has(name)) {
+          S.release(name);
+          held.delete(name);
+        }
+      };
+      const ti = 1 / 100;
+      let fails = 0;
+      let ticks = 0;
+      let last = { ...sess.player.origin };
+      let finishedAt = -1;
+      for (; ticks < 30000; ticks++) {
+        pilot.think(sess.player, cmd, ti);
+        S.setAngles(cmd.viewangles.pitch, cmd.viewangles.yaw);
+        hold('forward', cmd.forwardmove > 0);
+        hold('back', cmd.forwardmove < 0);
+        hold('moveright', cmd.sidemove > 0);
+        hold('moveleft', cmd.sidemove < 0);
+        hold('jump', (cmd.buttons & 2) !== 0);
+        if (S.runTicks(1) !== 1) break;
+        const o = sess.player.origin;
+        if (Math.hypot(o.x - last.x, o.y - last.y, o.z - last.z) > 300) {
+          // a map teleport (fail or stage portal): continue from that section like the unit tests
+          let si = -1;
+          dests.forEach((d, k) => {
+            if (d && Math.hypot(d.origin.x - o.x, d.origin.y - o.y, d.origin.z - o.z) < 64) si = k;
+          });
+          const cur = pilot.ramps[pilot.cur]?.section ?? 0;
+          if (si >= 0 && si <= cur) fails++;
+          if (si >= 0) pilot.resetToSection(si);
+        }
+        last = { x: o.x, y: o.y, z: o.z };
+        const st = sess.timer.getHud().state;
+        if (st === 'finished' && finishedAt < 0) finishedAt = ticks;
+        if (finishedAt >= 0 && ticks > finishedAt + 50) break;
+      }
+      for (const n of [...held]) hold(n, false);
+      const hud = sess.timer.getHud();
+      const recs = sess.timer.getRecords(0);
+      return { ticks, fails, state: hud.state, time: hud.time, pb: hud.pb, records: recs.length, recordTime: recs[0]?.time ?? null };
+    }, id);
+    r[id] = res;
+    log(`${id}: ${res.state} in ${res.time?.toFixed(2)} s after ${res.ticks} ticks (fails ${res.fails}), records ${res.records}, pb ${res.pb}`);
+    check(res.state === 'finished', `${id}: an autopilot run through the game finishes the map`, res);
+    check(res.records >= 1 && Math.abs((res.recordTime ?? 0) - res.time) < 0.02, `${id}: the finished run is saved as the PB`, res);
+    // the replay of that run: saved, spectatable, and shown as the ghost on the next attempt
+    await page.evaluate(() => window.__surf.resume());
+    const hasReplay = await pollPage(page, () => !!window.__surf.game.session.replay.getPb(0), null, 5000);
+    check(!!hasReplay, `${id}: the PB replay is available`);
+    await page.evaluate(() => window.__surf.say('!replay'));
+    await sleep(300);
+    const spec = await st(page);
+    check(spec.spectating, `${id}: !replay spectates the PB replay`, spec.spectating);
+    await sleep(1500);
+    await shot(page, `g-${id}-replay`);
+    await page.keyboard.press('Space'); // jump leaves the replay
+    const back = await pollPage(page, () => !window.__surf.state().spectating, null, 5000);
+    check(!!back, `${id}: jump leaves the replay`);
+    await page.evaluate(() => window.__surf.say('/r'));
+    const ghost = await page.evaluate(() => !!window.__surf.game.session.replay.ghostAt(0));
+    check(ghost, `${id}: the PB ghost is shown on the next attempt`);
+    await sleep(800);
+    await shot(page, `g-${id}-ghost`);
+  }
+  check(errors.length === 0, 'no uncaught page errors', errors);
+  results.scenarios.g = r;
+  await page.close();
+}
+
 // ------------------------------------------------------------------------------------------ main
 
 let base = '';
 let server = null;
+let viteCache = '';
 let browser = null;
+/** Closes the current browser and launches a new one (set up in main). */
+let freshBrowser = async () => browser;
 
 async function main() {
   const { createServer } = await import('vite');
   server = await createServer({
     root: ROOT,
     configFile: join(ROOT, 'vite.config.ts'),
+    // own dependency cache: a dev server already running on this tree must not re-optimize it under the pages
+    cacheDir: (viteCache = mkdtempSync(join(tmpdir(), 'surf-e2e-vite-'))),
     logLevel: 'warn',
     // no HMR / file watching: other work in the tree must not reload the page under test
     server: { port: 0, host: '127.0.0.1', strictPort: false, hmr: false, watch: { ignored: ['**/*'] } },
@@ -703,29 +850,40 @@ async function main() {
   log(`dev server ${base}; maps: ${MAPS_DIR ?? '(none: real-map scenarios skipped)'}`);
   const { chromium } = await import('playwright-core');
   const executablePath = findChromium();
-  browser = await chromium.launch({
-    executablePath,
-    headless: !process.env.E2E_HEADFUL,
-    args: [
-      '--use-angle=swiftshader',
-      '--enable-unsafe-swiftshader',
-      '--ignore-gpu-blocklist',
-      '--enable-precise-memory-info',
-      '--js-flags=--expose-gc',
-      '--autoplay-policy=no-user-gesture-required',
-    ],
-  });
+  const launch = () =>
+    chromium.launch({
+      executablePath,
+      headless: !process.env.E2E_HEADFUL,
+      args: [
+        '--use-angle=swiftshader',
+        '--enable-unsafe-swiftshader',
+        '--ignore-gpu-blocklist',
+        '--enable-precise-memory-info',
+        '--js-flags=--expose-gc',
+        '--autoplay-policy=no-user-gesture-required',
+      ],
+    });
+  browser = await launch();
   log(`chromium ${browser.version()} (${executablePath ?? 'playwright default'})`);
+  // a fresh browser per scenario (and per real map): a hung GPU process (software rendering) can't take the rest
+  // of the run down
+  const fresh = async () => {
+    await browser?.close().catch(() => undefined);
+    browser = await launch();
+    return browser;
+  };
+  freshBrowser = fresh;
 
   const only = process.env.E2E_MAPS ? process.env.E2E_MAPS.split(',').map((s) => s.trim()) : null;
   const maps = listMaps(MAPS_DIR, only);
   const large = process.env.E2E_LARGE ? listMaps(LARGE_DIR, only) : [];
-  const run = async (id, fn) => {
+  const run = async (id, fn, keepBrowser = false) => {
     if (!ONLY.has(id)) return;
     current = id;
     const t0 = Date.now();
     log('---- start');
     try {
+      if (!keepBrowser) await fresh();
       return await fn();
     } catch (e) {
       check(false, 'scenario crashed', String(e?.stack ?? e).slice(0, 600));
@@ -733,14 +891,16 @@ async function main() {
       log(`---- done in ${((Date.now() - t0) / 1000).toFixed(1)} s`);
     }
   };
-  const menuPage = await run('a', () => scenarioA(browser));
-  await run('b', () => scenarioB(browser, ONLY.has('a') ? menuPage : null));
+  const menuPage = await run('a', () => scenarioA(browser), true);
+  // b continues on a's page (the built-in tab) in the same browser
+  await run('b', () => scenarioB(browser, ONLY.has('a') ? menuPage : null), ONLY.has('a'));
   if (maps.length) {
     await run('c', () => scenarioC(browser, [...maps, ...large]));
     await run('d', () => scenarioD(browser, maps));
   } else if (ONLY.has('c') || ONLY.has('d')) note('SURF_TEST_MAPS not set: scenarios c and d skipped');
   await run('e', () => scenarioE(browser));
   if (maps.length) await run('f', () => scenarioF(browser, maps));
+  await run('g', () => scenarioG(browser));
   current = '';
 }
 
@@ -753,6 +913,7 @@ try {
 } finally {
   await browser?.close().catch(() => undefined);
   await server?.close().catch(() => undefined);
+  if (viteCache) rmSync(viteCache, { recursive: true, force: true });
 }
 results.failures = failures;
 results.notes = notes;

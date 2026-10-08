@@ -120,6 +120,9 @@ export function fallbackMaterial(name: string, reflectivity?: Vec3, width?: numb
 export function loadSky(skyName: string, pak: PakFile | null): SkyDef;
 ```
 ### bsp render + loader (bsp-render)
+Model entities (prop_dynamic, prop_physics…) are drawn the way the engine poses them: single-bone models in the
+first frame of their starting sequence (`DefaultAnim`, else sequence 0; e.g. an "idle" that turns the root 90°), folded
+into `RenderProp.origin/angles`. Static props keep the bind pose.
 ```ts
 // bsp/geometry.ts
 export function buildRenderBatches(bsp: BspFile, materials: Map<string, MaterialDef>, areas?: Int32Array):
@@ -293,10 +296,16 @@ spawn in the start zone, keyboard movement, leaving the start starts the timer, 
 `!r`; (c) every map in `$SURF_TEST_MAPS` via `?bsp=`: load time, start-zone placement, not in solid, face audit,
 screenshots at the spawn and ramp viewpoints, fps; (d) deterministic surf runs on the maps' biggest ramps (speed
 builds, never stuck or in solid); (e) chat/console (messagemode, `!help`, silent `/r`, cvars, `getpos`, a rebound
-`toggleconsole` key, scoreboard, pause); (f) map switching without page errors or JS-heap / GPU-resource growth.
+`toggleconsole` key, scoreboard, pause); (f) map switching without page errors or JS-heap / GPU-resource growth;
+(g) complete runs of every built-in map through the real input pipeline, steered by the map's autopilot
+(`src/map/builtin/autopilot.ts` pressing +commands and setting view angles each tick): the timer finishes, the PB is
+saved, `!replay` spectates the replay and the PB ghost shows on the next attempt.
 Any uncaught page error fails the run. Env: `SURF_TEST_MAPS`, `SURF_TEST_MAPS_LARGE` (+`E2E_LARGE=1`),
 `CHROMIUM_PATH`, `E2E_OUT` (screenshots + `<prefix>results.json`), `E2E_PREFIX`, `E2E_ONLY=a,c`, `E2E_MAPS=...`.
-SwiftShader renders a few fps at 1280x720, so real-time checks poll instead of assuming frame rates.
+SwiftShader renders a few fps at 1280x720, so real-time checks poll instead of assuming frame rates; scenario (c)
+also reports the main-thread cost of the game's own frames (what limits fps on a real GPU). Each scenario (and each
+real map) gets a fresh browser, and the dev server uses a private Vite dependency cache, so a dev server already
+running on the tree (or the browser tests in `npm test`, which do the same) can't re-optimize dependencies under it.
 
 ## Data flow
 

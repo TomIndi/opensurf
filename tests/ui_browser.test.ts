@@ -1,9 +1,12 @@
 // End-to-end UI test: serves ui-harness.html (real Ui + SoundSystem + MockGame) with Vite and drives it in
 // headless Chromium. Skipped when no Chromium is installed (CI) or with SURF_UI_BROWSER=0.
-import { existsSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+
+/** Private Vite dependency cache of this file's dev server (removed afterwards). */
+let viteCache = '';
 
 function findChromium(): string | null {
   if (process.env.SURF_UI_BROWSER === '0') return null;
@@ -49,10 +52,14 @@ export function buildBuiltinMap() { throw new Error('stub'); }`,
     }
     server = await createServer({
       configFile: false,
+      // own dependency cache: other dev servers on this tree (tests in parallel, a running `npm run dev`) must not
+      // re-optimize the shared node_modules/.vite under this page
+      cacheDir: (viteCache = mkdtempSync(join(tmpdir(), 'surf-vite-ui-'))),
       root: ROOT,
       base: './',
       logLevel: 'error',
-      server: { port: 0, host: '127.0.0.1', strictPort: false, fs: { allow: [ROOT, tmpdir()] } },
+      // no HMR / file watching: other work in the tree must not reload the page under the test
+      server: { port: 0, host: '127.0.0.1', strictPort: false, hmr: false, watch: { ignored: ['**/*'] }, fs: { allow: [ROOT, tmpdir()] } },
       optimizeDeps: { exclude: ['node-unrar-js'] },
       resolve: { alias },
     });
@@ -68,13 +75,15 @@ export function buildBuiltinMap() { throw new Error('stub'); }`,
       if (m.type() === 'error' && !/Failed to load resource|ERR_FAILED|net::/.test(m.text())) errors.push(`console.error: ${m.text()}`);
     });
     await page.goto(`http://127.0.0.1:${port}/ui-harness.html?scene=menu`, { waitUntil: 'load' });
-    await page.waitForFunction(() => (window as any).__harness?.ready, null, { timeout: 60000 });
+    // generous: the full suite runs other browser/real-map tests in parallel (CPU contention)
+    await page.waitForFunction(() => (window as any).__harness?.ready, null, { timeout: 180000 });
     await wait(300);
-  }, 120000);
+  }, 240000);
 
   afterAll(async () => {
     await browser?.close();
     await server?.close();
+    if (viteCache) rmSync(viteCache, { recursive: true, force: true });
   });
 
   it('main menu renders the catalog-driven home page', async () => {

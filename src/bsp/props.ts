@@ -157,6 +157,19 @@ export interface StudioModel {
   /** skinFamilies[family][materialRef] = texture index. */
   skinFamilies: number[][];
   meshes: StudioMesh[];
+  /**
+   * Single-bone models: the root bone's pose at frame 0 of each sequence (by lower-case label; null = the bind
+   * pose the vertices are stored in) and of sequence 0 (`defaultPose`, null when it is the bind pose). Animated entities
+   * (prop_dynamic...) are drawn in that pose by the engine: e.g. models whose "idle" turns the root 90 degrees.
+   */
+  sequencePoses?: Map<string, RootPose | null>;
+  defaultPose?: RootPose | null;
+}
+
+/** A rigid root-bone transform in model space: unit quaternion (x, y, z, w) and translation. */
+export interface RootPose {
+  q: [number, number, number, number];
+  t: [number, number, number];
 }
 
 function cstr(d: Uint8Array, o: number, max = 256): string {
@@ -170,6 +183,18 @@ function cstr(d: Uint8Array, o: number, max = 256): string {
 }
 
 const MSTUDIOVERTEX_SIZE = 48;
+const BONE_SIZE = 216;
+const ANIMDESC_SIZE = 100;
+const SEQDESC_SIZE = 212;
+// mstudioanim_t flags
+const ANIM_RAWPOS = 0x01;
+const ANIM_RAWROT = 0x02;
+const ANIM_ANIMPOS = 0x04;
+const ANIM_ANIMROT = 0x08;
+const ANIM_DELTA = 0x10;
+const ANIM_RAWROT2 = 0x20;
+/** mstudioanimdesc_t flag: the newer frame-based animation encoding (not decoded: bind pose). */
+const ANIMDESC_FRAMEANIM = 0x40;
 const BODYPART_SIZE = 16;
 const MODEL_SIZE = 148;
 const MESH_SIZE = 116;
@@ -324,6 +349,187 @@ function readVtxMeshes(vtx: Uint8Array, layout: VtxLayout, partModels: number[],
  * by `body` (Source's body group value: part model = floor(body / part.base) % part.numModels; 0 = defaults).
  * Triangles are wound counter-clockwise around the vertex normals (front faces for three.js).
  */
+function halfToFloat(h: number): number {
+  const sign = h & 0x8000 ? -1 : 1;
+  const exp = (h >> 10) & 0x1f;
+  const frac = h & 0x3ff;
+  if (exp === 0) return sign * frac * 2 ** -24;
+  if (exp === 31) return frac ? NaN : sign * Infinity;
+  return sign * (1 + frac / 1024) * 2 ** (exp - 15);
+}
+
+/** Quaternion from Source RadianEuler angles (x = roll, y = pitch, z = yaw, radians). */
+export function eulerToQuat(x: number, y: number, z: number): [number, number, number, number] {
+  const sr = Math.sin(x * 0.5);
+  const cr = Math.cos(x * 0.5);
+  const sp = Math.sin(y * 0.5);
+  const cp = Math.cos(y * 0.5);
+  const sy = Math.sin(z * 0.5);
+  const cy = Math.cos(z * 0.5);
+  return [sr * cp * cy - cr * sp * sy, cr * sp * cy + sr * cp * sy, cr * cp * sy - sr * sp * cy, cr * cp * cy + sr * sp * sy];
+}
+
+/**
+ * Frame-0 root-bone poses of the sequences of a single-bone model (see StudioModel.sequencePoses), from the
+ * public MDL layout: bone 0's bind pose and scales (mstudiobone_t), each sequence's first animation
+ * (mstudioseqdesc_t -> anim index table -> mstudioanimdesc_t) and that animation's entry for bone 0
+ * (mstudioanim_t: raw Quaternion48/64 and Vector48 values, or run-length encoded values scaled by the bone's
+ * rotscale/posscale). Animations in external blocks (.ani) or the frame-based encoding keep the bind pose.
+ */
+function readSequencePoses(mdl: Uint8Array, dv: DataView): { byLabel: Map<string, RootPose>; first: RootPose | null } | null {
+  const len = mdl.length;
+  const ok = (o: number, n: number) => o >= 0 && o + n <= len;
+  const i32 = (o: number): number => (ok(o, 4) ? dv.getInt32(o, true) : 0);
+  const f32 = (o: number): number => (ok(o, 4) ? dv.getFloat32(o, true) : 0);
+  const i16 = (o: number): number => (ok(o, 2) ? dv.getInt16(o, true) : 0);
+  const u16 = (o: number): number => (ok(o, 2) ? dv.getUint16(o, true) : 0);
+  if (i32(156) !== 1) return null; // single-bone models only (skinned rigs would need full posing)
+  const b = i32(160);
+  if (!ok(b, BONE_SIZE)) return null;
+  const bindPos: [number, number, number] = [f32(b + 32), f32(b + 36), f32(b + 40)];
+  const bindQuat: [number, number, number, number] = [f32(b + 44), f32(b + 48), f32(b + 52), f32(b + 56)];
+  const bindRot = [f32(b + 60), f32(b + 64), f32(b + 68)];
+  const posScale = [f32(b + 72), f32(b + 76), f32(b + 80)];
+  const rotScale = [f32(b + 84), f32(b + 88), f32(b + 92)];
+  const numAnims = i32(180);
+  const animIndex = i32(184);
+  const numSeq = i32(188);
+  const seqIndex = i32(192);
+  if (numSeq <= 0 || numSeq > 4096 || numAnims <= 0 || numAnims > 4096) return null;
+  // first value of a run-length encoded mstudioanimvalue_t stream
+  const rle0 = (at: number): number => (ok(at, 4) && mdl[at] > 0 ? i16(at + 2) : 0);
+  const frame0 = (a: number): RootPose | null => {
+    if (a < 0 || a >= numAnims) return null;
+    const ao = animIndex + a * ANIMDESC_SIZE;
+    if (!ok(ao, ANIMDESC_SIZE)) return null;
+    if (i32(ao + 12) & ANIMDESC_FRAMEANIM) return null;
+    let block = i32(ao + 52);
+    let index = i32(ao + 56);
+    const sectionIndex = i32(ao + 80);
+    if (i32(ao + 84) > 0 && sectionIndex > 0) {
+      block = i32(ao + sectionIndex);
+      index = i32(ao + sectionIndex + 4);
+    }
+    if (block !== 0 || index <= 0) return null;
+    let p = ao + index;
+    for (let guard = 0; guard < 512 && ok(p, 4); guard++) {
+      const bone = mdl[p];
+      const fl = mdl[p + 1];
+      const next = i16(p + 2);
+      if (bone === 0) {
+        const delta = (fl & ANIM_DELTA) !== 0;
+        const d = p + 4;
+        let q: [number, number, number, number] = delta ? [0, 0, 0, 1] : [bindQuat[0], bindQuat[1], bindQuat[2], bindQuat[3]];
+        let t: [number, number, number] = delta ? [0, 0, 0] : [bindPos[0], bindPos[1], bindPos[2]];
+        if (fl & ANIM_RAWROT2) {
+          if (!ok(d, 8)) return null;
+          const lo = dv.getUint32(d, true);
+          const hi = dv.getUint32(d + 4, true);
+          const xb = lo & 0x1fffff;
+          const yb = ((lo >>> 21) | ((hi & 0x3ff) << 11)) >>> 0;
+          const zb = (hi >>> 10) & 0x1fffff;
+          const wneg = hi >>> 31;
+          const x = (xb - 1048576) * (1 / 1048576.5);
+          const y = (yb - 1048576) * (1 / 1048576.5);
+          const z = (zb - 1048576) * (1 / 1048576.5);
+          const w = Math.sqrt(Math.max(0, 1 - x * x - y * y - z * z)) * (wneg ? -1 : 1);
+          q = [x, y, z, w];
+        } else if (fl & ANIM_RAWROT) {
+          const x = (u16(d) - 32768) * (1 / 32768);
+          const y = (u16(d + 2) - 32768) * (1 / 32768);
+          const zw = u16(d + 4);
+          const z = ((zw & 0x7fff) - 16384) * (1 / 16384);
+          const w = Math.sqrt(Math.max(0, 1 - x * x - y * y - z * z)) * (zw & 0x8000 ? -1 : 1);
+          q = [x, y, z, w];
+        } else if (fl & ANIM_ANIMROT) {
+          const e = [0, 0, 0];
+          for (let k = 0; k < 3; k++) {
+            const off = i16(d + k * 2);
+            e[k] = (delta ? 0 : bindRot[k]) + (off ? rle0(d + off) : 0) * rotScale[k];
+          }
+          q = eulerToQuat(e[0], e[1], e[2]);
+        }
+        if (fl & ANIM_RAWPOS) {
+          const v = d + (fl & ANIM_RAWROT ? 6 : 0) + (fl & ANIM_RAWROT2 ? 8 : 0);
+          t = [halfToFloat(u16(v)), halfToFloat(u16(v + 2)), halfToFloat(u16(v + 4))];
+        } else if (fl & ANIM_ANIMPOS) {
+          const v = d + (fl & ANIM_ANIMROT ? 6 : 0);
+          for (let k = 0; k < 3; k++) {
+            const off = i16(v + k * 2);
+            t[k] = (delta ? 0 : bindPos[k]) + (off ? rle0(v + off) : 0) * posScale[k];
+          }
+        }
+        const ql = Math.hypot(q[0], q[1], q[2], q[3]);
+        if (!(ql > 1e-6) || !t.every(Number.isFinite)) return null;
+        return { q: [q[0] / ql, q[1] / ql, q[2] / ql, q[3] / ql], t };
+      }
+      if (!next) break;
+      p += next;
+    }
+    // bone 0 not animated: bind pose
+    return { q: [bindQuat[0], bindQuat[1], bindQuat[2], bindQuat[3]], t: [bindPos[0], bindPos[1], bindPos[2]] };
+  };
+  const byLabel = new Map<string, RootPose>();
+  let first: RootPose | null = null;
+  for (let sq = 0; sq < numSeq && sq < 512; sq++) {
+    const so = seqIndex + sq * SEQDESC_SIZE;
+    if (!ok(so, SEQDESC_SIZE)) break;
+    const pose = frame0(i16(so + i32(so + 60)));
+    if (sq === 0) first = pose;
+    const label = cstr(mdl, so + i32(so + 4)).toLowerCase();
+    if (pose && label && !byLabel.has(label)) byLabel.set(label, pose);
+  }
+  return { byLabel, first };
+}
+
+/** True when a pose is the identity (within float noise). */
+function isIdentityPose(p: RootPose): boolean {
+  const [x, y, z, w] = p.q;
+  return Math.abs(x) < 1e-4 && Math.abs(y) < 1e-4 && Math.abs(z) < 1e-4 && Math.abs(Math.abs(w) - 1) < 1e-4 && Math.hypot(p.t[0], p.t[1], p.t[2]) < 1e-3;
+}
+
+/**
+ * The placement of a model drawn in `pose`: the entity transform (origin, Source angles, uniform scale) composed
+ * with the root pose, as an origin + angles pair (Source MatrixAngles decomposition of R(angles) * R(pose)).
+ */
+export function composePose(origin: Vec3, angles: QAngle, scale: number, pose: RootPose): { origin: Vec3; angles: QAngle } {
+  const d = Math.PI / 180;
+  const sy = Math.sin(angles.yaw * d), cy = Math.cos(angles.yaw * d);
+  const sp = Math.sin(angles.pitch * d), cp = Math.cos(angles.pitch * d);
+  const sr = Math.sin(angles.roll * d), cr = Math.cos(angles.roll * d);
+  // entity basis: columns forward, left, up (model x, y, z)
+  const F = [cp * cy, cp * sy, -sp];
+  const L = [sr * sp * cy - cr * sy, sr * sp * sy + cr * cy, sr * cp];
+  const U = [cr * sp * cy + sr * sy, cr * sp * sy - sr * cy, cr * cp];
+  const [x, y, z, w] = pose.q;
+  // pose rotation matrix columns
+  const c0 = [1 - 2 * (y * y + z * z), 2 * (x * y + w * z), 2 * (x * z - w * y)];
+  const c1 = [2 * (x * y - w * z), 1 - 2 * (x * x + z * z), 2 * (y * z + w * x)];
+  const c2 = [2 * (x * z + w * y), 2 * (y * z - w * x), 1 - 2 * (x * x + y * y)];
+  const mul = (c: number[]) => [F[0] * c[0] + L[0] * c[1] + U[0] * c[2], F[1] * c[0] + L[1] * c[1] + U[1] * c[2], F[2] * c[0] + L[2] * c[1] + U[2] * c[2]];
+  const f = mul(c0);
+  const l = mul(c1);
+  const u = mul(c2);
+  const xy = Math.hypot(f[0], f[1]);
+  let pitch: number;
+  let yaw: number;
+  let roll: number;
+  if (xy > 0.001) {
+    yaw = Math.atan2(f[1], f[0]);
+    pitch = Math.atan2(-f[2], xy);
+    roll = Math.atan2(l[2], u[2]);
+  } else {
+    yaw = Math.atan2(-l[0], l[1]);
+    pitch = Math.atan2(-f[2], xy);
+    roll = 0;
+  }
+  const t = mul(pose.t);
+  return {
+    origin: { x: origin.x + t[0] * scale, y: origin.y + t[1] * scale, z: origin.z + t[2] * scale },
+    angles: { pitch: pitch / d, yaw: yaw / d, roll: roll / d },
+  };
+}
+
 export function decodeStudioModel(name: string, mdl: Uint8Array, vvd: Uint8Array, vtx: Uint8Array, body = 0): StudioModel {
   const dv = new DataView(mdl.buffer, mdl.byteOffset, mdl.byteLength);
   const len = mdl.length;
@@ -447,7 +653,18 @@ export function decodeStudioModel(name: string, mdl: Uint8Array, vvd: Uint8Array
       meshes.push({ materialRef: meshMaterials[b][m], positions, normals, uvs, indices });
     }
   }
-  return { name, version, textures, cdMaterials, skinFamilies, meshes };
+  let sequencePoses: Map<string, RootPose | null> | undefined;
+  let defaultPose: RootPose | null = null;
+  try {
+    const sp = readSequencePoses(mdl, dv);
+    if (sp) {
+      sequencePoses = new Map([...sp.byLabel].map(([k, p]) => [k, isIdentityPose(p) ? null : p]));
+      defaultPose = sp.first && !isIdentityPose(sp.first) ? sp.first : null;
+    }
+  } catch {
+    /* no animation data: the bind pose */
+  }
+  return { name, version, textures, cdMaterials, skinFamilies, meshes, sequencePoses, defaultPose };
 }
 
 /**
@@ -933,6 +1150,8 @@ export interface PropInstance {
   color: [number, number, number] | null;
   alpha: number;
   entity: number;
+  /** Model entities: the starting sequence (DefaultAnim), null = sequence 0. Static props are drawn unposed. */
+  sequence?: string | null;
 }
 
 /** Decodes models once per (model, body), resolves materials once per (model, body, skin), emits RenderProps. */
@@ -1066,11 +1285,20 @@ class PropBuilder {
       ambient = null;
     }
     const area = this.areaAt(p.origin, p.lightingOrigin);
+    // animated entities are drawn in their starting sequence's first frame (static props: the bind pose)
+    let origin: Vec3 = p.origin;
+    let angles: QAngle = p.angles;
+    if (p.entity >= 0) {
+      const label = p.sequence ? p.sequence.trim().toLowerCase() : '';
+      // DefaultAnim names a sequence of the model: its pose; otherwise (or unknown) sequence 0
+      const pose = label && model.sequencePoses?.has(label) ? model.sequencePoses.get(label) : model.defaultPose;
+      if (pose) ({ origin, angles } = composePose(p.origin, p.angles, p.scale, pose));
+    }
     for (const { material, mesh } of list) {
       const rp: RenderProp = {
         model: model.name,
-        origin: { x: p.origin.x, y: p.origin.y, z: p.origin.z },
-        angles: { pitch: p.angles.pitch, yaw: p.angles.yaw, roll: p.angles.roll },
+        origin: { x: origin.x, y: origin.y, z: origin.z },
+        angles: { pitch: angles.pitch, yaw: angles.yaw, roll: angles.roll },
         positions: p.scale === 1 ? mesh.positions : this.scaledPositions(mesh, p.scale),
         normals: mesh.normals,
         uvs: mesh.uvs,
@@ -1164,6 +1392,7 @@ export function entityPropInstances(entities: MapEntity[]): PropInstance[] {
       color: parseRgb255(e.kv.rendercolor),
       alpha,
       entity: e.index,
+      sequence: (e.kv.defaultanim ?? '').trim() || null,
     });
   }
   return out;

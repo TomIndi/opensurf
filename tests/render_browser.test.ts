@@ -2,9 +2,13 @@
 // synthetic fixture map (sky face orientation, 3D skybox, lightmaps, brush entity state, fog), the depth/extension
 // fallbacks, built-in maps, resource leaks over repeated loads and, with $SURF_TEST_MAPS, real KSF maps.
 // Skipped without a Chromium build (CI) or with SURF_RENDER_BROWSER=0.
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+
+/** Private Vite dependency cache of this file's dev server (removed afterwards). */
+let viteCache = '';
 
 function findChromium(): string | null {
   if (process.env.SURF_RENDER_BROWSER === '0') return null;
@@ -68,6 +72,8 @@ describe.skipIf(!chromiumPath)('renderer in a real browser', () => {
     const { createServer } = await import('vite');
     const s = await createServer({
       configFile: join(ROOT, 'vite.render-harness.config.ts'),
+      // own dependency cache (see ui_browser.test.ts): parallel dev servers must not re-optimize it under the page
+      cacheDir: (viteCache = mkdtempSync(join(tmpdir(), 'surf-vite-render-'))),
       root: ROOT,
       logLevel: 'error',
       // no HMR / file watching: other work in the tree must not reload the page under the test
@@ -84,6 +90,7 @@ describe.skipIf(!chromiumPath)('renderer in a real browser', () => {
   afterAll(async () => {
     await browser?.close();
     await server?.close();
+    if (viteCache) rmSync(viteCache, { recursive: true, force: true });
   });
 
   async function open(query: string, w = 640, h = 360): Promise<{ page: Page; errors: string[] }> {

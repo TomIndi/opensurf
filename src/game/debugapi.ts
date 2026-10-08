@@ -92,8 +92,9 @@ export interface SurfDebugApi {
   /** Trigger brush entities (bounds, classname, enabled). */
   triggers(): DebugTrigger[];
   /**
-   * The largest surfable ramp faces of the world brushes (0.1 < normal.z < 0.7, steeper than walkable), biggest
-   * first: centre of the face polygon, its outward normal and area. For automated surf tests on real maps.
+   * The largest surfable ramp faces of the world brushes (0.1 < normal.z < 0.7, steeper than walkable, at least
+   * 64 units down the slope: no chamfer slivers), biggest first: centre of the face polygon, its outward normal,
+   * extents and area. For automated surf tests on real maps.
    */
   findRamps(max?: number): DebugRamp[];
   /** Renderer diagnostics (when the renderer provides debugInfo()). */
@@ -118,10 +119,16 @@ export interface DebugTrigger {
 export interface DebugRamp {
   center: DebugVec;
   normal: DebugVec;
-  /** Horizontal unit vector along the ramp (perpendicular to the normal's horizontal part). */
+  /** Level surfing direction: horizontal, in the face plane, following `axis`. */
   tangent: DebugVec;
-  /** Extent of the face along `tangent`, from the centre: [min, max] (min <= 0 <= max). */
+  /** The face's long axis (its longest edge, in the face plane), pointing the way `tangent` goes. */
+  axis: DebugVec;
+  /** Extent of the face along `axis`, from the centre: [min, max] (min <= 0 <= max). */
   along: [number, number];
+  /** Minimal width of the face polygon. */
+  width: number;
+  /** The face polygon. */
+  points: DebugVec[];
   area: number;
   /** Lowest / highest z of the face. */
   minZ: number;
@@ -252,20 +259,71 @@ export function createDebugApi(game: Game): SurfDebugApi {
           }
           if (!(area > 0)) continue;
           const center = { x: ax / area, y: ay / area, z: az / area };
+          // the face's long axis (its longest edge, in-plane), its level surfing direction (horizontal, in-plane)
+          // and its minimal width (rotating calipers over the edges)
+          let ux = 0;
+          let uy = 0;
+          let uz = 0;
+          let best = 0;
+          let width = Infinity;
+          for (let k = 0; k < w.length; k++) {
+            const p = w[k];
+            const q = w[(k + 1) % w.length];
+            const ex = q.x - p.x;
+            const ey = q.y - p.y;
+            const ez = q.z - p.z;
+            const l = Math.hypot(ex, ey, ez);
+            if (!(l > 1e-6)) continue;
+            if (l > best) {
+              best = l;
+              ux = ex / l;
+              uy = ey / l;
+              uz = ez / l;
+            }
+            // in-plane edge normal: n x e
+            const qx = (n.y * ez - n.z * ey) / l;
+            const qy = (n.z * ex - n.x * ez) / l;
+            const qz = (n.x * ey - n.y * ex) / l;
+            let far = 0;
+            for (const r of w) far = Math.max(far, Math.abs((r.x - p.x) * qx + (r.y - p.y) * qy + (r.z - p.z) * qz));
+            if (far < width) width = far;
+          }
           const hl = Math.hypot(n.x, n.y) || 1;
-          const tangent = { x: -n.y / hl, y: n.x / hl, z: 0 };
+          let tx = -n.y / hl;
+          let ty = n.x / hl;
+          // the level direction that follows the long axis
+          if (tx * ux + ty * uy < 0) {
+            tx = -tx;
+            ty = -ty;
+          }
+          if (ux * tx + uy * ty < 0) {
+            ux = -ux;
+            uy = -uy;
+            uz = -uz;
+          }
           let lo = 0;
           let hi = 0;
           for (const p of w) {
-            const d = (p.x - center.x) * tangent.x + (p.y - center.y) * tangent.y;
+            const d = (p.x - center.x) * ux + (p.y - center.y) * uy + (p.z - center.z) * uz;
             if (d < lo) lo = d;
             if (d > hi) hi = d;
           }
-          out.push({ center, normal: { x: n.x, y: n.y, z: n.z }, tangent, along: [lo, hi], area, minZ, maxZ });
+          out.push({
+            center,
+            normal: { x: n.x, y: n.y, z: n.z },
+            tangent: { x: tx, y: ty, z: 0 },
+            axis: { x: ux, y: uy, z: uz },
+            along: [lo, hi],
+            width: Number.isFinite(width) ? width : 0,
+            points: w.map((p) => ({ x: p.x, y: p.y, z: p.z })),
+            area,
+            minZ,
+            maxZ,
+          });
         }
       }
       out.sort((a, b) => b.area - a.area);
-      return out.slice(0, Math.max(0, max));
+      return out.filter((r) => r.width >= 64).slice(0, Math.max(0, max));
     },
     renderInfo: () => {
       const r = game.renderer as { debugInfo?: () => unknown };

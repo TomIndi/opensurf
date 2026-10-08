@@ -164,6 +164,9 @@ export class Ui implements UiApi {
     game.on('mapload', () => {
       void this.browser.refreshCached();
       this.pendingMap = null;
+      // a new map starts with an empty chat feed (like the engine's HUD reset on level change); the map's
+      // welcome lines follow this event
+      this.chatBox.clear();
     });
     // new PBs show up in the map browser
     game.on('runfinished', () => void this.browser.refreshCached());
