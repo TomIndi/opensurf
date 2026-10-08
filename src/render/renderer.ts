@@ -37,6 +37,7 @@ import {
   WebGLRenderer,
 } from 'three';
 import type { Vec3 } from '../core/vec3';
+import type { QAngle } from '../core/angles';
 import type { GhostState, LoadProgress, RenderSettings, RendererApi, RendererCapabilities, ViewState } from '../game/api';
 import type { FogDef, LoadedMap, ZoneDef } from '../map/types';
 import { CONTENTS_SLIME, CONTENTS_WATER } from '../physics/types';
@@ -444,6 +445,11 @@ export class Renderer implements RendererApi {
   setModelColor(model: number, rgb: [number, number, number]): void {
     if (!(model > 0)) return;
     this.mapScene?.setModelColor(model, rgb);
+  }
+
+  setModelTransform(model: number, origin: Vec3, angles: QAngle): void {
+    if (!(model > 0)) return;
+    this.mapScene?.setModelTransform(model, origin, angles);
   }
 
   setZones(zones: ZoneDef[], activeGroup: number): void {

@@ -295,6 +295,20 @@ export interface RendererApi {
   setFog?(fog: import('../map/types').FogDef | null): void;
   /** Optional: what the device supports, so the loader can prepare matching data (DXT textures with S3TC). */
   capabilities?(): RendererCapabilities;
+  /**
+   * Optional: places brush model `model` (a moving brush entity: func_door, func_rotating, trains, anything
+   * parented to them) at its entity's current absolute `origin` + Source `angles`. The map's geometry was built
+   * at the entity's spawn placement (bspcollision brushEntityPlacement); the renderer draws it moved by
+   * placement * spawnPlacement^-1. The game sends render-interpolated placements every frame a mover moves.
+   * Reset by loadMap/unloadMap.
+   */
+  setModelTransform?(model: number, origin: Vec3, angles: QAngle): void;
+  /**
+   * Optional: like setModelTransform for a model entity (prop_dynamic... parented to a mover): `entity` is its
+   * index in LoadedMap.entities (RenderProp.entity), `origin`/`angles` its current absolute placement; its props
+   * are drawn moved by placement * (the entity's spawn origin/angles)^-1.
+   */
+  setEntityTransform?(entity: number, origin: Vec3, angles: QAngle): void;
 }
 
 export interface RendererCapabilities {

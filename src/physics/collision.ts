@@ -42,9 +42,14 @@
 // the BSP contents), while testBox/traceBox see them (touching counts as inside, as for brushes). queryBox
 // reports brushes only; queryTriangles / triangle / triangleBrush expose the triangles.
 //
+// Moving brush models (doors, rotators, trains: setModelTransform) leave the static BVH on their first move
+// for a short list of RigidBrush records whose planes, bevels and bounds are re-derived from the base
+// geometry for each new placement; every query visits that list after the BVH with the same clipping rules.
+//
 // Implemented from the algorithm descriptions; no engine code was used.
+import type { QAngle } from '../core/angles';
 import { Vec3, v3 } from '../core/vec3';
-import { computeBrushBounds } from './brushbuild';
+import { brushWindings, computeBrushBounds } from './brushbuild';
 import { Brush, BrushSide, CONTENTS_SOLID, DIST_EPSILON, MASK_ALL, TraceResult, TraceWorld, newTrace } from './types';
 
 /**
@@ -1117,6 +1122,402 @@ function boundsValid(b: Brush): boolean {
   );
 }
 
+// ------------------------------------------------------------------------------------- rigid transforms
+// Moving brush models (func_door, func_rotating, trains...) are placed by an origin + Source Euler angles, like
+// their entity places them (see bspcollision brushEntityPlacement). The helpers below are the shared math.
+
+const DEG = Math.PI / 180;
+
+/**
+ * Row-major 3x3 rotation of Source Euler angles (degrees): its columns are the forward, left and up vectors
+ * (AngleVectors), so world = M * local. Equals Rz(yaw) * Ry(pitch) * Rx(roll).
+ */
+export function anglesToMatrix(a: QAngle, out: Float64Array = new Float64Array(9)): Float64Array {
+  const sp = Math.sin(a.pitch * DEG);
+  const cp = Math.cos(a.pitch * DEG);
+  const sy = Math.sin(a.yaw * DEG);
+  const cy = Math.cos(a.yaw * DEG);
+  const sr = Math.sin(a.roll * DEG);
+  const cr = Math.cos(a.roll * DEG);
+  // forward
+  out[0] = cp * cy;
+  out[3] = cp * sy;
+  out[6] = -sp;
+  // left (= -right)
+  out[1] = sr * sp * cy - cr * sy;
+  out[4] = sr * sp * sy + cr * cy;
+  out[7] = sr * cp;
+  // up
+  out[2] = cr * sp * cy + sr * sy;
+  out[5] = cr * sp * sy - sr * cy;
+  out[8] = cr * cp;
+  return out;
+}
+
+/** Source Euler angles (degrees) of a rotation matrix laid out like anglesToMatrix's (MatrixAngles). */
+export function matrixToAngles(m: ArrayLike<number>, out: QAngle): QAngle {
+  const fx = m[0];
+  const fy = m[3];
+  const fz = m[6];
+  const xy = Math.sqrt(fx * fx + fy * fy);
+  if (xy > 0.001) {
+    out.yaw = Math.atan2(fy, fx) / DEG;
+    out.pitch = Math.atan2(-fz, xy) / DEG;
+    out.roll = Math.atan2(m[7], m[8]) / DEG; // left.z, up.z
+  } else {
+    // looking straight up/down: yaw from the left vector, no roll
+    out.yaw = Math.atan2(-m[1], m[4]) / DEG;
+    out.pitch = Math.atan2(-fz, xy) / DEG;
+    out.roll = 0;
+  }
+  return out;
+}
+
+/** out = a * b (row-major 3x3). `out` may alias neither input. */
+export function mulMatrix3(a: ArrayLike<number>, b: ArrayLike<number>, out: Float64Array): Float64Array {
+  for (let r = 0; r < 3; r++) {
+    const a0 = a[r * 3];
+    const a1 = a[r * 3 + 1];
+    const a2 = a[r * 3 + 2];
+    out[r * 3] = a0 * b[0] + a1 * b[3] + a2 * b[6];
+    out[r * 3 + 1] = a0 * b[1] + a1 * b[4] + a2 * b[7];
+    out[r * 3 + 2] = a0 * b[2] + a1 * b[5] + a2 * b[8];
+  }
+  return out;
+}
+
+/** out = a * transpose(b) (row-major 3x3; for rotations: a * b^-1). `out` may alias neither input. */
+export function mulMatrix3Transposed(a: ArrayLike<number>, b: ArrayLike<number>, out: Float64Array): Float64Array {
+  for (let r = 0; r < 3; r++) {
+    const a0 = a[r * 3];
+    const a1 = a[r * 3 + 1];
+    const a2 = a[r * 3 + 2];
+    out[r * 3] = a0 * b[0] + a1 * b[1] + a2 * b[2];
+    out[r * 3 + 1] = a0 * b[3] + a1 * b[4] + a2 * b[5];
+    out[r * 3 + 2] = a0 * b[6] + a1 * b[7] + a2 * b[8];
+  }
+  return out;
+}
+
+/** True if the row-major 3x3 matrix is the identity within `eps`. */
+export function isIdentityMatrix3(m: ArrayLike<number>, eps = 1e-12): boolean {
+  return (
+    Math.abs(m[0] - 1) <= eps && Math.abs(m[4] - 1) <= eps && Math.abs(m[8] - 1) <= eps &&
+    Math.abs(m[1]) <= eps && Math.abs(m[2]) <= eps && Math.abs(m[3]) <= eps &&
+    Math.abs(m[5]) <= eps && Math.abs(m[6]) <= eps && Math.abs(m[7]) <= eps
+  );
+}
+
+/**
+ * The rigid motion taking geometry built at placement (baseOrigin, baseRot) to placement (origin, rot):
+ * p' = D * p + t with D = rot * baseRot^-1 and t = origin - D * baseOrigin. Writes D into `outD` and returns t
+ * in `outT`; returns false when D is the identity (a pure translation).
+ */
+export function placementDelta(
+  baseOrigin: Vec3,
+  baseRot: ArrayLike<number>,
+  origin: Vec3,
+  rot: ArrayLike<number>,
+  outD: Float64Array,
+  outT: Vec3,
+): boolean {
+  mulMatrix3Transposed(rot, baseRot, outD);
+  const ident = isIdentityMatrix3(outD);
+  if (ident) {
+    outT.x = origin.x - baseOrigin.x;
+    outT.y = origin.y - baseOrigin.y;
+    outT.z = origin.z - baseOrigin.z;
+    return false;
+  }
+  outT.x = origin.x - (outD[0] * baseOrigin.x + outD[1] * baseOrigin.y + outD[2] * baseOrigin.z);
+  outT.y = origin.y - (outD[3] * baseOrigin.x + outD[4] * baseOrigin.y + outD[5] * baseOrigin.z);
+  outT.z = origin.z - (outD[6] * baseOrigin.x + outD[7] * baseOrigin.y + outD[8] * baseOrigin.z);
+  return true;
+}
+
+const EDGE_PARALLEL = 1 - 1e-6;
+
+/**
+ * A convex brush that moves rigidly (a mover's brush). It keeps its base planes, vertices and edge directions
+ * and re-derives the world-space planes, bevels and bounds for a rotation + translation of the base geometry:
+ * - translations move every plane (the brush's own bevels stay exact);
+ * - rotations rotate the real faces and rebuild the box-trace bevels: the six axial planes (the bounds) and
+ *   the edge x axis planes at the rotated brush's support - the separating axes of a box and a convex
+ *   polytope - so swept-box traces stay exact (no rounded-off or extended corners).
+ * `planes` holds nx, ny, nz, dist per plane: the real faces first (`realCount`, used by point traces), then
+ * the bevels (up to `count`). `brush` is a Brush view of the current planes (queries, trigger touch tests).
+ */
+export class RigidBrush {
+  /** Static slot of the brush in its CollisionWorld (-1 for brushes outside one, e.g. triggers). */
+  slot = -1;
+  /** Enabled (the owning model is solid). */
+  on = true;
+  readonly contents: number;
+  readonly model: number;
+  readonly planes: Float64Array;
+  count = 0;
+  realCount = 0;
+  /** Current bounds: minx, miny, minz, maxx, maxy, maxz. */
+  readonly bounds = new Float64Array(6);
+  private readonly baseReal: Float64Array;
+  private readonly baseBevel: Float64Array;
+  private readonly verts: Float64Array;
+  private readonly edges: Float64Array;
+  private readonly tv: Float64Array;
+  private readonly baseBounds = new Float64Array(6);
+  private readonly view: Brush;
+  private readonly sidePool: BrushSide[] = [];
+  private viewDirty = true;
+
+  constructor(base: Brush) {
+    this.contents = base.contents | 0;
+    this.model = base.model | 0;
+    const real: number[] = [];
+    const bevel: number[] = [];
+    for (const s of base.sides) {
+      const n = s.plane.normal;
+      (s.bevel ? bevel : real).push(n.x, n.y, n.z, s.plane.dist);
+    }
+    this.baseReal = Float64Array.from(real);
+    this.baseBevel = Float64Array.from(bevel);
+    // vertices and unique edge directions from the face windings (box corners when degenerate)
+    const vs: number[] = [];
+    const es: number[] = [];
+    const addEdge = (dx: number, dy: number, dz: number): void => {
+      const l = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (!(l > 1e-6)) return;
+      dx /= l;
+      dy /= l;
+      dz /= l;
+      for (let i = 0; i < es.length; i += 3) if (Math.abs(es[i] * dx + es[i + 1] * dy + es[i + 2] * dz) > EDGE_PARALLEL) return;
+      es.push(dx, dy, dz);
+    };
+    for (const w of brushWindings(base)) {
+      for (let i = 0; i < w.length; i++) {
+        const a = w[i];
+        const b = w[(i + 1) % w.length];
+        vs.push(a.x, a.y, a.z);
+        addEdge(b.x - a.x, b.y - a.y, b.z - a.z);
+      }
+    }
+    const lo = base.mins;
+    const hi = base.maxs;
+    if (vs.length < 12) {
+      vs.length = 0;
+      es.length = 0;
+      for (let i = 0; i < 8; i++) vs.push(i & 1 ? hi.x : lo.x, i & 2 ? hi.y : lo.y, i & 4 ? hi.z : lo.z);
+      es.push(1, 0, 0, 0, 1, 0, 0, 0, 1);
+    }
+    this.verts = Float64Array.from(vs);
+    this.edges = Float64Array.from(es);
+    this.tv = new Float64Array(this.verts.length);
+    const bb = this.baseBounds;
+    bb[0] = lo.x;
+    bb[1] = lo.y;
+    bb[2] = lo.z;
+    bb[3] = hi.x;
+    bb[4] = hi.y;
+    bb[5] = hi.z;
+    const nr = this.baseReal.length / 4;
+    const cap = nr + Math.max(this.baseBevel.length / 4, 6 + 6 * (this.edges.length / 3));
+    this.planes = new Float64Array(cap * 4);
+    this.view = { sides: [], contents: this.contents, mins: v3(), maxs: v3(), model: this.model };
+    this.update(null, 0, 0, 0);
+  }
+
+  /**
+   * Places the brush at p' = m * p + t of its base geometry; `m` null = no rotation (a pure translation).
+   * `m` is row-major 3x3 (see placementDelta).
+   */
+  update(m: ArrayLike<number> | null, tx: number, ty: number, tz: number): void {
+    const P = this.planes;
+    const R = this.baseReal;
+    const nr = R.length / 4;
+    const B = this.bounds;
+    this.viewDirty = true;
+    if (!m) {
+      for (let i = 0; i < R.length; i += 4) {
+        P[i] = R[i];
+        P[i + 1] = R[i + 1];
+        P[i + 2] = R[i + 2];
+        P[i + 3] = R[i + 3] + R[i] * tx + R[i + 1] * ty + R[i + 2] * tz;
+      }
+      const V = this.baseBevel;
+      const o = R.length;
+      for (let i = 0; i < V.length; i += 4) {
+        P[o + i] = V[i];
+        P[o + i + 1] = V[i + 1];
+        P[o + i + 2] = V[i + 2];
+        P[o + i + 3] = V[i + 3] + V[i] * tx + V[i + 1] * ty + V[i + 2] * tz;
+      }
+      this.realCount = nr;
+      this.count = nr + V.length / 4;
+      const bb = this.baseBounds;
+      B[0] = bb[0] + tx;
+      B[1] = bb[1] + ty;
+      B[2] = bb[2] + tz;
+      B[3] = bb[3] + tx;
+      B[4] = bb[4] + ty;
+      B[5] = bb[5] + tz;
+      return;
+    }
+    // real faces: n' = m n, d' = d + n'.t
+    for (let i = 0; i < R.length; i += 4) {
+      const x = R[i];
+      const y = R[i + 1];
+      const z = R[i + 2];
+      const nx = m[0] * x + m[1] * y + m[2] * z;
+      const ny = m[3] * x + m[4] * y + m[5] * z;
+      const nz = m[6] * x + m[7] * y + m[8] * z;
+      P[i] = nx;
+      P[i + 1] = ny;
+      P[i + 2] = nz;
+      P[i + 3] = R[i + 3] + nx * tx + ny * ty + nz * tz;
+    }
+    // vertices -> bounds
+    const v = this.verts;
+    const tv = this.tv;
+    let x0 = Infinity;
+    let y0 = Infinity;
+    let z0 = Infinity;
+    let x1 = -Infinity;
+    let y1 = -Infinity;
+    let z1 = -Infinity;
+    for (let i = 0; i < v.length; i += 3) {
+      const x = v[i];
+      const y = v[i + 1];
+      const z = v[i + 2];
+      const wx = m[0] * x + m[1] * y + m[2] * z + tx;
+      const wy = m[3] * x + m[4] * y + m[5] * z + ty;
+      const wz = m[6] * x + m[7] * y + m[8] * z + tz;
+      tv[i] = wx;
+      tv[i + 1] = wy;
+      tv[i + 2] = wz;
+      if (wx < x0) x0 = wx;
+      if (wy < y0) y0 = wy;
+      if (wz < z0) z0 = wz;
+      if (wx > x1) x1 = wx;
+      if (wy > y1) y1 = wy;
+      if (wz > z1) z1 = wz;
+    }
+    B[0] = x0;
+    B[1] = y0;
+    B[2] = z0;
+    B[3] = x1;
+    B[4] = y1;
+    B[5] = z1;
+    let o = R.length;
+    const axial = (nx: number, ny: number, nz: number, d: number): void => {
+      P[o] = nx;
+      P[o + 1] = ny;
+      P[o + 2] = nz;
+      P[o + 3] = d;
+      o += 4;
+    };
+    axial(-1, 0, 0, -x0);
+    axial(1, 0, 0, x1);
+    axial(0, -1, 0, -y0);
+    axial(0, 1, 0, y1);
+    axial(0, 0, -1, -z0);
+    axial(0, 0, 1, z1);
+    // edge x axis bevels at the support of the rotated brush (both orientations)
+    const e = this.edges;
+    for (let i = 0; i < e.length; i += 3) {
+      const ex = m[0] * e[i] + m[1] * e[i + 1] + m[2] * e[i + 2];
+      const ey = m[3] * e[i] + m[4] * e[i + 1] + m[5] * e[i + 2];
+      const ez = m[6] * e[i] + m[7] * e[i + 1] + m[8] * e[i + 2];
+      for (let a = 0; a < 3; a++) {
+        // n = e x axis
+        let nx = a === 0 ? 0 : a === 1 ? -ez : ey;
+        let ny = a === 0 ? ez : a === 1 ? 0 : -ex;
+        let nz = a === 0 ? -ey : a === 1 ? ex : 0;
+        const l = Math.sqrt(nx * nx + ny * ny + nz * nz);
+        if (!(l > 1e-6)) continue;
+        nx /= l;
+        ny /= l;
+        nz /= l;
+        if (Math.abs(nx) > AXIAL_LIMIT || Math.abs(ny) > AXIAL_LIMIT || Math.abs(nz) > AXIAL_LIMIT) continue;
+        let hi = -Infinity;
+        let lo = Infinity;
+        for (let k = 0; k < tv.length; k += 3) {
+          const d = nx * tv[k] + ny * tv[k + 1] + nz * tv[k + 2];
+          if (d > hi) hi = d;
+          if (d < lo) lo = d;
+        }
+        axial(nx, ny, nz, hi);
+        axial(-nx, -ny, -nz, -lo);
+      }
+    }
+    this.realCount = nr;
+    this.count = o / 4;
+  }
+
+  /** The current planes as a Brush (bevel flags, bounds); the object is reused across updates. */
+  get brush(): Brush {
+    if (this.viewDirty) {
+      this.viewDirty = false;
+      const b = this.view;
+      const P = this.planes;
+      const pool = this.sidePool;
+      b.sides.length = 0;
+      for (let i = 0; i < this.count; i++) {
+        let s = pool[i];
+        if (!s) pool.push((s = { plane: { normal: v3(), dist: 0 }, bevel: false }));
+        s.plane.normal.x = P[i * 4];
+        s.plane.normal.y = P[i * 4 + 1];
+        s.plane.normal.z = P[i * 4 + 2];
+        s.plane.dist = P[i * 4 + 3];
+        s.bevel = i >= this.realCount;
+        b.sides.push(s);
+      }
+      const B = this.bounds;
+      b.mins.x = B[0];
+      b.mins.y = B[1];
+      b.mins.z = B[2];
+      b.maxs.x = B[3];
+      b.maxs.y = B[4];
+      b.maxs.z = B[5];
+    }
+    return this.view;
+  }
+}
+
+/**
+ * testBox's rule for one plane set (`n` planes nx, ny, nz, dist): true if the box (centre c, half extents e) is
+ * inside or touching every plane pushed out by the box. `B` are the planes' bounds (broad phase).
+ */
+function boxInPlanes(P: Float64Array, n: number, B: Float64Array, cx: number, cy: number, cz: number, ex: number, ey: number, ez: number): boolean {
+  if (
+    cx < B[0] - ex - BROAD_MARGIN || cx > B[3] + ex + BROAD_MARGIN ||
+    cy < B[1] - ey - BROAD_MARGIN || cy > B[4] + ey + BROAD_MARGIN ||
+    cz < B[2] - ez - BROAD_MARGIN || cz > B[5] + ez + BROAD_MARGIN
+  )
+    return false;
+  for (let i = 0; i < n; i++) {
+    const p4 = i * 4;
+    const nx = P[p4];
+    const ny = P[p4 + 1];
+    const nz = P[p4 + 2];
+    const dist = P[p4 + 3] + (nx < 0 ? -nx : nx) * ex + (ny < 0 ? -ny : ny) * ey + (nz < 0 ? -nz : nz) * ez;
+    if (nx * cx + ny * cy + nz * cz - dist > 0) return false;
+  }
+  return true;
+}
+
+/** A moving brush model: where its brushes were built and where they are now. */
+interface DynamicModel {
+  baseOrigin: Vec3;
+  baseRot: Float64Array;
+  origin: Vec3;
+  angles: QAngle;
+  placed: boolean;
+  brushes: RigidBrush[];
+}
+
+const _dynRot = new Float64Array(9);
+const _dynDelta = new Float64Array(9);
+const _dynT = v3();
+
 /**
  * The collision world: all player-solid geometry of a map (world brushes, solid brush entities,
  * playerclips, water volumes...). Brush objects stay available as public data; queries run on a
@@ -1157,6 +1558,10 @@ export class CollisionWorld implements TraceWorld {
   // ---- models
   private readonly disabledModels = new Set<number>();
   private readonly modelSlots = new Map<number, number[]>();
+  // ---- moving models (setModelTransform): their brushes left the static BVH for this small list
+  private readonly dynModels = new Map<number, DynamicModel>();
+  private readonly dynBases = new Map<number, { origin: Vec3; rot: Float64Array }>();
+  private readonly dynBrushes: RigidBrush[] = [];
   // ---- triangles (per triangle slot, in triangle-BVH leaf order)
   private readonly triCount: number;
   private readonly triData: Float64Array; // TRI_STRIDE per slot: vertices, unit normal, plane distance
@@ -1312,7 +1717,9 @@ export class CollisionWorld implements TraceWorld {
   setModelSolid(model: number, solid: boolean): void {
     if (solid) this.disabledModels.delete(model);
     else this.disabledModels.add(model);
-    const slots = this.modelSlots.get(model);
+    const dm = this.dynModels.get(model);
+    if (dm) for (const rb of dm.brushes) rb.on = solid;
+    const slots = dm ? undefined : this.modelSlots.get(model);
     if (slots) for (const slot of slots) this.slotEnabled[slot] = solid ? 1 : 0;
     if (this.triModels.has(model)) {
       const m = this.triModel;
@@ -1324,6 +1731,140 @@ export class CollisionWorld implements TraceWorld {
 
   isModelSolid(model: number): boolean {
     return !this.disabledModels.has(model);
+  }
+
+  /**
+   * Declares the placement (origin + Source angles) the brushes of `model` were built at, which
+   * setModelTransform is relative to. Default: origin 0, angles 0 (brushes in model space). loadBspMap builds
+   * brush entities at their entity's placement (bspcollision brushEntityPlacement), so movers call this once
+   * with that placement before moving them.
+   */
+  setModelBasePlacement(model: number, origin: Vec3, angles: QAngle): void {
+    const base = { origin: v3(origin.x, origin.y, origin.z), rot: anglesToMatrix(angles) };
+    this.dynBases.set(model, base);
+    const dm = this.dynModels.get(model);
+    if (dm) {
+      dm.baseOrigin = base.origin;
+      dm.baseRot = base.rot;
+      if (dm.placed) {
+        dm.placed = false;
+        this.setModelTransform(model, v3(dm.origin.x, dm.origin.y, dm.origin.z), { ...dm.angles });
+      }
+    }
+  }
+
+  /**
+   * Moves brush model `model` to the placement (origin, angles) - its entity's absolute origin and angles -
+   * relative to its base placement (setModelBasePlacement). The model's brushes leave the static BVH for a
+   * small list of moving brushes (on the first call) whose world-space planes, bevels and bounds are
+   * re-derived here; every query (traceBox/traceRay, testBox, pointContents, queryBox, setModelSolid) honours
+   * the new placement. Cheap for translations; rotations rebuild the box-trace bevels of each brush.
+   */
+  setModelTransform(model: number, origin: Vec3, angles: QAngle): void {
+    const dm = this.dynamicModel(model);
+    if (
+      dm.placed &&
+      dm.origin.x === origin.x && dm.origin.y === origin.y && dm.origin.z === origin.z &&
+      dm.angles.pitch === angles.pitch && dm.angles.yaw === angles.yaw && dm.angles.roll === angles.roll
+    )
+      return;
+    dm.placed = true;
+    dm.origin.x = origin.x;
+    dm.origin.y = origin.y;
+    dm.origin.z = origin.z;
+    dm.angles.pitch = angles.pitch;
+    dm.angles.yaw = angles.yaw;
+    dm.angles.roll = angles.roll;
+    anglesToMatrix(angles, _dynRot);
+    const rotated = placementDelta(dm.baseOrigin, dm.baseRot, origin, _dynRot, _dynDelta, _dynT);
+    const m = rotated ? _dynDelta : null;
+    for (const rb of dm.brushes) rb.update(m, _dynT.x, _dynT.y, _dynT.z);
+  }
+
+  /** The placement last given to setModelTransform (null for a model that never moved). */
+  getModelTransform(model: number): { origin: Vec3; angles: QAngle } | null {
+    const dm = this.dynModels.get(model);
+    return dm && dm.placed ? { origin: v3(dm.origin.x, dm.origin.y, dm.origin.z), angles: { ...dm.angles } } : null;
+  }
+
+  /** True once setModelTransform moved `model` out of the static BVH. */
+  isModelDynamic(model: number): boolean {
+    return this.dynModels.has(model);
+  }
+
+  /**
+   * True if the box [origin+mins, origin+maxs] is in solid against the enabled brushes of `model` only
+   * (moving or static), with testBox's rules. Used by pushers to find what they move into.
+   */
+  testModelBox(model: number, origin: Vec3, mins: Vec3, maxs: Vec3, mask: number): boolean {
+    if (this.disabledModels.has(model)) return false;
+    const cx = origin.x + (mins.x + maxs.x) * 0.5;
+    const cy = origin.y + (mins.y + maxs.y) * 0.5;
+    const cz = origin.z + (mins.z + maxs.z) * 0.5;
+    let ex = Math.abs(maxs.x - mins.x) * 0.5;
+    let ey = Math.abs(maxs.y - mins.y) * 0.5;
+    let ez = Math.abs(maxs.z - mins.z) * 0.5;
+    const isPoint = ex * ex + ey * ey + ez * ez < POINT_EXTENT_SQ;
+    if (isPoint) ex = ey = ez = 0;
+    const dm = this.dynModels.get(model);
+    if (dm) {
+      for (const rb of dm.brushes) if ((rb.contents & mask) !== 0 && boxInPlanes(rb.planes, isPoint ? rb.realCount : rb.count, rb.bounds, cx, cy, cz, ex, ey, ez)) return true;
+      return false;
+    }
+    const slots = this.modelSlots.get(model);
+    if (!slots) return false;
+    for (const slot of slots) {
+      if ((this.slotContents[slot] & mask) === 0 || this.slotEnabled[slot] === 0) continue;
+      const so = slot * 6;
+      const b = this.slotBounds;
+      if (
+        cx < b[so] - ex - BROAD_MARGIN || cx > b[so + 3] + ex + BROAD_MARGIN ||
+        cy < b[so + 1] - ey - BROAD_MARGIN || cy > b[so + 4] + ey + BROAD_MARGIN ||
+        cz < b[so + 2] - ez - BROAD_MARGIN || cz > b[so + 5] + ez + BROAD_MARGIN
+      )
+        continue;
+      let inside = true;
+      for (let s = this.slotSideStart[slot], se = this.slotSideStart[slot + 1]; s < se; s++) {
+        if (isPoint && this.sideBevel[s] !== 0) continue;
+        const p4 = s * 4;
+        const nx = this.planes[p4];
+        const ny = this.planes[p4 + 1];
+        const nz = this.planes[p4 + 2];
+        const dist = this.planes[p4 + 3] + (nx < 0 ? -nx : nx) * ex + (ny < 0 ? -ny : ny) * ey + (nz < 0 ? -nz : nz) * ez;
+        if (nx * cx + ny * cy + nz * cz - dist > 0) {
+          inside = false;
+          break;
+        }
+      }
+      if (inside) return true;
+    }
+    return false;
+  }
+
+  /** Moving-model record for `model`, created (brushes moved out of the static BVH) on first use. */
+  private dynamicModel(model: number): DynamicModel {
+    let dm = this.dynModels.get(model);
+    if (dm) return dm;
+    const base = this.dynBases.get(model);
+    dm = {
+      baseOrigin: base ? base.origin : v3(),
+      baseRot: base ? base.rot : anglesToMatrix({ pitch: 0, yaw: 0, roll: 0 }),
+      origin: v3(),
+      angles: { pitch: 0, yaw: 0, roll: 0 },
+      placed: false,
+      brushes: [],
+    };
+    const solid = !this.disabledModels.has(model);
+    for (const slot of this.modelSlots.get(model) ?? []) {
+      const rb = new RigidBrush(this.brushes[this.slotBrush[slot]]);
+      rb.slot = slot;
+      rb.on = solid;
+      this.slotEnabled[slot] = 0; // the static pass never sees it again
+      dm.brushes.push(rb);
+      this.dynBrushes.push(rb);
+    }
+    this.dynModels.set(model, dm);
+    return dm;
   }
 
   // ------------------------------------------------------------------------------------------- traces
@@ -1546,6 +2087,106 @@ export class CollisionWorld implements TraceWorld {
       }
     }
 
+    // ---- moving brushes (setModelTransform): the same clipping, on their current planes
+    let hitPlanes = planes;
+    const dyn = this.dynBrushes;
+    if (!allsolid && dyn.length > 0) {
+      dynLoop: for (let di = 0; di < dyn.length; di++) {
+        const rb = dyn[di];
+        if (!rb.on || (rb.contents & mask) === 0) continue;
+        {
+          const o = rb.bounds;
+          let tmin = 0;
+          let tmax = best;
+          let t1 = (o[0] - bx - sx) * ix;
+          let t2 = (o[3] + bx - sx) * ix;
+          if (t1 > t2) {
+            const t = t1;
+            t1 = t2;
+            t2 = t;
+          }
+          if (t1 > tmin) tmin = t1;
+          if (t2 < tmax) tmax = t2;
+          if (dx === 0 && (sx < o[0] - bx || sx > o[3] + bx)) continue;
+          t1 = (o[1] - by - sy) * iy;
+          t2 = (o[4] + by - sy) * iy;
+          if (t1 > t2) {
+            const t = t1;
+            t1 = t2;
+            t2 = t;
+          }
+          if (t1 > tmin) tmin = t1;
+          if (t2 < tmax) tmax = t2;
+          if (dy === 0 && (sy < o[1] - by || sy > o[4] + by)) continue;
+          t1 = (o[2] - bz - sz) * iz;
+          t2 = (o[5] + bz - sz) * iz;
+          if (t1 > t2) {
+            const t = t1;
+            t1 = t2;
+            t2 = t;
+          }
+          if (t1 > tmin) tmin = t1;
+          if (t2 < tmax) tmax = t2;
+          if (dz === 0 && (sz < o[2] - bz || sz > o[5] + bz)) continue;
+          if (tmin > tmax) continue;
+        }
+        const P = rb.planes;
+        const np = isPoint ? rb.realCount : rb.count;
+        let enterfrac = NEVER_UPDATED;
+        let leavefrac = 1;
+        let startout = false;
+        let getout = false;
+        let lead = -1;
+        let missed = false;
+        for (let s = 0; s < np; s++) {
+          const p4 = s * 4;
+          const nx = P[p4];
+          const ny = P[p4 + 1];
+          const nz = P[p4 + 2];
+          const dist = P[p4 + 3] + (nx < 0 ? -nx : nx) * ex + (ny < 0 ? -ny : ny) * ey + (nz < 0 ? -nz : nz) * ez;
+          const d1 = nx * sx + ny * sy + nz * sz - dist;
+          const d2 = nx * tx + ny * ty + nz * tz - dist;
+          if (d2 > 0) getout = true;
+          if (d1 > 0) {
+            startout = true;
+            if (d2 >= DIST_EPSILON - CLIP_NOISE || d2 >= d1) {
+              missed = true;
+              break;
+            }
+          } else if (d2 <= 0) {
+            continue;
+          }
+          if (d1 > d2) {
+            const f = (d1 - DIST_EPSILON) / (d1 - d2);
+            if (f > enterfrac) {
+              enterfrac = f;
+              lead = s;
+            }
+          } else {
+            const f = (d1 + DIST_EPSILON) / (d1 - d2);
+            if (f < leavefrac) leavefrac = f;
+          }
+        }
+        if (missed) continue;
+        if (!startout) {
+          startsolid = true;
+          if (solidSlot < 0) solidSlot = rb.slot;
+          if (!getout) {
+            allsolid = true;
+            solidSlot = rb.slot;
+            break dynLoop;
+          }
+          continue;
+        }
+        if (enterfrac < leavefrac && enterfrac > NEVER_UPDATED && enterfrac < best) {
+          best = enterfrac < 0 ? 0 : enterfrac;
+          hitSlot = rb.slot;
+          hitSide = lead;
+          hitPlanes = P;
+        }
+      }
+    }
+
     // ---- triangle meshes: same clipping rules, sharing `best` with the brushes
     let hitTri = -1;
     let solidTri = -1;
@@ -1703,10 +2344,10 @@ export class CollisionWorld implements TraceWorld {
       tr.contents = this.slotContents[hitSlot];
       tr.model = this.slotModel[hitSlot];
       const p4 = hitSide * 4;
-      pn.x = planes[p4];
-      pn.y = planes[p4 + 1];
-      pn.z = planes[p4 + 2];
-      tr.plane.dist = planes[p4 + 3];
+      pn.x = hitPlanes[p4];
+      pn.y = hitPlanes[p4 + 1];
+      pn.z = hitPlanes[p4 + 2];
+      tr.plane.dist = hitPlanes[p4 + 3];
       this.lastHitBrush = this.slotBrush[hitSlot];
     } else if (startsolid) {
       if (solidSlot >= 0) {
@@ -1793,6 +2434,23 @@ export class CollisionWorld implements TraceWorld {
         if (inside) result |= c;
       }
     }
+    const dyn = this.dynBrushes;
+    for (let di = 0; di < dyn.length; di++) {
+      const rb = dyn[di];
+      const c = rb.contents;
+      if (!rb.on || (c & mask) === 0 || (result & c) === c) continue;
+      const B = rb.bounds;
+      if (px < B[0] || px > B[3] || py < B[1] || py > B[4] || pz < B[2] || pz > B[5]) continue;
+      const P = rb.planes;
+      let inside = true;
+      for (let s = 0; s < rb.realCount; s++) {
+        if (P[s * 4] * px + P[s * 4 + 1] * py + P[s * 4 + 2] * pz - P[s * 4 + 3] >= 0) {
+          inside = false;
+          break;
+        }
+      }
+      if (inside) result |= c;
+    }
     return result & mask;
   }
 
@@ -1865,6 +2523,12 @@ export class CollisionWorld implements TraceWorld {
         }
         if (inside) return true;
       }
+    }
+    const dyn = this.dynBrushes;
+    for (let di = 0; di < dyn.length; di++) {
+      const rb = dyn[di];
+      if (!rb.on || (rb.contents & mask) === 0) continue;
+      if (boxInPlanes(rb.planes, isPoint ? rb.realCount : rb.count, rb.bounds, cx, cy, cz, ex, ey, ez)) return true;
     }
     return this.triNodeCount > 0 && this.testTriangles(cx, cy, cz, ex, ey, ez, isPoint, mask);
   }
@@ -1961,6 +2625,15 @@ export class CollisionWorld implements TraceWorld {
             continue;
           cb(this.brushes[this.slotBrush[slot]]);
         }
+      }
+      // moving brushes: their current placement (a Brush view of the live planes)
+      const dyn = this.dynBrushes;
+      for (let di = 0; di < dyn.length; di++) {
+        const rb = dyn[di];
+        if (!rb.on) continue;
+        const B = rb.bounds;
+        if (x1 < B[0] || x0 > B[3] || y1 < B[1] || y0 > B[4] || z1 < B[2] || z0 > B[5]) continue;
+        cb(rb.brush);
       }
     } finally {
       if (ownStack) this.queryBusy = false;

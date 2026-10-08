@@ -7,9 +7,11 @@
 //      frame); each tick's view angles are the previous frame's angles interpolated towards the current ones at
 //      that tick's simulated time within the frame, so a steady mouse turn is the same angle on every tick at any
 //      fps (smooth strafes at low fps, no 1x/2x alternation when fps and tickrate differ);
-//   3. the camera renders the eye position interpolated between the last two ticks (alpha = leftover time).
-// Per tick (docs/ARCHITECTURE.md "Game loop & tick order"): usercmd -> base velocity -> zone button filters and
-// strafe stats -> playerMove -> +use -> entities (triggers, I/O) -> timer -> replay recording -> sounds.
+//   3. the camera renders the eye position interpolated between the last two ticks (alpha = leftover time), and
+//      moving brushes (doors, rotators, trains) and the props on them are drawn interpolated the same way.
+// Per tick (docs/ARCHITECTURE.md "Game loop & tick order"): movers (carry / push the player) -> usercmd -> base
+// velocity -> zone button filters and strafe stats -> playerMove (+ ground mover velocity) -> +use -> entities
+// (triggers, I/O) -> timer -> replay recording -> sounds.
 //
 // Pausing (ESC / the pause menu) works like CS:GO's ESC menu during a ranked run: the world keeps running (the
 // movement keys are released, the player keeps flying or falling) and the run goes on. Otherwise (start zone,
@@ -239,6 +241,16 @@ export function describeLoadError(e: unknown): string {
 const yieldToBrowser = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
 // ------------------------------------------------------------------------------------------ tick math (pure)
+
+/** Moving-brush hooks of game/entities.ts EntitySystem (duck-typed like the other entity extras). */
+interface MoverHooks {
+  /** Before playerMove: movers move, carrying / pushing the player. */
+  tickMovers(): void;
+  /** After playerMove: ground entity velocity when leaving / landing on a mover. */
+  afterPlayerMove(wasOnGround: boolean, wasGroundModel: number): void;
+  /** Every rendered frame: interpolated mover placements to the renderer. */
+  applyRenderTransforms(alpha: number): void;
+}
 
 /**
  * Base velocity conversion (CBasePlayer::PhysicsSimulate semantics): if no trigger set FL_BASEVELOCITY during the
@@ -1483,6 +1495,16 @@ export class Game implements GameApi, CommandContext {
     s.advanceClock(ti);
     v3copy(s.prevOrigin, ps.origin);
     s.prevViewOffset = ps.viewOffsetZ;
+    const movers = s.entities as GameEntities & Partial<MoverHooks>;
+
+    // 0. moving brushes (doors, rotators, trains) move first: they carry riders and push the player
+    if (typeof movers.tickMovers === 'function') {
+      try {
+        movers.tickMovers();
+      } catch (e) {
+        this.systemError('movers', e);
+      }
+    }
 
     // 1. usercmd from the +commands
     const noclip = ps.moveType === MOVETYPE_NOCLIP || ps.moveType === MOVETYPE_OBSERVER;
@@ -1496,7 +1518,11 @@ export class Game implements GameApi, CommandContext {
     s.timer.recordInput(cmd.sidemove, cmd.forwardmove, yawDelta, ps.onGround, s.lastJumped);
     // 3. movement
     const oldButtons = ps.oldButtons;
+    const wasOnGround = ps.onGround;
+    const wasGroundModel = ps.groundModel;
     playerMove(ps, cmd, s.collision, vars, ti, s.ev);
+    // leaving / landing on a moving brush keeps world momentum (ground entity velocity)
+    if (typeof movers.afterPlayerMove === 'function') movers.afterPlayerMove(wasOnGround, wasGroundModel);
     s.lastJumped = s.ev.jumped;
     if (cmd.buttons & IN_USE && !(oldButtons & IN_USE) && typeof s.entities.pressUse === 'function') {
       angleVectors(cmd.viewangles, this.fwd);
@@ -1732,6 +1758,15 @@ export class Game implements GameApi, CommandContext {
     }
     this.updateGhost(s, hud);
     this.updateDebugBoxes(s);
+    // moving brushes and the props on them, between the last two ticks like the player
+    const movers = s.entities as GameEntities & Partial<MoverHooks>;
+    if (typeof movers.applyRenderTransforms === 'function') {
+      try {
+        movers.applyRenderTransforms(this.alpha);
+      } catch (e) {
+        this.systemError('movers', e);
+      }
+    }
     this.renderer.render(view);
   }
 

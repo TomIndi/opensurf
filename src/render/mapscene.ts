@@ -19,8 +19,11 @@ import {
   UnsignedByteType,
   Vector3,
 } from 'three';
-import { angleVectors } from '../core/angles';
+import { angleVectors, type QAngle } from '../core/angles';
 import type { Vec3 } from '../core/vec3';
+import { brushEntityPlacement } from '../bsp/bspcollision';
+import { movableEntitySets } from '../game/movers';
+import { anglesToMatrix } from '../physics/collision';
 import { SURF_SKY, SURF_SKY2D } from '../bsp/types';
 import type { CubemapDef, LoadedMap, MaterialDef, RenderBatch, RenderProp } from '../map/types';
 import { CONTENTS_SOLID } from '../physics/types';
@@ -624,6 +627,13 @@ export class MapScene {
   private pairedWater: Set<RenderBatch> = new Set();
   /** Back-to-front plane order inside translucent meshes (see translucency.ts). */
   readonly sorter = new TranslucentSorter();
+  /**
+   * Brush models that can move (doors, rotators, trains and what is parented to them): kept out of the merged
+   * brush-entity groups so setModelTransform can place their meshes.
+   */
+  private readonly movingModels: Set<number>;
+  /** Spawn placement of each brush model's entity (what its geometry was built at), as a matrix. */
+  private readonly baseInverse = new Map<number, Matrix4>();
 
   constructor(
     readonly map: LoadedMap,
@@ -631,6 +641,13 @@ export class MapScene {
   ) {
     this.world.name = 'world';
     this.sky3d.name = 'sky3d';
+    let moving = new Set<number>();
+    try {
+      moving = movableEntitySets(map.entities ?? []).models;
+    } catch {
+      /* malformed entities: nothing moves */
+    }
+    this.movingModels = moving;
     this.world.matrixAutoUpdate = false;
     this.sky3d.matrixAutoUpdate = false;
     const s3 = map.render?.sky3d ?? null;
@@ -813,7 +830,7 @@ export class MapScene {
         doubleSided: this.doubleSided || (d.isWater && !this.pairedWater.has(b)),
       };
       const key = [b.material, lit ? 'L' : 'U', blend ? 'B' : '', pass, envKey].join('|');
-      if (b.model > 0 && this.modelState && !d.isWater && !b.decal) {
+      if (b.model > 0 && this.modelState && !d.isWater && !b.decal && !this.movingModels.has(b.model)) {
         // brush entity: merged with the other models' batches of this material (see flushMerged)
         g.dispose();
         this.modelEntry(b.model);
@@ -1129,6 +1146,38 @@ export class MapScene {
     this.writeModelState(e);
   }
 
+  /**
+   * Draws brush model `model` at its entity's current placement: its meshes move by placement * spawn^-1 (the
+   * geometry was built at the entity's spawn placement, bspcollision brushEntityPlacement).
+   */
+  setModelTransform(model: number, origin: Vec3, angles: QAngle): void {
+    const e = this.models.get(model);
+    if (!e || !e.meshes.length) return;
+    const inv = this.baseInverseOf(model);
+    const m = anglesToMatrix(angles, _rot);
+    _place.set(m[0], m[1], m[2], origin.x, m[3], m[4], m[5], origin.y, m[6], m[7], m[8], origin.z, 0, 0, 0, 1);
+    _place.multiply(inv);
+    for (const mesh of e.meshes) {
+      mesh.matrix.copy(_place);
+      mesh.matrixWorldNeedsUpdate = true;
+    }
+  }
+
+  private baseInverseOf(model: number): Matrix4 {
+    let inv = this.baseInverse.get(model);
+    if (!inv) {
+      inv = new Matrix4();
+      const ent = (this.map.entities ?? []).find((x) => x.model === model);
+      if (ent) {
+        const p = brushEntityPlacement(ent);
+        const m = anglesToMatrix(p.angles, _rot);
+        inv.set(m[0], m[1], m[2], p.origin.x, m[3], m[4], m[5], p.origin.y, m[6], m[7], m[8], p.origin.z, 0, 0, 0, 1).invert();
+      }
+      this.baseInverse.set(model, inv);
+    }
+    return inv;
+  }
+
   /** Per-frame material animation (texture scroll, animated textures). */
   update(time: number): void {
     for (const a of this.animated) {
@@ -1172,6 +1221,9 @@ export class MapScene {
     this.sorter.clear();
   }
 }
+
+const _rot = new Float64Array(9);
+const _place = new Matrix4();
 
 function defaultNormals(n: number): Float32Array {
   const a = new Float32Array(n * 3);
