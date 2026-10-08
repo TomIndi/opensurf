@@ -508,20 +508,24 @@ export interface CachedConvex {
 
 /** Vertices closer than this (model units) are the same hull corner. */
 const VERT_WELD = 1e-3;
+/** A face-winding corner beyond this coordinate means the planes don't enclose a volume. */
+const BOGUS_RANGE = 65536;
+
+const IDENTITY: Placement = { origin: v3(), m: [1, 0, 0, 0, 1, 0, 0, 0, 1], scale: 1, perm: true };
 
 /**
- * Caches a convex piece (model space): its brush, faces, corners and edges; null when degenerate.
- * `planes` may be given instead of the piece (e.g. a box).
+ * Caches a convex piece in model space: the face planes that bound it (redundant ones dropped), its corners and
+ * edges (from the face windings) and its model-space brush with bevels; null when the planes don't enclose a
+ * volume. `planes` may be given instead of a piece (e.g. a box).
  */
 export function cacheConvex(c: PhyConvex | Plane[], contents = CONTENTS_SOLID): CachedConvex | null {
   const planes = Array.isArray(c) ? c : convexPlanes(c);
-  const brush = brushFromPlanes(planes, contents, 0);
-  if (!brush) return null;
+  if (planes.length < 4) return null;
+  const windings = brushWindings({ sides: planes.map((plane) => ({ plane, bevel: false })), contents, mins: v3(), maxs: v3(), model: 0 });
   const faces: Plane[] = [];
   const vx: number[] = [];
   const edgeSet = new Set<number>();
   const edges: number[] = [];
-  const windings = brushWindings(brush);
   const vertex = (p: Vec3): number => {
     for (let k = 0; k < vx.length; k += 3) {
       if (Math.abs(vx[k] - p.x) < VERT_WELD && Math.abs(vx[k + 1] - p.y) < VERT_WELD && Math.abs(vx[k + 2] - p.z) < VERT_WELD) return k / 3;
@@ -529,12 +533,10 @@ export function cacheConvex(c: PhyConvex | Plane[], contents = CONTENTS_SOLID): 
     vx.push(p.x, p.y, p.z);
     return vx.length / 3 - 1;
   };
-  for (let i = 0; i < brush.sides.length; i++) {
-    const s = brush.sides[i];
-    if (s.bevel) continue;
-    faces.push(s.plane);
+  for (let i = 0; i < planes.length; i++) {
     const w = windings[i];
     if (!w || w.length < 3) continue;
+    faces.push(planes[i]);
     const ids = w.map(vertex);
     for (let k = 0; k < ids.length; k++) {
       const a = ids[k];
@@ -546,8 +548,19 @@ export function cacheConvex(c: PhyConvex | Plane[], contents = CONTENTS_SOLID): 
       edges.push(a, b);
     }
   }
-  if (vx.length < 12) return null;
-  return { planes, brush, faces, verts: Float64Array.from(vx), edges: Int32Array.from(edges) };
+  if (faces.length < 4 || vx.length < 12 || vx.length / 3 >= 65536) return null;
+  const lo = [Infinity, Infinity, Infinity];
+  const hi = [-Infinity, -Infinity, -Infinity];
+  for (let k = 0; k < vx.length; k++) {
+    const x = vx[k];
+    if (!Number.isFinite(x) || Math.abs(x) > BOGUS_RANGE) return null;
+    if (x < lo[k % 3]) lo[k % 3] = x;
+    if (x > hi[k % 3]) hi[k % 3] = x;
+  }
+  if (!(hi[0] - lo[0] > 1e-6 && hi[1] - lo[1] > 1e-6 && hi[2] - lo[2] > 1e-6)) return null;
+  const hull: CachedConvex = { planes, brush: null, faces, verts: Float64Array.from(vx), edges: Int32Array.from(edges) };
+  hull.brush = bevelledBrush(hull, IDENTITY, contents, 0);
+  return hull;
 }
 
 // Bevel tolerances, as the brush builders use them (physics/brushbuild.ts).
@@ -562,10 +575,8 @@ const scratchVerts: { buf: Float64Array } = { buf: new Float64Array(3 * 256) };
 
 /**
  * The world brush of a cached convex piece placed by `t`. Rotations by multiples of 90 degrees move the cached
- * brush (bevels included: they stay exact). Other rotations move the faces and hull corners and rebuild the
- * world-axis bevels from them, the way the brush builders do (axial planes at the bounds - reusing exactly axial
- * faces - first, then the faces, then the edge bevels: planes through a hull edge, parallel to a world axis,
- * that support the hull), without re-clipping the face windings.
+ * brush (bevels included: they stay exact); other rotations move the faces and hull corners and rebuild the
+ * world-axis bevels from them (bevelledBrush).
  */
 export function placeConvex(hull: CachedConvex, t: Placement, contents: number, model = 0): Brush | null {
   const b = hull.brush;
@@ -575,6 +586,16 @@ export function placeConvex(hull: CachedConvex, t: Placement, contents: number, 
     const { mins, maxs } = placedBounds(t, b.mins, b.maxs);
     return { sides, contents, mins, maxs, model };
   }
+  return bevelledBrush(hull, t, contents, model);
+}
+
+/**
+ * The brush of a cached convex piece placed by `t`, with bevels for the world axes built the way the brush
+ * builders build them (physics/brushbuild.ts addBrushBevels): the axial planes at the bounds first (-x +x -y +y
+ * -z +z, reusing exactly axial faces), then the faces, then the edge bevels - planes through a hull edge,
+ * parallel to a world axis, that support the hull. The face windings are known, so nothing is re-clipped.
+ */
+function bevelledBrush(hull: CachedConvex, t: Placement, contents: number, model: number): Brush {
   // world corners + bounds
   const nv = hull.verts.length / 3;
   if (scratchVerts.buf.length < nv * 3) scratchVerts.buf = new Float64Array(nv * 3 * 2);

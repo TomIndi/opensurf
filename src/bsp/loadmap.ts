@@ -5,7 +5,8 @@
 //   parse      parseBsp (zero-copy views into `data`) + entity lump
 //   collision  brush models (brush entities placed in world space), CollisionWorld over world brushes, solid
 //              brush entities and displacement triangles (native two-sided triangle collision; the legacy thin
-//              prism brushes via opts.displacementCollision); brush entities that start disabled are made non-solid
+//              prism brushes via opts.displacementCollision); brush entities that start disabled are made non-solid;
+//              solid static props and prop entities as convex hulls from their .phy collision models (bsp/phy.ts)
 //   textures   pakfile, files the pakfile lacks read from linked game content (the player's CS:S / CS:GO VPKs,
 //              maps/gamecontent.ts), materials (VMT/VTF or procedural stand-ins), 2D sky, baked cubemaps
 //   geometry   face areas, render batches + lightmap atlas + info_overlay decals, props (static props and
@@ -54,6 +55,7 @@ import {
 } from './materials';
 import { PakFile } from './pakfile';
 import { selectLightingSource } from './lightmap';
+import { buildPropCollision } from './phy';
 import { buildMapProps } from './props';
 import { parseBsp } from './reader';
 import { BspFile } from './types';
@@ -77,6 +79,11 @@ export interface LoadBspOptions {
    * displacement-heavy maps; kept for comparison).
    */
   displacementCollision?: 'triangles' | 'prisms';
+  /**
+   * Static props and solid prop_dynamic / prop_physics entities collide with their models' collision hulls
+   * (.phy convex pieces, or hull boxes for SOLID_BBOX) from the pakfile / materials.extraSources (default true).
+   */
+  propCollision?: boolean;
   /**
    * Game content (the player's CS:S / CS:GO VPKs, e.g. a GameContent) searched after the pakfile for the VMTs,
    * VTFs and sky faces the map references but doesn't pack. Default: what the player linked in Settings
@@ -363,6 +370,15 @@ export async function loadBspMap(
   const models = buildBrushModels(bsp, { entities, warnings });
   const set = collectCollisionBrushes(bsp, entities, models, { displacements: opts.displacementCollision ?? 'triangles' });
   for (const w of set.warnings) warnings.push(w);
+  // static props and solid model entities collide with their models' .phy hulls (bsp/phy.ts); the pakfile
+  // view is only a parsed directory (the textures phase opens its own)
+  if (opts.propCollision !== false) {
+    const pc = buildPropCollision(bsp, entities, bsp.pakfile ? [new PakFile(bsp.pakfile)] : [], {
+      extraSources: opts.materials?.extraSources,
+      warnings,
+    });
+    for (const b of pc.brushes) set.brushes.push(b);
+  }
   const collision = createCollisionWorld(set);
   lap('collision');
 

@@ -36,6 +36,7 @@
 //   E2E_DOWNLOAD=1        enable scenario h. Node must reach Google Drive: behind an HTTPS proxy run node with
 //                         NODE_USE_ENV_PROXY=1 (and NODE_EXTRA_CA_CERTS=<proxy CA bundle> for a TLS-inspecting one)
 //   E2E_DOWNLOAD_ARCHIVE  local surf_kitsune.rar served (with Drive's headers) when Node can't reach Drive
+//   E2E_DOWNLOAD_OFFLINE=1  always serve E2E_DOWNLOAD_ARCHIVE (the browser-side path without the network)
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -841,38 +842,43 @@ const HOP_HEADERS = new Set(['content-encoding', 'transfer-encoding', 'connectio
 
 /**
  * Fetches a Google Drive download in Node (the sandbox's TLS proxy is trusted by Node with NODE_USE_ENV_PROXY=1 and
- * NODE_EXTRA_CA_CERTS, not by the browser) and returns the real status, headers and body. With E2E_DOWNLOAD_ARCHIVE
- * (a local copy of the archive) it falls back to that file, with the headers Drive sends, when Node can't reach Drive.
+ * NODE_EXTRA_CA_CERTS, not by the browser) and returns the real status, headers and body. E2E_DOWNLOAD_ARCHIVE (a local
+ * copy of the archive) is served instead, with the headers Drive sends, when Node can't reach Drive or with
+ * E2E_DOWNLOAD_OFFLINE=1.
  */
 async function fetchDriveInNode(url, origin) {
-  try {
-    const res = await fetch(url, { headers: origin ? { origin } : {}, redirect: 'follow' });
-    const body = Buffer.from(await res.arrayBuffer());
-    const headers = {};
-    for (const [k, v] of res.headers) if (!HOP_HEADERS.has(k)) headers[k] = v;
-    headers['content-length'] = String(body.length);
-    return { status: res.status, headers, body, source: 'google drive' };
-  } catch (e) {
-    const local = process.env.E2E_DOWNLOAD_ARCHIVE;
-    if (!local || !existsSync(local)) {
-      throw new Error(
-        `fetching ${url} from Node failed (${e?.cause?.message ?? e?.message}); run with NODE_USE_ENV_PROXY=1 (+ NODE_EXTRA_CA_CERTS behind a TLS proxy) or set E2E_DOWNLOAD_ARCHIVE to a local surf_kitsune.rar`,
-      );
+  const local = process.env.E2E_DOWNLOAD_ARCHIVE;
+  let networkError = 'E2E_DOWNLOAD_OFFLINE=1';
+  if (process.env.E2E_DOWNLOAD_OFFLINE !== '1') {
+    try {
+      const res = await fetch(url, { headers: origin ? { origin } : {}, redirect: 'follow' });
+      const body = Buffer.from(await res.arrayBuffer());
+      const headers = {};
+      for (const [k, v] of res.headers) if (!HOP_HEADERS.has(k)) headers[k] = v;
+      headers['content-length'] = String(body.length);
+      return { status: res.status, headers, body, source: 'google drive' };
+    } catch (e) {
+      networkError = e?.cause?.message ?? e?.message ?? String(e);
     }
-    const body = readFileSync(local);
-    return {
-      status: 200,
-      headers: {
-        'content-type': 'application/octet-stream',
-        'content-disposition': `attachment; filename="${basename(local)}"`,
-        'content-length': String(body.length),
-        'access-control-allow-origin': '*',
-        'access-control-expose-headers': 'Cache-Control, Content-Length, Date, Expires, Server, Transfer-Encoding',
-      },
-      body,
-      source: `local copy ${local}`,
-    };
   }
+  if (!local || !existsSync(local)) {
+    throw new Error(
+      `fetching ${url} from Node failed (${networkError}); run with NODE_USE_ENV_PROXY=1 (+ NODE_EXTRA_CA_CERTS behind a TLS proxy) or set E2E_DOWNLOAD_ARCHIVE to a local surf_kitsune.rar`,
+    );
+  }
+  const body = readFileSync(local);
+  return {
+    status: 200,
+    headers: {
+      'content-type': 'application/octet-stream',
+      'content-disposition': `attachment; filename="${basename(local)}"`,
+      'content-length': String(body.length),
+      'access-control-allow-origin': '*',
+      'access-control-expose-headers': 'Cache-Control, Content-Length, Date, Expires, Server, Transfer-Encoding',
+    },
+    body,
+    source: `local copy ${local} (${networkError})`,
+  };
 }
 
 /**

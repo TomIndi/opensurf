@@ -369,7 +369,8 @@ saved, `!replay` spectates the replay and the PB ghost shows on the next attempt
 the network) the catalog download path: `?map=surf_kitsune` with the browser's requests to drive.usercontent.google.com
 answered through Playwright routing by the real file and real response headers fetched in Node (so the browser's CORS
 check, streamed download, unrar wasm and IndexedDB cache run for real; behind an HTTPS proxy run with
-`NODE_USE_ENV_PROXY=1` and `NODE_EXTRA_CA_CERTS`, or set `E2E_DOWNLOAD_ARCHIVE` to a local copy): the map plays, and a
+`NODE_USE_ENV_PROXY=1` and `NODE_EXTRA_CA_CERTS`; `E2E_DOWNLOAD_ARCHIVE` names a local copy served when Node can't reach
+Drive, always with `E2E_DOWNLOAD_OFFLINE=1`): the map plays, and a
 reload loads it "from cache" without touching Drive. `E2E_PORT` pins the dev server port.
 Any uncaught page error fails the run. Env: `SURF_TEST_MAPS`, `SURF_TEST_MAPS_LARGE` (+`E2E_LARGE=1`),
 `CHROMIUM_PATH`, `E2E_OUT` (screenshots + `<prefix>results.json`), `E2E_PREFIX`, `E2E_ONLY=a,c`, `E2E_MAPS=...`.
