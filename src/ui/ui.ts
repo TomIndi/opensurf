@@ -364,7 +364,7 @@ export class Ui implements UiApi {
     }
     if (this.menuMode === 'pause') {
       if (this.pauseMenu.page !== 'root') this.pauseMenu.setPage('root');
-      else this.resumeGame();
+      else this.resumeGame(true);
       return true;
     }
     if (this.menuMode === 'main') {
@@ -428,12 +428,17 @@ export class Ui implements UiApi {
     }
   }
 
-  private resumeGame(): void {
+  /**
+   * Resumes from the pause menu. A click (the Resume button) captures the mouse right away. Escape can't: browsers
+   * don't count Escape as a user gesture and use it to leave the pointer lock, so a lock requested from it is
+   * refused or dropped at once (and the drop paused the game again). After Escape the next key press or click
+   * captures the mouse (InputDevice), with the "click to capture" hint up meanwhile.
+   */
+  private resumeGame(viaEscape = false): void {
     this.sound.play('ui_click');
     this.game?.resume();
-    // Resume happens on a click/key (a user gesture): capture the mouse right away (game.resume() doesn't).
-    // Deferred a tick so a game that does lock in resume() wins; requestLock() skips if already locked.
-    setTimeout(() => this.relockIfPlaying(), 0);
+    // deferred a tick so a game that does lock in resume() wins; requestLock() skips if already locked
+    if (!viaEscape) setTimeout(() => this.relockIfPlaying(), 0);
   }
 
   private cancelLoading(): void {

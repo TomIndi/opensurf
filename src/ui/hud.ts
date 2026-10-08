@@ -256,7 +256,7 @@ export class Hud {
     this.specEl.append(h('span.spec-tag', { text: 'Replay' }), specTextEl);
     this.hintEl = h('div.hud-hint');
     this.centerEl = h('div.hud-center');
-    this.lockHint = h('div.hud-lockhint', null, h('span.kbd', { text: 'CLICK' }), ' to capture the mouse');
+    this.lockHint = h('div.hud-lockhint', null, h('span.kbd', { text: 'CLICK' }), ' or press a key to capture the mouse');
 
     this.el = h(
       'div.hud',
