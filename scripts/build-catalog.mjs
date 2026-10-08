@@ -5,7 +5,7 @@
 //
 // Usage: node scripts/build-catalog.mjs
 // Behind a proxy with Node 22: NODE_USE_ENV_PROXY=1 NODE_EXTRA_CA_CERTS=<ca.pem> node scripts/build-catalog.mjs
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -255,6 +255,15 @@ async function main() {
   console.log(`catalog: ${catalog.length} maps, ${withTier} with tier, ${withZones} with zone presets`);
   const missingFeatured = FEATURED.filter((f) => !maps.has(f));
   if (missingFeatured.length) console.warn(`featured maps not found: ${missingFeatured.join(', ')}`);
+  // CS:GO-era popularity + classics (public/maps/popularity.json) replace the built-in featured list when present
+  const { mergePopularity } = await import('./merge-popularity.mjs');
+  const popPath = join(OUT, 'popularity.json');
+  if (existsSync(popPath)) {
+    const file = JSON.parse(readFileSync(join(OUT, 'catalog.json'), 'utf8'));
+    const r = mergePopularity(file.maps, JSON.parse(readFileSync(popPath, 'utf8')));
+    writeFileSync(join(OUT, 'catalog.json'), JSON.stringify(file));
+    console.log(`popularity: ${r.scored} maps scored, ${r.classics} classics`);
+  }
 }
 
 main().catch((e) => {

@@ -9,7 +9,7 @@ import { clear, h, storageGet, storageSet } from './dom';
 import { mapNameEl, tierPill } from './mapui';
 import { formatTime, formatTimeShort, mapTypeName, prettyMapName, tierName } from './format';
 import { icon } from './icons';
-import { filterMaps, type MapFilterOptions, type MapSort, type MapTypeFilter, tierCounts } from './mapfilter';
+import { comparePopularity, filterMaps, type MapFilterOptions, type MapSort, type MapTypeFilter, tierCounts } from './mapfilter';
 import { mapThumbSvg } from './thumbs';
 import { VirtualList } from './virtual';
 
@@ -50,7 +50,7 @@ export class MapBrowser {
   private catalogError: string | null = null;
   private catalogLoading: Promise<void> | null = null;
   private cached = new Set<string>();
-  private filter: MapFilterOptions = { query: '', tiers: new Set(), type: 'all', sort: 'name', cachedOnly: false, zonesOnly: false, cached: this.cached };
+  private filter: MapFilterOptions = { query: '', tiers: new Set(), type: 'all', sort: 'popular', cachedOnly: false, zonesOnly: false, cached: this.cached };
   private readonly search: HTMLInputElement;
   private readonly list: VirtualList<CatalogEntry>;
   private readonly details: HTMLElement;
@@ -75,7 +75,7 @@ export class MapBrowser {
       tabsEl.appendChild(b);
     };
     this.allTabCount = h('span.tab-count', { text: '' });
-    mkTab('featured', 'Featured', 'star');
+    mkTab('featured', 'Classics', 'star');
     mkTab('all', 'All Maps', 'list', this.allTabCount);
     mkTab('builtin', 'Built-in', 'cube');
     mkTab('local', 'Local File', 'upload');
@@ -135,6 +135,7 @@ export class MapBrowser {
     );
     const sortSel = h('select.select.sort-select', { attrs: { 'aria-label': 'Sort' } }) as HTMLSelectElement;
     for (const [v, l] of [
+      ['popular', 'Most played (CS:GO era)'],
       ['name', 'Name A–Z'],
       ['tier', 'Tier ↑'],
       ['tier-desc', 'Tier ↓'],
@@ -512,7 +513,8 @@ export class MapBrowser {
       for (let i = 0; i < 8; i++) grid.appendChild(h('div.map-card.skeleton'));
       return;
     }
-    const featured = this.catalog.filter((e) => e.featured).sort((a, b) => (a.tier ?? 9) - (b.tier ?? 9) || a.name.localeCompare(b.name));
+    // the classics, most played first
+    const featured = this.catalog.filter((e) => e.featured).sort((a, b) => comparePopularity(a, b) || a.name.localeCompare(b.name));
     for (const e of featured) grid.appendChild(this.card(e));
   }
 
@@ -541,7 +543,7 @@ export class MapBrowser {
   }
 
   featuredEntries(): CatalogEntry[] {
-    return this.catalog.filter((e) => e.featured);
+    return this.catalog.filter((e) => e.featured).sort(comparePopularity);
   }
 
   catalogCounts(): { total: number; zoned: number } | null {
