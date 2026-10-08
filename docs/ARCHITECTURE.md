@@ -296,11 +296,7 @@ Video: `mat_fullbright 0`, `r_drawzones 1` (0 off, 1 floor outline, 2 full box �
 `r_brightness 1`, `r_renderscale 1`, `r_anisotropy 8`, `fog_enable 1`, `r_3dsky 1`.
 
 Surf/HUD: `surf_hud_speed 1`, `surf_hud_timer 1`, `surf_showkeys 1`, `surf_ghost 1`, `surf_ghost_trail 1`,
-`surf_prespeed 350`, `surf_speedometer_color 1`, `surf_chat_sounds 1`, `surf_keep_momentum 1` (teleports keep the speed: a
-map teleport that would stop the player — fails and stage transitions — a death, or a teletostart / checker zone gives
-back the horizontal speed, pointed the way the player faces afterwards; `!r` / `!back` / `!s` / `!b` / `!tele` still
-stop; momentum runs are their own records style: course keys `map|group|100m`, `!pb` / `!top` say "100 tick,
-momentum"; see src/game/momentum.ts).
+`surf_prespeed 350`, `surf_speedometer_color 1`, `surf_chat_sounds 1`.
 
 Autoexec compatibility (`COMPAT_CVAR_DEFS`, hidden, archived where CS:GO archives them, no effect): `viewmodel_*`,
 `cl_bob*`, `r_drawviewmodel`, `cl_draw_only_deathnotices`, `cl_radar_*`, `cl_hud_*` extras, `cl_teamid_overhead_*`,

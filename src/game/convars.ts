@@ -62,23 +62,9 @@ export const PHYSICS_CVAR_DEFS: readonly CvarDef[] = [
   { name: 'surf_prespeed', def: '350', flags: R, min: 0, help: 'Speed cap when leaving a start zone (u/s, 0 = none).' },
 ];
 
-/** Gameplay convars that are not movement physics. */
-export const GAMEPLAY_CVAR_DEFS: readonly CvarDef[] = [
-  {
-    name: 'surf_keep_momentum',
-    def: '1',
-    // a server rule like the tickrate (its own records style): changing it mid-run puts the run in practice
-    flags: R | A,
-    min: 0,
-    max: 1,
-    help: 'Teleports keep your speed: fail teleports, stage teleports and deaths give you back your horizontal speed, pointed the way you face after the teleport. Momentum runs have their own records.',
-  },
-];
-
 /** All convars registered by the game core, in registration order. */
 export const CVAR_DEFS: readonly CvarDef[] = [
   ...PHYSICS_CVAR_DEFS,
-  ...GAMEPLAY_CVAR_DEFS,
   { name: 'sv_cheats', def: '0', flags: R, min: 0, max: 1, help: 'Allow cheat commands and cvars (mat_wireframe, ent_fire, host_timescale).' },
   { name: 'tickrate', def: '100', flags: R | A, help: 'Simulation rate in ticks per second: 64 / 85.3 / 100 / 102.4 / 128 (snaps to the nearest).' },
   { name: 'host_timescale', def: '1', flags: C, min: 0.1, max: 10, help: 'Game speed multiplier (cheat; runs become unranked).' },

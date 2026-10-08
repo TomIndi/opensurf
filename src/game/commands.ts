@@ -37,9 +37,8 @@ import {
 import type { ChatColor, ChatSegment, GameState, SoundApi, TimerState, UiApi } from './api';
 import { addConfigProvider, loadSavedConfig, scheduleConfigSave } from './binds';
 import type { IEntitySystem, IReplaySystem, ISurfTimer, RunRecord } from './contracts';
-import type { MapTeleportEvent } from './entities';
 import { deleteCfg, execCfg, listCfgs, normalizeCfgName, readCfg, writeCfg } from './cfgstore';
-import { currentTickrate, getCompletions, getStageBest, tickStyleText } from './records';
+import { currentTickrate, getCompletions, getStageBest, tickLabel } from './records';
 import { formatRunTime } from './timer';
 import { getZoneReport } from './zoneresolve';
 import { showZonesHelp } from './zoneeditor';
@@ -62,8 +61,6 @@ export interface TimerExtras {
   interruptRun(): boolean;
   /** Ticks per second the records/replays of this session belong to. */
   tickrate(): number;
-  /** Called after a fail respawned the player (death, teletostart / checker zone). */
-  onFailRespawn: (() => void) | null;
 }
 export type GameTimer = ISurfTimer & Partial<TimerExtras>;
 
@@ -73,7 +70,6 @@ export interface EntityExtras {
   fireInput(target: string, input: string, param?: string, delay?: number): void;
   resetPlayerState(): void;
   playerClassname: string;
-  addTeleportListener(cb: (ev: MapTeleportEvent) => void): () => void;
 }
 export type GameEntities = IEntitySystem & Partial<EntityExtras>;
 
@@ -382,7 +378,7 @@ function showPb(ctx: CommandContext, s: CommandSession, group: number): void {
   const where = group > 0 ? `${s.map.name} Bonus ${group}` : s.map.name;
   const tick = sessionTickrate(s);
   if (!recs.length) {
-    reply(ctx, seg("You haven't finished "), seg(where, 'gold'), seg(` at ${tickStyleText(tick)} yet.`));
+    reply(ctx, seg("You haven't finished "), seg(where, 'gold'), seg(` at ${tickLabel(tick)} tick yet.`));
     return;
   }
   const pb = recs[0];
@@ -391,7 +387,7 @@ function showPb(ctx: CommandContext, s: CommandSession, group: number): void {
     ctx,
     seg('Your PB on '),
     seg(where, 'gold'),
-    seg(` (${tickStyleText(tick)})`, 'grey'),
+    seg(` (${tickLabel(tick)} tick)`, 'grey'),
     seg(': '),
     seg(formatRunTime(pb.time), 'lime'),
     seg(` (${total} ${total === 1 ? 'completion' : 'completions'}, ${pb.jumps} jumps, ${Math.round(pb.sync)}% sync)`, 'grey'),
@@ -401,12 +397,12 @@ function showPb(ctx: CommandContext, s: CommandSession, group: number): void {
 function showTop(ctx: CommandContext, s: CommandSession, group: number): void {
   const recs: RunRecord[] = s.timer.getRecords(group);
   const where = group > 0 ? `${s.map.name} Bonus ${group}` : s.map.name;
-  const tick = tickStyleText(sessionTickrate(s));
+  const tick = tickLabel(sessionTickrate(s));
   if (!recs.length) {
-    reply(ctx, seg('No times on '), seg(where, 'gold'), seg(` at ${tick} yet.`));
+    reply(ctx, seg('No times on '), seg(where, 'gold'), seg(` at ${tick} tick yet.`));
     return;
   }
-  reply(ctx, seg('Top times on '), seg(where, 'gold'), seg(` (${tick})`, 'grey'), seg(':'));
+  reply(ctx, seg('Top times on '), seg(where, 'gold'), seg(` (${tick} tick)`, 'grey'), seg(':'));
   const best = recs[0].time;
   recs.slice(0, 10).forEach((r, i) => {
     const d = new Date(r.date);
@@ -471,7 +467,7 @@ function showStages(ctx: CommandContext, s: CommandSession): void {
       if (i < 1 || !(t >= 0)) return;
       segs.push(seg(segs.length ? ' · ' : '', 'grey'), seg(`CP${i} `, 'lightblue'), seg(formatRunTime(t), 'lime'));
     });
-    if (segs.length) reply(ctx, seg(`Your PB's checkpoints (${tickStyleText(tick)}): `), ...segs);
+    if (segs.length) reply(ctx, seg(`Your PB's checkpoints (${tickLabel(tick)} tick): `), ...segs);
     return;
   }
   reply(ctx, seg(where, 'gold'), seg(` has ${n} stages: `), seg(`!s 1 - !s ${n}`, 'lightblue'), seg('.'));
@@ -481,7 +477,7 @@ function showStages(ctx: CommandContext, s: CommandSession): void {
     if (!b) continue;
     segs.push(seg(segs.length ? ' · ' : '', 'grey'), seg(`S${i} `, 'lightblue'), seg(formatRunTime(b.time), 'lime'));
   }
-  if (segs.length) reply(ctx, seg(`Stage records (${tickStyleText(tick)}): `), ...segs);
+  if (segs.length) reply(ctx, seg(`Stage records (${tickLabel(tick)} tick): `), ...segs);
   else reply(ctx, seg('No stage times yet: complete stages in a run, or practice one with ', 'grey'), seg('!s <n>', 'lightblue'), seg('.', 'grey'));
 }
 
@@ -494,7 +490,7 @@ function showRank(ctx: CommandContext, s: CommandSession, group: number): void {
   const tick = sessionTickrate(s);
   const recs = s.timer.getRecords(group);
   if (!recs.length) {
-    reply(ctx, seg('You are not ranked on '), seg(where, 'gold'), seg(` (${tickStyleText(tick)}) yet: finish it to get a rank.`));
+    reply(ctx, seg('You are not ranked on '), seg(where, 'gold'), seg(` (${tickLabel(tick)} tick) yet: finish it to get a rank.`));
     return;
   }
   const total = Math.max(getCompletions(s.map.name, group, tick), recs.length);
@@ -505,7 +501,7 @@ function showRank(ctx: CommandContext, s: CommandSession, group: number): void {
     seg('1/1', 'gold'),
     seg(' on '),
     seg(where, 'gold'),
-    seg(` (${tickStyleText(tick)})`, 'grey'),
+    seg(` (${tickLabel(tick)} tick)`, 'grey'),
     seg(' | PB '),
     seg(formatRunTime(recs[0].time), 'lime'),
     seg(` | ${total} ${total === 1 ? 'completion' : 'completions'}`, 'grey'),

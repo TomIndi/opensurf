@@ -89,7 +89,6 @@ import { installDebugApi, parseUrlOptions } from './debugapi';
 import { EntitySystem } from './entities';
 import { createHudState, horizontalSpeed, turnFromYawDelta, updateHudState } from './hud';
 import { InputDevice, InputState, KeyDispatcher, readMouseSettings, registerButtonCommands } from './input';
-import { momentumVelocity } from './momentum';
 import { ReplaySystem, sampleReplay } from './replay';
 import { SurfTimer } from './timer';
 import { ZoneEditor, getEditorDebugBoxes, installZoneEditor, registerZoneCommands } from './zoneeditor';
@@ -419,9 +418,6 @@ export class Session implements TimerHost, CommandSession {
   ghostGroup = 0;
   /** How this map was loaded (`retry` reloads it). */
   request: LoadRequest | null = null;
-  /** Velocity right before the latest teleport, and whether that teleport stopped the player (momentum.ts). */
-  readonly preTeleportVelocity = v3();
-  lastTeleportStopped = false;
   private readonly game: Game;
 
   constructor(game: Game, map: LoadedMap, tier: number | null) {
@@ -450,9 +446,6 @@ export class Session implements TimerHost, CommandSession {
       this.zonesDirty = true;
     };
     this.zoneEditor = new ZoneEditor(this, timer);
-    // surf_keep_momentum: map teleports and fails give the player their speed back
-    timer.onFailRespawn = () => game.keepMomentum(this);
-    this.entities.addTeleportListener?.(() => game.keepMomentum(this));
   }
 
   get moveVars(): MoveVars {
@@ -595,7 +588,6 @@ export class Game implements GameApi, CommandContext {
   private spec: SpectateState | null = null;
   private readonly specVel = v3();
   private readonly fwd = v3();
-  private readonly momentumVel = v3();
   private readonly eye = v3();
   private readonly hudEye = v3();
 
@@ -1165,8 +1157,6 @@ export class Game implements GameApi, CommandContext {
   /** @internal WorldHost.teleportPlayer of a session. */
   teleportInSession(s: Session, origin: Vec3, angles: QAngle | null, velocity: Vec3 | null): void {
     const ps = s.player;
-    v3copy(s.preTeleportVelocity, ps.velocity);
-    s.lastTeleportStopped = !!velocity && velocity.x === 0 && velocity.y === 0 && velocity.z === 0;
     if (Number.isFinite(origin.x) && Number.isFinite(origin.y) && Number.isFinite(origin.z)) v3copy(ps.origin, origin);
     if (angles) {
       const yaw = Number.isFinite(angles.yaw) ? angles.yaw : 0;
@@ -1183,23 +1173,6 @@ export class Game implements GameApi, CommandContext {
     v3copy(s.prevOrigin, ps.origin);
     s.prevViewOffset = ps.viewOffsetZ;
     s.stepDistance = 0;
-  }
-
-  /**
-   * @internal surf_keep_momentum: the teleport that just stopped the player (a map teleport, a death, a teletostart
-   * / checker zone) gives them back the horizontal speed they had, pointed the way they now face.
-   */
-  keepMomentum(s: Session): void {
-    if (!s.lastTeleportStopped) return;
-    s.lastTeleportStopped = false;
-    if ((console_.getCvar('surf_keep_momentum')?.num ?? 1) <= 0) return;
-    const ps = s.player;
-    if (ps.moveType !== MOVETYPE_WALK) return;
-    const v = momentumVelocity(s.preTeleportVelocity, ps.viewAngles.yaw, this.momentumVel);
-    if (v.x * v.x + v.y * v.y < 1) return;
-    ps.velocity.x = v.x;
-    ps.velocity.y = v.y;
-    ps.velocity.z = 0;
   }
 
   /** @internal WorldHost.killPlayer of a session. */

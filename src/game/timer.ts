@@ -51,7 +51,7 @@ import { MASK_PLAYERSOLID, newTrace } from '../physics/types';
 import { ChatColor, ChatSegment, SoundName, TimerHud, TimerState } from './api';
 import { IReplaySystem, ISurfTimer, RunRecord, TimerHost } from './contracts';
 import type { MapTeleportEvent } from './entities';
-import { addRecord, addStageTime, getPersonalBest, getRecords, recordLabel } from './records';
+import { addRecord, addStageTime, getPersonalBest, getRecords, tickLabel } from './records';
 
 // ------------------------------------------------------------------------------------------ formatting
 
@@ -511,20 +511,8 @@ export class SurfTimer implements ISurfTimer {
   }
 
   onPlayerKilled(): void {
-    this.failRespawn(() => {
-      if (this.inRun() && this.isStagedGroup(this.group) && this.stage > 1) this.restartStage();
-      else this.restart(this.group);
-    });
-  }
-
-  /** Called after a fail respawned the player: a death, a teletostart or checker zone. */
-  onFailRespawn: (() => void) | null = null;
-
-  /** Runs a fail's respawn and reports it when the player was actually moved. */
-  private failRespawn(respawn: () => void): void {
-    const gen = this.teleportGen;
-    respawn();
-    if (this.teleportGen !== gen) this.onFailRespawn?.();
+    if (this.inRun() && this.isStagedGroup(this.group) && this.stage > 1) this.restartStage();
+    else this.restart(this.group);
   }
 
   /**
@@ -667,13 +655,13 @@ export class SurfTimer implements ISurfTimer {
         }
         return;
       case 'teletostart':
-        if (!this.noclip()) this.failRespawn(() => this.restart(this.group));
+        if (!this.noclip()) this.restart(this.group);
         return;
       case 'validator':
         if (z.group === this.group) this.validated = true;
         return;
       case 'checker':
-        if (z.group === this.group && !this.validated && !this.noclip()) this.failRespawn(() => this.restartStage());
+        if (z.group === this.group && !this.validated && !this.noclip()) this.restartStage();
         return;
       default:
         return;
@@ -1042,7 +1030,7 @@ export class SurfTimer implements ISurfTimer {
 
   private personalBest(group: number): RunRecord | null {
     const tick = this.tickrate();
-    const key = `${group}|${recordLabel(tick)}`;
+    const key = `${group}|${tickLabel(tick)}`;
     let pb = this.pbCache.get(key);
     if (pb === undefined) {
       pb = getPersonalBest(this.host.map.name, group, tick);
