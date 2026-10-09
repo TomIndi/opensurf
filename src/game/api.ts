@@ -184,11 +184,26 @@ export interface GameApi {
    * (or m_rawinput is 0).
    */
   readonly rawInputActive?: boolean | null;
+  /** Optional: what the 3D view renders with (Settings → Video → Graphics); null when unknown. */
+  graphicsInfo?(): GraphicsInfo | null;
   /**
    * Optional: watch the KSF world record replay of the current map (like the `!wrreplay` chat command, whose
    * replies go to the chat; a replay already being watched is switched to the WR).
    */
   watchKsfWr?(): void;
+}
+
+/** The renderer's device and framebuffer (GameApi.graphicsInfo). */
+export interface GraphicsInfo {
+  /** GPU as the browser reports it (WebGL renderer string; '' when hidden). */
+  renderer: string;
+  vendor: string;
+  /** MSAA samples in use (0 = off) and the counts the device supports. */
+  samples: number;
+  supportedSamples: number[];
+  /** Size of the 3D view's framebuffer (canvas x devicePixelRatio x render scale) and of the canvas. */
+  renderSize: [number, number];
+  canvasSize: [number, number];
 }
 
 /** What the game can ask the UI to do. Implemented by ui/ui.ts. */
@@ -283,6 +298,18 @@ export interface RenderSettings {
   drawSky3D: boolean;
   /** Optional: how zones are drawn when drawZones is on: outline on the zone's floor (default) or the full box. */
   zoneStyle?: 'floor' | 'box';
+  /**
+   * Optional: multisample anti-aliasing samples of the 3D view (mat_antialias: 0 off, 2, 4, 8; clamped to what the
+   * device supports). Applied live.
+   */
+  antialias?: number;
+  /** Optional: draw everything instead of only what the BSP's visibility sets say the eye's cluster can see (r_novis). */
+  novis?: boolean;
+  /**
+   * Optional: draw an expensive sky (3D skybox, procedural sky) after the opaque world, only where it shows, with a
+   * stencil (default true); false draws it first, everywhere, without one (r_skystencil 0: debug / GPU cost comparison).
+   */
+  skyStencil?: boolean;
 }
 
 export interface RendererApi {

@@ -1,7 +1,8 @@
-import { CustomBlending, DoubleSide, FrontSide, Matrix3, NoBlending, NormalBlending, OneFactor, SrcAlphaFactor, Vector3 } from 'three';
+import { AlwaysStencilFunc, CustomBlending, DoubleSide, EqualStencilFunc, FrontSide, KeepStencilOp, Matrix3, NoBlending, NormalBlending, OneFactor, ReplaceStencilOp, SrcAlphaFactor, Vector3 } from 'three';
 import { describe, expect, it } from 'vitest';
 import { fallbackMaterial } from '../src/bsp/materials';
 import type { MaterialDef } from '../src/map/types';
+import { STENCIL_SKY, stencilRole } from '../src/render/stencil';
 import { TextureCache } from '../src/render/textures';
 import {
   BLEND_OFFSET_FACTOR,
@@ -55,10 +56,10 @@ const variant = (over: Partial<SurfaceVariant> = {}): SurfaceVariant => ({
   ...over,
 });
 
-function factory(reversedDepth = false) {
+function factory(reversedDepth = false, alphaToCoverage = false) {
   const textures = new TextureCache(caps);
   const shared = createSharedUniforms();
-  return { textures, shared, mats: new SurfaceMaterials({ textures, shared, reversedDepth }) };
+  return { textures, shared, mats: new SurfaceMaterials({ textures, shared, reversedDepth, alphaToCoverage }) };
 }
 
 describe('colour helpers', () => {
@@ -295,5 +296,60 @@ describe('SurfaceMaterials', () => {
       expect(m.uniforms.map.value).toBeTruthy();
       if (def.unlit) expect(m.defines.USE_SYNTH_LIGHT).toBeUndefined();
     }
+  });
+
+  it('stencil roles: main view surfaces cover the sky, sky faces reveal it, the 3D skybox draws only on sky', () => {
+    const { mats } = factory();
+    const wall = mats.get(testMaterial('wall'), variant(), '', null, -1);
+    const glass = mats.get(testMaterial('glass', { translucent: true }), variant(), '', null, -1);
+    const water = mats.get(testMaterial('water', { isWater: true }), variant(), '', null, -1);
+    for (const m of [wall, glass, water]) {
+      expect(stencilRole(m)).toBe('occluder');
+      expect(m.stencilWrite).toBe(true);
+      expect(m.stencilFunc).toBe(AlwaysStencilFunc);
+      expect(m.stencilRef).toBe(0);
+      expect(m.stencilZPass).toBe(ReplaceStencilOp);
+      expect(m.stencilFail).toBe(KeepStencilOp);
+      expect(m.stencilZFail).toBe(KeepStencilOp);
+      expect(m.stencilWriteMask).toBe(0xff);
+    }
+    const mask = mats.skyMask('world');
+    expect(stencilRole(mask)).toBe('skyMask');
+    expect(mask.stencilRef).toBe(STENCIL_SKY);
+    expect(mask.stencilZPass).toBe(ReplaceStencilOp);
+    const sky3dWall = mats.get(testMaterial('wall'), variant({ pass: 'sky3d' }), '', null, -1);
+    for (const m of [sky3dWall, mats.skyMask('sky3d')]) {
+      expect(stencilRole(m)).toBe('skyOnly');
+      expect(m.stencilFunc).toBe(EqualStencilFunc);
+      expect(m.stencilRef).toBe(STENCIL_SKY);
+      expect(m.stencilWriteMask).toBe(0);
+      expect(m.stencilZPass).toBe(KeepStencilOp);
+    }
+  });
+
+  it('alpha to coverage follows the multisampling (alpha-tested opaque surfaces only)', () => {
+    const { mats } = factory(false, true);
+    const fence = mats.get(testMaterial('fence', { alphaTest: true }), variant(), '', null, -1);
+    const glass = mats.get(testMaterial('glassfence', { alphaTest: true, translucent: true }), variant(), '', null, -1);
+    const wall = mats.get(testMaterial('wall'), variant(), '', null, -1);
+    expect(fence.defines.USE_A2C).toBe('');
+    expect(fence.alphaToCoverage).toBe(true);
+    expect(glass.defines.USE_A2C).toBeUndefined();
+    const v = fence.version;
+    mats.setAlphaToCoverage(false);
+    expect(fence.defines.USE_A2C).toBeUndefined();
+    expect(fence.alphaToCoverage).toBe(false);
+    expect(fence.version).toBeGreaterThan(v); // recompiled
+    expect(glass.alphaToCoverage).toBe(false);
+    expect(wall.defines.USE_A2C).toBeUndefined();
+    // created while off: none; switching on adds it
+    const fence2 = mats.get(testMaterial('fence2', { alphaTest: true }), variant(), '', null, -1);
+    expect(fence2.defines.USE_A2C).toBeUndefined();
+    mats.setAlphaToCoverage(true);
+    expect(fence.defines.USE_A2C).toBe('');
+    expect(fence2.defines.USE_A2C).toBe('');
+    expect(fence2.alphaToCoverage).toBe(true);
+    expect(glass.defines.USE_A2C).toBeUndefined();
+    expect(wall.alphaToCoverage).toBe(false);
   });
 });

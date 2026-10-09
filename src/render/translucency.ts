@@ -6,7 +6,12 @@
 // lets a far layer cover a near one. Source sorts translucent brush faces back to front; here every translucent
 // mesh's triangles are grouped by plane once, and the groups are re-ordered by view depth whenever the camera
 // changes their order (an index buffer rewrite + upload only then: usually a handful of times per second at most).
-import { BufferAttribute, Mesh, Vector3 } from 'three';
+//
+// Per frame this only looks at meshes three.js may draw (bounding sphere inside the view frustum's side planes)
+// whose order can have changed (the eye moved since they were last sorted: the order depends on the eye position
+// only, not on where it looks), rewrites only the span of the index list whose groups moved (copies of views
+// made once, no allocation) and uploads only that span.
+import { BufferAttribute, Matrix4, Mesh, Sphere, Vector3 } from 'three';
 
 /** One plane's triangles: a contiguous range of the grouped index list. */
 export interface PlaneGroup {
@@ -27,9 +32,55 @@ interface SortedMesh {
   /** Indices grouped by plane (the source the draw order is assembled from). */
   base: Uint16Array | Uint32Array;
   groups: PlaneGroup[];
+  /** Each group's indices in `base` (views made once, so rewriting the order allocates nothing). */
+  views: (Uint16Array | Uint32Array)[];
   /** Current draw order (group ids, first drawn first) and scratch space for the next one. */
   order: Int32Array;
   depth: Float64Array;
+  /** Eye position of the last sort (NaN = never sorted). */
+  ex: number;
+  ey: number;
+  ez: number;
+}
+
+/** Pending upload ranges of an index buffer before they are merged into one (the mesh stayed undrawn). */
+const MAX_UPDATE_RANGES = 8;
+
+const _sphere = new Sphere();
+/** Side planes of the view frustum (a, b, c, d per plane, normalized), see sideplanes(). */
+const _planes = new Float64Array(16);
+
+/**
+ * The four side planes of a view-projection matrix (left, right, bottom, top; inside = positive). They are the
+ * same for any depth convention (standard, reversed, logarithmic), unlike near/far.
+ */
+export function sidePlanes(vp: Matrix4, out: Float64Array): void {
+  const e = vp.elements;
+  for (let p = 0; p < 4; p++) {
+    const row = p >> 1; // 0: x, 1: y
+    const sign = p & 1 ? -1 : 1;
+    const a = e[3] + sign * e[row];
+    const b = e[7] + sign * e[4 + row];
+    const c = e[11] + sign * e[8 + row];
+    const d = e[15] + sign * e[12 + row];
+    const len = Math.hypot(a, b, c) || 1;
+    out[p * 4] = a / len;
+    out[p * 4 + 1] = b / len;
+    out[p * 4 + 2] = c / len;
+    out[p * 4 + 3] = d / len;
+  }
+}
+
+/**
+ * False when a mesh's world bounding sphere is entirely outside one of the side planes: three.js won't draw it
+ * either (it culls with the same sphere against all six planes; the radius is padded so rounding never culls a
+ * mesh here that three.js draws).
+ */
+export function sphereInSidePlanes(planes: Float64Array, sphere: Sphere): boolean {
+  const c = sphere.center;
+  const r = sphere.radius * 1.001 + 1;
+  for (let p = 0; p < 16; p += 4) if (planes[p] * c.x + planes[p + 1] * c.y + planes[p + 2] * c.z + planes[p + 3] < -r) return false;
+  return true;
 }
 
 /** Most plane groups sorted per mesh: beyond that (curved translucent displacements...) groups are merged spatially. */
@@ -156,8 +207,9 @@ export function groupFarness(g: PlaneGroup, ex: number, ey: number, ez: number):
 /** Keeps the plane groups of translucent meshes in back-to-front order for the current camera. */
 export class TranslucentSorter {
   private readonly meshes: SortedMesh[] = [];
-  /** Index buffer rewrites so far (diagnostics/tests). */
+  /** Index buffer rewrites so far, and the indices they rewrote (diagnostics/tests). */
   rewrites = 0;
+  uploaded = 0;
 
   get count(): number {
     return this.meshes.length;
@@ -201,22 +253,42 @@ export class TranslucentSorter {
     const n = capped.groups.length;
     const order = new Int32Array(n);
     for (let i = 0; i < n; i++) order[i] = i;
-    this.meshes.push({ mesh, index: index as BufferAttribute, base, groups: capped.groups, order, depth: new Float64Array(n) });
+    const views = capped.groups.map((gr) => base.subarray(gr.start, gr.start + gr.count));
+    this.meshes.push({ mesh, index: index as BufferAttribute, base, groups: capped.groups, views, order, depth: new Float64Array(n), ex: NaN, ey: NaN, ez: NaN });
     return true;
   }
 
   /**
-   * Re-orders every registered mesh far-to-near as seen from the eye; rewrites an index buffer only when its
-   * order changed. No allocation.
+   * Re-orders the registered meshes far-to-near as seen from the eye; rewrites (and uploads) only the part of an
+   * index buffer whose order changed. With `viewProjection` (the camera's projection x view matrix), meshes
+   * outside the view are skipped until they come into view. No allocation.
    */
-  update(eye: Vector3): void {
+  update(eye: Vector3, viewProjection?: Matrix4): void {
+    const ex = eye.x;
+    const ey = eye.y;
+    const ez = eye.z;
+    if (viewProjection) sidePlanes(viewProjection, _planes);
     for (const s of this.meshes) {
-      if (!s.mesh.visible) continue;
+      const mesh = s.mesh;
+      // hidden, or culled by the visibility sets (out of the camera's layer, see pvs.ts)
+      if (!mesh.visible || (mesh.layers.mask & 1) === 0) continue;
+      // the order only depends on the eye position
+      if (s.ex === ex && s.ey === ey && s.ez === ez) continue;
+      if (viewProjection) {
+        const g = mesh.geometry;
+        if (!g.boundingSphere) g.computeBoundingSphere();
+        if (g.boundingSphere && !sphereInSidePlanes(_planes, _sphere.copy(g.boundingSphere).applyMatrix4(mesh.matrixWorld))) continue;
+      }
+      s.ex = ex;
+      s.ey = ey;
+      s.ez = ez;
       const { groups, order, depth } = s;
       const n = groups.length;
-      for (let i = 0; i < n; i++) depth[i] = groupFarness(groups[i], eye.x, eye.y, eye.z);
-      // insertion sort of the previous order (nearly sorted frame to frame): far (large depth) first
-      let changed = false;
+      for (let i = 0; i < n; i++) depth[i] = groupFarness(groups[i], ex, ey, ez);
+      // insertion sort of the previous order (nearly sorted frame to frame): far (large depth) first; the
+      // positions lo..hi are a permutation of the same groups, so the index span they cover keeps its place
+      let lo = n;
+      let hi = -1;
       for (let i = 1; i < n; i++) {
         const id = order[i];
         const d = depth[id];
@@ -227,20 +299,37 @@ export class TranslucentSorter {
         }
         if (j + 1 !== i) {
           order[j + 1] = id;
-          changed = true;
+          if (j + 1 < lo) lo = j + 1;
+          hi = i;
         }
       }
-      if (!changed) continue;
+      if (hi < 0) continue;
       const arr = s.index.array as Uint16Array | Uint32Array;
       let o = 0;
-      for (let i = 0; i < n; i++) {
-        const g = groups[order[i]];
-        arr.set(s.base.subarray(g.start, g.start + g.count), o);
-        o += g.count;
+      for (let i = 0; i < lo; i++) o += groups[order[i]].count;
+      const start = o;
+      for (let i = lo; i <= hi; i++) {
+        const v = s.views[order[i]];
+        arr.set(v, o);
+        o += v.length;
       }
-      s.index.clearUpdateRanges();
-      s.index.needsUpdate = true;
+      // three.js uploads the pending ranges with the next draw of the mesh and clears them; a mesh that stays
+      // undrawn (outside three's near/far planes) collects them into one span
+      const idx = s.index;
+      const pending = idx.updateRanges;
+      if (pending.length >= MAX_UPDATE_RANGES) {
+        let a = start;
+        let b = o;
+        for (const r of pending) {
+          if (r.start < a) a = r.start;
+          if (r.start + r.count > b) b = r.start + r.count;
+        }
+        idx.clearUpdateRanges();
+        idx.addUpdateRange(a, b - a);
+      } else idx.addUpdateRange(start, o - start);
+      idx.needsUpdate = true;
       this.rewrites++;
+      this.uploaded += o - start;
     }
   }
 

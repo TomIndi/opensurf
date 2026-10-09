@@ -143,6 +143,9 @@ Textures are searched in order: the map's pakfile, `opts.materials.extraSources`
 (`opts.gameContent`, default: `gameContentForLoad()` from `maps/gamecontent.ts`; `null` = none), then procedural
 stand-ins. With game content the textures phase first reports `{ phase: 'textures', message: 'Reading game textures… n/m',
 loaded: n, total: m }` while it reads the files from the player's VPKs.
+`LoadedMap.render.vis` (`bsp/visibility.ts` `buildVisibility`, optional `MapVisibility`): the decompressed PVS rows of
+`LUMP_VISIBILITY` plus the world tree (node planes/children, leaf clusters) to find the eye's cluster; null when the
+map has no visibility data (built-in maps, maps compiled without vvis) or more than 12000 clusters.
 ### renderer (renderer)
 ```ts
 // render/renderer.ts
@@ -156,6 +159,46 @@ when S3TC is available (the VTFs' DXT mip chains are uploaded as-is: full resolu
 are wound toward their front (`dface_t.side == planenum & 1`, the loader never flips them), so BSP surfaces are drawn
 single-sided like the engine; the renderer's face audit (`debugInfo().faces`) falls back to double-sided drawing only
 if a map's audited face area is mostly inverted.
+
+Frame cost (what keeps it cheap; the header of `render/renderer.ts` has the full frame):
+* **Scene framebuffer** (`render/scenetarget.ts`): MSAA colour (`RenderSettings.antialias` ← `mat_antialias`, default
+  4, rebuilt live, clamped to the counts the device supports; alpha-tested surfaces switch alpha to coverage with it)
+  and a DEPTH_COMPONENT32F renderbuffer (reversed Z; DEPTH_COMPONENT24 with the logarithmic fallback), no depth
+  texture; DEPTH32F_STENCIL8 / DEPTH24_STENCIL8 only while the sky is drawn after the world (below), and only when
+  that format multisamples like the depth-only one (`SceneTarget.stencilFor`; ANGLE's D3D11 backend, Chrome on Windows,
+  backs DEPTH32F_STENCIL8 with the 64-bit D32_FLOAT_S8X24_UINT, twice D32_FLOAT). three.js draws into it through a
+  proxy render target bound with `setRenderTargetFramebuffer` (no MSAA resolve per `render()` call); the renderer
+  resolves once per frame, then the blit applies the render scale.
+* **Expensive skies after the opaque world** (`render/stencil.ts`; `Renderer.wantsStencil`: a 3D skybox, i.e. a
+  sky_camera and `r_3dsky 1`, or the procedural 2D sky): the stencil is cleared to `STENCIL_SKY`, sky faces
+  (depth-only masks) write it, every other main-view material writes 0 where it is drawn (`setStencilRole`: map
+  materials get theirs in `SurfaceMaterials`, renderer overlays in `assignStencilRoles`; `enableStencilRole` turns the
+  tests off while the target has no stencil), and the sky draws on `STENCIL_SKY` samples only. With a 3D skybox,
+  `skyHook` (first in the translucent list) runs the sky pass with a nested `render()`: depth of the sky samples reset
+  to the far plane, 2D cube, 3D skybox (opaque + translucent), then the sky faces' depth restored (`restoreMasks`) so
+  the translucent world is occluded as before; without one the procedural cube is the last opaque draw. Images are
+  pixel-identical to drawing the sky first; the GPU skips the covered samples before shading (early stencil): about
+  half the shaded fragments on kitsune / lt_omnific, and the procedural sky's noise only where the sky shows. A
+  cube-map 2D sky (one texture fetch per pixel) is drawn first without a stencil, which would cost about as much as it
+  saves (a test and write on every opaque sample, the bigger depth/stencil format); so is the 3D skybox, followed by
+  a depth clear, when the target can't have a stencil or `RenderSettings.skyStencil` is false (`r_skystencil 0`, to
+  compare GPU cost); `debugInfo().sky.stencil` says which. SwiftShader (headless tests) can't show the saving: there a
+  stencil-rejected sample costs about as much as a shaded one, and the stencil made the measured maps up to 8% slower
+  (none faster).
+* **PVS culling** (`render/pvs.ts`, `MapScene.cullVisibility`): every static main-view mesh gets the clusters its
+  triangles touch at load (32-triangle boxes pushed down the BSP tree: a superset), and when the eye enters another
+  cluster each mesh leaves or rejoins three.js layer 0 by its PVS row (not `visible`, which is the game's model state).
+  Eye in solid / outside the data, `r_novis 1` (`RenderSettings.novis`) or no vis data: everything is drawn. Moving
+  brush entities and the 3D skybox are never culled.
+* **Translucent plane sorting** (`render/translucency.ts`): skips meshes outside the view's side planes (three.js
+  culls them too) and meshes whose eye position hasn't changed (the order depends on the eye only), rewrites only
+  the span of the index list whose groups moved (pre-made views: no allocation) and uploads only that span
+  (`addUpdateRange`).
+* **Geometry upload at load** (`uploadGeometry`): a render with zero-length draw ranges and no frustum culling
+  uploads every buffer and builds every vertex array while loading, not on the frame a mesh first comes into view.
+* `debugInfo()` adds `samples`, `antialias { requested, supported }`, `gpu { vendor, renderer }` and
+  `scene.pvsMeshes`; `GameApi.graphicsInfo()` passes the GPU and framebuffer to Settings → Video (`ui/gpuhint.ts`
+  classifies software / integrated / discrete GPUs for the advice shown there).
 ### game (game-core; world systems per `src/game/contracts.ts`: `EntitySystem implements IEntitySystem` in entities.ts `constructor(host: WorldHost)`, `SurfTimer implements ISurfTimer` in timer.ts `constructor(host: TimerHost)`, `ReplaySystem implements IReplaySystem` in replay.ts `constructor(mapName: string)` — game-world)
 ```ts
 // game/game.ts
@@ -299,7 +342,10 @@ Crosshair (CS:GO names/semantics): `crosshair 1`, `cl_crosshairstyle 4`, `cl_cro
 
 Video: `mat_fullbright 0`, `r_drawzones 1` (0 off, 1 floor outline, 2 full box → `RenderSettings.drawZones` /
 `zoneStyle`), `r_drawtriggers 0`, `r_drawclips 0`, `mat_wireframe 0`,
-`r_brightness 1`, `r_renderscale 1`, `r_anisotropy 8`, `fog_enable 1`, `r_3dsky 1`.
+`r_brightness 1`, `r_renderscale 1`, `r_anisotropy 8`, `mat_antialias 4` (MSAA samples: 0, 2, 4, 8), `fog_enable 1`,
+`r_3dsky 1`, `r_novis 0` (1 = no PVS culling, debug; not archived), `r_skystencil 1` (0 = the sky drawn first,
+everywhere, without a stencil: debug / GPU cost comparison; not archived). `fps_max 0` = the display's refresh rate (a
+browser presents at most one frame per refresh).
 
 Surf/HUD: `surf_hud_speed 1`, `surf_hud_timer 1`, `surf_showkeys 1`, `surf_ghost 1`, `surf_ghost_trail 1`, `surf_ghost_wr 0`,
 `surf_prespeed 350`, `surf_speedometer_color 1`, `surf_chat_sounds 1`.

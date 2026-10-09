@@ -105,6 +105,28 @@ Movement follows Source's `CGameMovement` as configured on CS:GO surf servers (S
 code is an original implementation written from the publicly documented algorithms; no Valve source code
 is used.
 
+## Frame rate
+
+The game runs at your monitor's refresh rate when the PC keeps up: a browser shows at most one frame per refresh,
+so `fps_max 0` (Settings → Video → FPS limit: "Monitor refresh rate") means 60 fps on a 60 Hz screen and 144 on a
+144 Hz one. `cl_showfps 1` shows the frame rate. When it stays below the refresh rate, the graphics card is usually
+the limit. Settings → Video:
+
+* **Graphics** shows the GPU the browser renders with, and a hint when that alone explains a low frame rate: the
+  browser is drawing in software (hardware acceleration off), or running on integrated graphics on a PC that may
+  have a dedicated card (Windows → Settings → System → Display → Graphics → the browser → *High performance*).
+* **Anti-aliasing** (`mat_antialias`: 0 off, 2, 4 (default), 8; MSAA like CS:GO's multisampling, applied live,
+  limited to what the GPU supports). Each step costs GPU time, most at high resolutions and on integrated graphics.
+* **Render scale** (`r_renderscale` 0.25–1): the 3D view's resolution relative to the screen's (high-DPI and 4K
+  screens render at their full native resolution otherwise).
+* **Texture filtering** (`r_anisotropy`) and **3D skybox** (`r_3dsky`) cost a little GPU time too.
+
+What the renderer does to keep frames cheap, like the Source engine: it draws only the parts of the map the BSP's
+visibility data says can be seen from where you are (`r_novis 1` draws everything, for debugging), draws an expensive
+sky (a 3D skybox, or the generated sky of maps whose sky textures aren't available) after the world and only where it
+shows (`r_skystencil 0` draws it first, to compare), keeps translucent
+surfaces sorted with as little work as possible, and uploads all map geometry while loading instead of mid-run.
+
 ## Development
 
 * `npm test` — unit tests (set `SURF_TEST_MAPS=/path/to/bsps` to also run the real-map tests)

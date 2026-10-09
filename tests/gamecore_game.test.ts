@@ -3,7 +3,7 @@ import { console_, cvar, execute } from '../src/core/cvars';
 import { v3 } from '../src/core/vec3';
 import { CHAT_PREFIX } from '../src/game/commands';
 import { registerConvars, tickInterval } from '../src/game/convars';
-import { Game, MAX_TICKS_PER_FRAME, accumulateTicks, applyBaseVelocity, interpolateOrigin, renderSettingsFromCvars, triggerColor } from '../src/game/game';
+import { Game, MAX_TICKS_PER_FRAME, accumulateTicks, applyBaseVelocity, interpolateOrigin, renderSettingsForCvar, renderSettingsFromCvars, triggerColor } from '../src/game/game';
 import { FL_BASEVELOCITY, IN_JUMP, IN_MOVERIGHT, MOVETYPE_NOCLIP, VIEW_OFFSET_STAND, createPlayerState } from '../src/physics/playertypes';
 import { FakeRenderer, FakeUi, loadedGame, makeGame, makeTestMap, resetGlobals } from './gamecore_helpers';
 
@@ -95,7 +95,18 @@ describe('render settings', () => {
     cvar('mat_fullbright').set(1);
     cvar('r_anisotropy').set(4);
     const s = renderSettingsFromCvars();
-    expect(s).toMatchObject({ fullbright: true, drawZones: true, drawTriggers: false, wireframe: false, brightness: 1, maxAnisotropy: 4, renderScale: 1, fogEnabled: true, drawSky3D: true, drawClips: false });
+    expect(s).toMatchObject({ fullbright: true, drawZones: true, drawTriggers: false, wireframe: false, brightness: 1, maxAnisotropy: 4, renderScale: 1, fogEnabled: true, drawSky3D: true, drawClips: false, antialias: 4 });
+    cvar('mat_antialias').set(2);
+    expect(renderSettingsForCvar(cvar('mat_antialias'))).toEqual({ antialias: 2 });
+    cvar('mat_antialias').set(0);
+    expect(renderSettingsFromCvars().antialias).toBe(0);
+    cvar('mat_antialias').set(64);
+    expect(renderSettingsFromCvars().antialias).toBe(8); // the cvar's range
+    cvar('mat_antialias').reset();
+    expect(renderSettingsFromCvars().skyStencil).toBe(true);
+    cvar('r_skystencil').set(0);
+    expect(renderSettingsForCvar(cvar('r_skystencil'))).toEqual({ skyStencil: false });
+    cvar('r_skystencil').reset();
   });
 
   it('colors debug triggers by class (dimmed when disabled)', () => {

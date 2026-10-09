@@ -28,6 +28,7 @@ import { SURF_SKY, SURF_SKY2D } from '../bsp/types';
 import type { CubemapDef, LoadedMap, MaterialDef, RenderBatch, RenderProp } from '../map/types';
 import { CONTENTS_SOLID } from '../physics/types';
 import { TextureCache } from './textures';
+import { PvsCuller } from './pvs';
 import { TranslucentSorter } from './translucency';
 import {
   ModelUniforms,
@@ -88,6 +89,8 @@ export interface MapSceneStats {
   materials: number;
   /** Translucent meshes with several planes, kept in back-to-front order per frame. */
   sortedTranslucent: number;
+  /** Meshes culled by the BSP's visibility sets when their clusters can't be seen (0 without vis data). */
+  pvsMeshes: number;
 }
 
 export interface MapSceneOptions {
@@ -605,6 +608,7 @@ export class MapScene {
     waterMeshes: 0,
     materials: 0,
     sortedTranslucent: 0,
+    pvsMeshes: 0,
   };
   private readonly animated: Animated[] = [];
   private readonly geometries: BufferGeometry[] = [];
@@ -627,6 +631,8 @@ export class MapScene {
   private pairedWater: Set<RenderBatch> = new Set();
   /** Back-to-front plane order inside translucent meshes (see translucency.ts). */
   readonly sorter = new TranslucentSorter();
+  /** Visibility culling of the main view's static meshes (see pvs.ts); null without vis data. */
+  pvs: PvsCuller | null = null;
   /**
    * Brush models that can move (doors, rotators, trains and what is parented to them): kept out of the merged
    * brush-entity groups so setModelTransform can place their meshes.
@@ -697,6 +703,18 @@ export class MapScene {
     this.sky3d.updateMatrixWorld(true);
     for (const m of this.meshes()) if ((m.material as ShaderMaterial).transparent) this.sorter.add(m);
     this.stats.sortedTranslucent = this.sorter.count;
+    // visibility sets: every main-view mesh that stays put (moving brush entities don't)
+    const vis = r.vis;
+    if (vis && vis.numClusters > 1) {
+      const pvs = new PvsCuller(vis);
+      for (const c of this.world.children) {
+        const m = c as Mesh;
+        if (!m.isMesh || this.movingModels.has(m.userData.model as number)) continue;
+        pvs.add(m);
+      }
+      if (pvs.count) this.pvs = pvs;
+      this.stats.pvsMeshes = pvs.count;
+    }
     this.stats.materials = this.opts.materials.materials.length;
   }
 
@@ -1159,7 +1177,9 @@ export class MapScene {
     _place.multiply(inv);
     for (const mesh of e.meshes) {
       mesh.matrix.copy(_place);
-      mesh.matrixWorldNeedsUpdate = true;
+      // the renderer's scenes don't update world matrices automatically (matrixWorldAutoUpdate is off): set it here
+      if (mesh.parent) mesh.matrixWorld.multiplyMatrices(mesh.parent.matrixWorld, mesh.matrix);
+      else mesh.matrixWorld.copy(mesh.matrix);
     }
   }
 
@@ -1191,9 +1211,20 @@ export class MapScene {
     }
   }
 
-  /** Orders translucent geometry back to front for an eye position (call every frame). */
-  sortTranslucent(eye: Vector3): void {
-    this.sorter.update(eye);
+  /**
+   * Hides the meshes the eye's cluster can't see (call every frame before drawing; cheap while the eye stays in
+   * its cluster). `enabled` false (r_novis) shows everything.
+   */
+  cullVisibility(eye: Vector3, enabled = true): void {
+    this.pvs?.update(eye.x, eye.y, eye.z, enabled);
+  }
+
+  /**
+   * Orders translucent geometry back to front for an eye position (call every frame); with the camera's
+   * projection x view matrix, meshes out of view wait until they come into view.
+   */
+  sortTranslucent(eye: Vector3, viewProjection?: Matrix4): void {
+    this.sorter.update(eye, viewProjection);
   }
 
   /** All meshes (both passes). */
@@ -1219,6 +1250,8 @@ export class MapScene {
     this.mergedGroups.length = 0;
     this.mergeQueue.clear();
     this.sorter.clear();
+    this.pvs?.clear();
+    this.pvs = null;
   }
 }
 

@@ -82,6 +82,7 @@ const DOCUMENTED: Record<string, string> = {
   r_brightness: '1',
   r_renderscale: '1',
   r_anisotropy: '8',
+  mat_antialias: '4',
   fog_enable: '1',
   r_3dsky: '1',
   surf_hud_speed: '1',

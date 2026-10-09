@@ -64,6 +64,7 @@ import {
   GameEvent,
   GameState,
   GhostState,
+  GraphicsInfo,
   HudState,
   KsfWrHud,
   LoadProgress,
@@ -320,6 +321,9 @@ const RENDER_CVARS: Readonly<Record<string, keyof RenderSettings>> = {
   r_renderscale: 'renderScale',
   fog_enable: 'fogEnabled',
   r_3dsky: 'drawSky3D',
+  mat_antialias: 'antialias',
+  r_novis: 'novis',
+  r_skystencil: 'skyStencil',
 };
 
 function renderSettingValue(field: keyof RenderSettings, c: Cvar): boolean | number {
@@ -327,6 +331,7 @@ function renderSettingValue(field: keyof RenderSettings, c: Cvar): boolean | num
     case 'brightness':
     case 'maxAnisotropy':
     case 'renderScale':
+    case 'antialias':
       return c.num;
     default:
       return c.bool;
@@ -693,6 +698,32 @@ export class Game implements GameApi, CommandContext {
   /** GameApi.rawInputActive: raw mouse input of the current pointer lock (null before the first capture). */
   get rawInputActive(): boolean | null {
     return this.device?.rawInputActive ?? null;
+  }
+
+  /** GameApi.graphicsInfo: the renderer's GPU and framebuffer (when it reports them). */
+  graphicsInfo(): GraphicsInfo | null {
+    const r = this.renderer as { debugInfo?: () => unknown };
+    if (typeof r.debugInfo !== 'function') return null;
+    try {
+      const d = r.debugInfo() as Partial<{
+        samples: number;
+        antialias: { supported: number[] };
+        gpu: { vendor: string; renderer: string };
+        targetSize: [number, number];
+        canvasSize: [number, number];
+      }> | null;
+      if (!d) return null;
+      return {
+        renderer: d.gpu?.renderer ?? '',
+        vendor: d.gpu?.vendor ?? '',
+        samples: d.samples ?? 0,
+        supportedSamples: d.antialias?.supported ?? [],
+        renderSize: d.targetSize ?? [0, 0],
+        canvasSize: d.canvasSize ?? [0, 0],
+      };
+    } catch {
+      return null;
+    }
   }
 
   /** The world simulates this frame (paused = frozen). */

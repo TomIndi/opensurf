@@ -22,6 +22,7 @@ import {
 } from 'three';
 import type { MaterialDef } from '../map/types';
 import { MASK_FRAGMENT, MASK_VERTEX, WATER_FRAGMENT, WORLD_FRAGMENT, WORLD_VERTEX } from './shaders';
+import { setStencilRole } from './stencil';
 import type { TextureCache } from './textures';
 
 export interface U<T> {
@@ -168,6 +169,8 @@ export interface SurfMaterialInfo {
   decal: boolean;
   isWater: boolean;
   isMask: boolean;
+  /** Alpha-tested opaque surface: uses alpha to coverage when the target is multisampled. */
+  a2c?: boolean;
 }
 
 /** Writes Source's $basetexturetransform (2x3) plus a scroll offset into a three.js Matrix3. */
@@ -256,8 +259,28 @@ export class SurfaceMaterials {
   private maskWorld: ShaderMaterial | null = null;
   private maskSky: ShaderMaterial | null = null;
   private wireframe = false;
+  private alphaToCoverage: boolean;
 
-  constructor(private readonly opts: MaterialFactoryOptions) {}
+  constructor(private readonly opts: MaterialFactoryOptions) {
+    this.alphaToCoverage = !!opts.alphaToCoverage;
+  }
+
+  /**
+   * Alpha-tested surfaces use alpha to coverage (needs a multisampled target: turned off with MSAA, where the
+   * coverage mask would be ignored and the shader must discard instead). Recompiles the affected materials.
+   */
+  setAlphaToCoverage(on: boolean): void {
+    if (on === this.alphaToCoverage) return;
+    this.alphaToCoverage = on;
+    for (const m of this.all) {
+      const info = m.userData.surf as Partial<SurfMaterialInfo> | undefined;
+      if (!info?.a2c) continue;
+      if (on) m.defines.USE_A2C = '';
+      else delete m.defines.USE_A2C;
+      m.alphaToCoverage = on && !m.transparent;
+      m.needsUpdate = true;
+    }
+  }
 
   get materials(): readonly ShaderMaterial[] {
     return this.all;
@@ -277,6 +300,8 @@ export class SurfaceMaterials {
     m.depthWrite = true;
     m.depthTest = true;
     m.blending = NoBlending;
+    // main view: the samples where a sky face is the nearest surface show the sky; 3D skybox: sky pass only
+    setStencilRole(m, pass === 'world' ? 'skyMask' : 'skyOnly');
     m.userData.surf = { isMask: true } as Partial<SurfMaterialInfo>;
     this.all.push(m);
     if (pass === 'world') this.maskWorld = m;
@@ -303,6 +328,8 @@ export class SurfaceMaterials {
     const hit = this.cache.get(key);
     if (hit) return hit;
     const m = def.isWater ? this.createWater(def, v, modelUniforms) : this.createSurface(def, v, modelUniforms);
+    // main view surfaces cover the sky where they are drawn; 3D skybox surfaces only draw in the sky pass
+    setStencilRole(m, v.pass === 'world' ? 'occluder' : 'skyOnly');
     this.cache.set(key, m);
     this.all.push(m);
     return m;
@@ -381,9 +408,10 @@ export class SurfaceMaterials {
     const translucent = def.translucent || def.additive;
     uniforms.uTexAlpha = { value: translucent && !def.alphaTest ? 1 : def.translucent ? 1 : 0 };
     uniforms.uAdditive = { value: def.additive ? 1 : 0 };
+    const a2cCapable = defines.USE_ALPHATEST !== undefined && !translucent;
     if (defines.USE_ALPHATEST !== undefined) {
       uniforms.uAlphaRef = { value: Math.max(0.001, Math.min(1, def.alphaTestRef || 0.5)) };
-      if (this.opts.alphaToCoverage && !translucent) defines.USE_A2C = '';
+      if (this.alphaToCoverage && a2cCapable) defines.USE_A2C = '';
     }
     if (defines.USE_BLEND2 !== undefined) {
       uniforms.map2 = {
@@ -451,6 +479,7 @@ export class SurfaceMaterials {
     // decals and blended surfaces, drawn over the opaque world, win the depth test against coplanar opaque faces
     setBlendDepthBias(m, m.transparent || v.decal, this.opts.reversedDepth === true);
     m.userData.surf = this.info(def, m, v);
+    m.userData.surf.a2c = a2cCapable;
     return m;
   }
 

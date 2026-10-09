@@ -172,7 +172,8 @@
   color: #7ee787;
 }
 
-.surf-ui .set-status.raw-unsupported {
+.surf-ui .set-status.raw-unsupported,
+.surf-ui .set-status.gpu-warn {
   color: #ffcf66;
 }
 

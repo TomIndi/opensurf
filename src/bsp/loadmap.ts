@@ -11,7 +11,8 @@
 //              maps/gamecontent.ts), materials (VMT/VTF or procedural stand-ins), 2D sky, baked cubemaps
 //   geometry   face areas, render batches + lightmap atlas + info_overlay decals, props (static props and
 //              model entities) packed in the map, lit like the engine's light cache (leaf ambient + world lights)
-// followed by the cheap entity-derived data (sky_camera, env_fog_controller, spawns, zones, bounds).
+// followed by the cheap entity-derived data (sky_camera, env_fog_controller, spawns, zones, bounds) and the
+// visibility sets (bsp/visibility.ts: decompressed PVS + world tree, copied out of `data`).
 //
 // Nothing in the returned LoadedMap references `data`: every array is decoded or copied, so the (possibly
 // several hundred MB) BSP buffer can be dropped once this resolves.
@@ -24,6 +25,7 @@ import type {
   FogDef,
   LoadedMap,
   MapEntity,
+  MapVisibility,
   MaterialDef,
   RenderProp,
   Sky3D,
@@ -58,6 +60,7 @@ import { selectLightingSource } from './lightmap';
 import { buildPropCollision } from './phy';
 import { buildMapProps } from './props';
 import { parseBsp } from './reader';
+import { buildVisibility } from './visibility';
 import { BspFile } from './types';
 
 export interface LoadBspOptions {
@@ -515,6 +518,12 @@ export async function loadBspMap(
   }
   const zoneSource: ZoneSource = zones.length ? 'momentum' : 'none';
   const bounds = worldBounds(models);
+  let vis: MapVisibility | null = null;
+  try {
+    vis = buildVisibility(bsp);
+  } catch (e) {
+    warnings.push(`visibility: ${(e as Error).message}`);
+  }
   lap('entities');
 
   const total = Math.round(now() - t0);
@@ -541,6 +550,7 @@ export async function loadBspMap(
       fog,
       props,
       cubemaps,
+      vis,
     },
     spawns,
     zones,

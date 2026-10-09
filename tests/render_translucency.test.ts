@@ -1,6 +1,6 @@
-import { BufferAttribute, BufferGeometry, Matrix4, Mesh, MeshBasicMaterial, Vector3 } from 'three';
+import { BufferAttribute, BufferGeometry, Matrix4, Mesh, MeshBasicMaterial, PerspectiveCamera, Sphere, Vector3 } from 'three';
 import { describe, expect, it } from 'vitest';
-import { MAX_SORT_GROUPS, TranslucentSorter, groupFarness, groupTrianglesByPlane } from '../src/render/translucency';
+import { MAX_SORT_GROUPS, TranslucentSorter, groupFarness, groupTrianglesByPlane, sidePlanes, sphereInSidePlanes } from '../src/render/translucency';
 
 /** n horizontal 100x100 quads stacked 8 units apart (z = 0, -8, -16, ...), like kitsune's glowing grid floors. */
 function stackedLayers(n: number, big = false): Mesh {
@@ -124,5 +124,89 @@ describe('translucent plane sorting', () => {
     const idx = Array.from(m.geometry.index!.array);
     expect(idx.length).toBe((MAX_SORT_GROUPS + 300) * 6);
     expect(new Set(idx).size).toBe((MAX_SORT_GROUPS + 300) * 4);
+  });
+
+  /** Projection x view of a camera at `eye` looking at `target` (Z up). */
+  function viewProj(eye: Vector3, target: Vector3): Matrix4 {
+    const cam = new PerspectiveCamera(70, 16 / 9, 3, 1 << 20);
+    cam.up.set(0, 0, 1);
+    cam.position.copy(eye);
+    cam.lookAt(target);
+    cam.updateMatrixWorld(true);
+    return new Matrix4().multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
+  }
+
+  /** The index list the sorter's current order stands for, rebuilt from scratch. */
+  function expectedIndices(s: TranslucentSorter, m: Mesh): number[] {
+    const st = (s as unknown as { meshes: { mesh: Mesh; order: Int32Array; views: ArrayLike<number>[] }[] }).meshes.find((x) => x.mesh === m)!;
+    const out: number[] = [];
+    for (const id of st.order) out.push(...Array.from(st.views[id]));
+    return out;
+  }
+
+  it('skips meshes outside the view until they come into view, then sorts them', () => {
+    const m = stackedLayers(4);
+    const s = new TranslucentSorter();
+    s.add(m);
+    const eye = new Vector3(0, 0, 300);
+    // looking up, away from the stack below
+    s.update(eye, viewProj(eye, new Vector3(0, 0, 1000)));
+    expect(s.rewrites).toBe(0);
+    expect(drawnLayers(m)).toEqual([0, -8, -16, -24]); // the load order, not sorted for this eye yet
+    // looking down at it from the same spot: sorted now (lowest first)
+    s.update(eye, viewProj(eye, new Vector3(0, 0, 0)));
+    expect(s.rewrites).toBe(1);
+    expect(drawnLayers(m)).toEqual([-24, -16, -8, 0]);
+  });
+
+  it('does not re-sort while the eye stays put (the order depends on the eye position only)', () => {
+    const m = stackedLayers(6);
+    const s = new TranslucentSorter();
+    s.add(m);
+    const eye = new Vector3(0, -200, 64);
+    s.update(eye);
+    const order = drawnLayers(m);
+    const n = s.rewrites;
+    // a different view direction from the same spot: nothing to do
+    s.update(eye, viewProj(eye, new Vector3(0, 0, 0)));
+    s.update(eye, viewProj(eye, new Vector3(0, 100, -50)));
+    expect(s.rewrites).toBe(n);
+    expect(drawnLayers(m)).toEqual(order);
+  });
+
+  it('rewrites and uploads only the span of groups that moved', () => {
+    const m = stackedLayers(40, true);
+    const s = new TranslucentSorter();
+    s.add(m);
+    const idx = m.geometry.index!;
+    s.update(new Vector3(0, -200, 1000)); // above: lowest first (reverses the load order)
+    expect(Array.from(idx.array)).toEqual(expectedIndices(s, m));
+    idx.clearUpdateRanges(); // as three.js does after uploading
+    const before = s.uploaded;
+    // the eye drops just below the layer at z = -8: only the top few layers swap places
+    s.update(new Vector3(0, -200, -10));
+    expect(Array.from(idx.array)).toEqual(expectedIndices(s, m));
+    const ranges = idx.updateRanges;
+    expect(ranges.length).toBe(1);
+    expect(ranges[0].count).toBeLessThan(idx.count / 4);
+    expect(ranges[0].start + ranges[0].count).toBe(idx.count); // the near (top) layers are drawn last
+    expect(s.uploaded - before).toBe(ranges[0].count);
+    // pending ranges of a mesh that is not drawn are merged, never dropped
+    for (let k = 0; k < 30; k++) s.update(new Vector3(0, -200, k % 2 ? -100 - k : 500 + k));
+    expect(idx.updateRanges.length).toBeLessThanOrEqual(8);
+    expect(Array.from(idx.array)).toEqual(expectedIndices(s, m));
+    const covered = new Uint8Array(idx.count);
+    for (const r of idx.updateRanges) covered.fill(1, r.start, r.start + r.count);
+    expect(covered.reduce((a, b) => a + b, 0)).toBeGreaterThan(idx.count / 2);
+  });
+
+  it('side-plane test: spheres beside or behind the view are out, overlapping ones in', () => {
+    const planes = new Float64Array(16);
+    sidePlanes(viewProj(new Vector3(0, 0, 0), new Vector3(100, 0, 0)), planes);
+    expect(sphereInSidePlanes(planes, new Sphere(new Vector3(500, 0, 0), 10))).toBe(true);
+    expect(sphereInSidePlanes(planes, new Sphere(new Vector3(-500, 0, 0), 10))).toBe(false); // behind
+    expect(sphereInSidePlanes(planes, new Sphere(new Vector3(0, 800, 0), 10))).toBe(false); // to the left
+    expect(sphereInSidePlanes(planes, new Sphere(new Vector3(100, 300, 0), 400))).toBe(true); // overlaps the edge
+    expect(sphereInSidePlanes(planes, new Sphere(new Vector3(5000, 0, 4000), 10))).toBe(false); // above the top
   });
 });
