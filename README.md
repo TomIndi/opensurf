@@ -26,8 +26,9 @@ to download catalog maps and show world records it needs the **SURF relay** belo
    `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` and let `.github/workflows/relay.yml` deploy it (on pushes to
    `main` touching `worker/**`, or by hand from the Actions tab). It prints its URL,
    `https://opensurf-relay.<your-subdomain>.workers.dev`.
-2. Add the repository **variable** `SURF_RELAY_URL` with that URL (Settings → Secrets and variables → Actions →
-   Variables) and re-run the Pages deployment: the build bakes it in as `VITE_SURF_RELAY`.
+2. Point the build at it: this repository's `deploy.yml` uses `https://opensurf-relay.tomasindi360.workers.dev` by
+   default; the repository **variable** `SURF_RELAY_URL` (Settings → Secrets and variables → Actions → Variables)
+   overrides it (e.g. in a fork). Re-run the Pages deployment: the build bakes it in as `VITE_SURF_RELAY`.
 3. A fork served from another origin adds it to the relay's `ALLOWED_ORIGINS` (`worker/wrangler.toml`, or the
    repository variable `SURF_RELAY_ALLOWED_ORIGINS` for `relay.yml`).
 
