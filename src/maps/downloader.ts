@@ -1,25 +1,25 @@
-// Downloads KSF surf maps from the public Google Drive archive (through the dev / preview server's proxy:
-// Drive refuses cross-site downloads from web pages), extracts the BSP from .rar/.zip/.bz2 archives in the browser and caches the BSP in
+// Downloads KSF surf maps from the public Google Drive archive (through the dev / preview server's proxy or the SURF
+// relay, src/maps/relay.ts: Drive refuses cross-site downloads from web pages), extracts the BSP from .rar/.zip/.bz2 archives in the browser and caches the BSP in
 // IndexedDB so each map is downloaded only once.
 import { unzipSync } from 'fflate';
 import { bunzip2 } from '../bsp/bz2';
 import type { LoadProgress } from '../game/api';
 import type { CatalogEntry } from './catalog';
+import { DRIVE_PROXY_HEADER, driveDownloadUrl, driveProxyPath } from './drive';
+import { getRelayBase, relayUrl } from './relay';
+
+export { driveDownloadUrl } from './drive';
 
 const DB_NAME = 'surf-maps';
 const STORE = 'bsp';
 
-export function driveDownloadUrl(driveId: string): string {
-  return `https://drive.usercontent.google.com/download?id=${encodeURIComponent(driveId)}&export=download&confirm=t`;
-}
-
 /**
  * The same file through the dev / preview server's Drive proxy (vite.config.ts). Drive answers a web page's
  * cross-site download with 403 and no CORS header, so the browser can't fetch the archives itself; the local
- * server can. Proxy answers carry an `x-surf-drive-proxy` header.
+ * server (or the relay) can. Proxy answers carry an `x-surf-drive-proxy` header.
  */
 export function driveProxyUrl(driveId: string): string {
-  return `./__drive/${encodeURIComponent(driveId)}`;
+  return driveProxyPath(driveId);
 }
 
 export function driveViewUrl(driveId: string): string {
@@ -105,18 +105,48 @@ const fmtMB = (n: number) => (n / MB).toFixed(1);
 
 const NO_DIRECT_DOWNLOAD =
   'Google Drive blocks map downloads straight from a web page. Run the game with `npm run dev` or `npm run preview` ' +
-  '(the local server downloads the maps for it), or download the map yourself and drop the file on the menu.';
+  '(the local server downloads the maps for it), build it with a SURF relay (VITE_SURF_RELAY, see the README), ' +
+  'or download the map yourself and drop the file on the menu.';
 
-/** The local server's Drive proxy when there is one, else Drive itself. */
-async function openDrive(driveId: string, signal?: AbortSignal): Promise<Response> {
+/** Where a Drive download came from. */
+export type DriveSource = 'local' | 'relay' | 'direct';
+
+export interface OpenDriveOptions {
+  signal?: AbortSignal;
+  /** Relay base URL (default: getRelayBase()); null: no relay. */
+  relay?: string | null;
+  fetch?: (input: string, init?: RequestInit) => Promise<Response>;
+}
+
+/**
+ * The page's own server's Drive proxy when there is one (dev / preview), else the relay when one is configured, else
+ * Drive itself (which a browser normally refuses).
+ */
+export async function openDrive(driveId: string, opts: OpenDriveOptions = {}): Promise<{ res: Response; source: DriveSource }> {
+  const { signal } = opts;
+  const fetchFn = opts.fetch ?? ((i: string, init?: RequestInit) => fetch(i, init));
+  const relay = opts.relay === undefined ? getRelayBase() : opts.relay;
   try {
-    const res = await fetch(driveProxyUrl(driveId), { signal });
-    if (res.headers.get('x-surf-drive-proxy')) return res;
+    const res = await fetchFn(driveProxyUrl(driveId), { signal });
+    if (res.headers.get(DRIVE_PROXY_HEADER)) return { res, source: 'local' };
+    if (res.body) void res.body.cancel().catch(() => undefined);
   } catch (e) {
     if ((e as Error).name === 'AbortError') throw e;
   }
+  if (relay) {
+    let res: Response;
+    try {
+      res = await fetchFn(relayUrl(relay, driveProxyUrl(driveId)), { signal, mode: 'cors', credentials: 'omit' });
+    } catch (e) {
+      if ((e as Error).name === 'AbortError') throw e;
+      throw new Error(`The map relay (${relay}) could not be reached. Try again later, or download the map yourself and drop the file on the menu.`);
+    }
+    if (res.headers.get(DRIVE_PROXY_HEADER)) return { res, source: 'relay' };
+    if (res.body) void res.body.cancel().catch(() => undefined);
+    throw new Error(`${relay} is not a SURF relay (HTTP ${res.status}, no ${DRIVE_PROXY_HEADER} header).`);
+  }
   try {
-    return await fetch(driveDownloadUrl(driveId), { signal, mode: 'cors', credentials: 'omit' });
+    return { res: await fetchFn(driveDownloadUrl(driveId), { signal, mode: 'cors', credentials: 'omit' }), source: 'direct' };
   } catch (e) {
     if ((e as Error).name === 'AbortError') throw e;
     throw new Error(NO_DIRECT_DOWNLOAD);
@@ -124,9 +154,10 @@ async function openDrive(driveId: string, signal?: AbortSignal): Promise<Respons
 }
 
 async function download(driveId: string, onProgress?: (p: LoadProgress) => void, signal?: AbortSignal): Promise<ArrayBuffer> {
-  const res = await openDrive(driveId, signal);
-  if (res.status === 502 && res.headers.get('x-surf-drive-proxy')) {
-    throw new Error(`The local server could not reach Google Drive: ${(await res.text()).slice(0, 200)}`);
+  const { res, source } = await openDrive(driveId, { signal });
+  if ((res.status === 502 || res.status === 504) && source !== 'direct') {
+    const who = source === 'relay' ? 'The map relay' : 'The local server';
+    throw new Error(`${who} could not reach Google Drive: ${(await res.text()).slice(0, 200)}`);
   }
   if (!res.ok) throw new Error(`Google Drive answered HTTP ${res.status}. The file may be rate-limited; try again later.`);
   const type = res.headers.get('content-type') ?? '';

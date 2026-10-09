@@ -1,0 +1,15 @@
+{
+  "name": "opensurf-relay",
+  "private": true,
+  "version": "0.1.0",
+  "description": "SURF relay: Cloudflare Worker that lets the static build download catalog maps (Google Drive) and KSF world records (ksf.surf).",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "check": "wrangler deploy --dry-run --outdir dist"
+  },
+  "devDependencies": {
+    "wrangler": "4.140.0"
+  }
+}

@@ -26,6 +26,11 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build
+        env:
+          # The SURF relay (worker/, deployed by relay.yml): lets the static site download catalog maps and read KSF
+          # world records. Set the repository variable SURF_RELAY_URL (Settings > Secrets and variables > Actions >
+          # Variables), e.g. https://opensurf-relay.<account>.workers.dev; empty: no relay.
+          VITE_SURF_RELAY: ${{ vars.SURF_RELAY_URL }}
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist

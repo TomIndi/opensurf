@@ -12,16 +12,36 @@ npm run dev        # http://localhost:5173
 ```
 
 Play through `npm run dev` or `npm run build && npm run preview`: the local server also downloads the catalog
-maps for the game (Google Drive refuses downloads requested straight from a web page). The static site in `dist/`
-(a GitHub Pages workflow is included — enable Pages with "GitHub Actions" as the source) plays the built-in maps
-and any map file you drop on it, but can't download catalog maps by itself.
+maps for the game (Google Drive refuses downloads requested straight from a web page) and reads KSF world records
+(ksf.surf sends no CORS headers). The static site in `dist/` plays the built-in maps and any map file you drop on it;
+to download catalog maps and show world records it needs the **SURF relay** below.
+
+### Playing on GitHub Pages
+
+`.github/workflows/deploy.yml` builds and deploys the site on every push to `main` (Settings → Pages → Source:
+"GitHub Actions"; the site is served from `https://<user>.github.io/<repo>/`). For a fully playable site:
+
+1. Deploy the relay (a free Cloudflare Worker in `worker/`, see [`worker/README.md`](worker/README.md)): either
+   `cd worker && npm install && npx wrangler login && npx wrangler deploy`, or add the repository secrets
+   `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` and let `.github/workflows/relay.yml` deploy it (on pushes to
+   `main` touching `worker/**`, or by hand from the Actions tab). It prints its URL,
+   `https://opensurf-relay.<your-subdomain>.workers.dev`.
+2. Add the repository **variable** `SURF_RELAY_URL` with that URL (Settings → Secrets and variables → Actions →
+   Variables) and re-run the Pages deployment: the build bakes it in as `VITE_SURF_RELAY`.
+3. A fork served from another origin adds it to the relay's `ALLOWED_ORIGINS` (`worker/wrangler.toml`, or the
+   repository variable `SURF_RELAY_ALLOWED_ORIGINS` for `relay.yml`).
+
+The relay only answers the game's own three routes (a validated Drive file id, a KSF map name or replay file),
+streams the files through without storing anything but Cloudflare's edge cache, and only to the allowed origins.
+`?relay=<url>` tries another relay for one page load, `?relay=off` disables it. Locally, `npm run dev` /
+`npm run preview` keep using their own built-in proxy (the relay is only asked when the page's server has none).
 
 ### Maps
 
 * **All ~930 KSF surf maps** (surf_utopia, surf_kitsune, surf_mesa, surf_beginner, …) are listed in the
   map browser with their KSF tier. Picking one downloads the original archive on demand from the public
   KSF map archive linked from [OuiSURF/Surf_Maps](https://github.com/OuiSURF/Surf_Maps) (through the local
-  dev / preview server), extracts the `.bsp` in the browser and caches it locally (IndexedDB) — nothing is
+  dev / preview server or the SURF relay), extracts the `.bsp` in the browser and caches it locally (IndexedDB) — nothing is
   re-hosted.
 * Drop your own `.bsp`, `.bsp.bz2`, `.rar` or `.zip` onto the menu to play any Source surf map.
 * Built-in original maps load instantly (no download) — good for a first run.
@@ -33,12 +53,12 @@ own baked lightmaps.
 ### KSF world records
 
 On catalog maps the game shows the KSF world record from [ksf.surf](https://ksf.surf) (fetched on demand through the
-local dev / preview server, never re-hosted): in the HUD side panel, the pause menu, a chat line when the map loads,
+local dev / preview server or the SURF relay, never re-hosted): in the HUD side panel, the pause menu, a chat line when the map loads,
 your finish line ("+1.234 vs KSF WR") and the map browser. `!wr` lists the WR and the top 5, `!wrreplay` (or
 `!replay wr`) downloads the record's replay and lets you watch the real WR run on your copy of the map (type it again
 to cancel while it downloads; a run you start meanwhile isn't interrupted), and `!wrghost` races it as a ghost. 100 tick (the default) reads KSF's 100 tick board, other tickrates the 66 tick one.
 The map browser also links each map's record videos on YouTube (@ksfrecords). World records need `npm run dev` /
-`npm run preview`; the static site works without them.
+`npm run preview` or a static build with the SURF relay; without them the game just shows no WR.
 
 ### Timer zones
 
@@ -94,6 +114,8 @@ is used.
   deterministic surf runs on their ramps and map switching without errors or memory growth. Screenshots and a
   `results.json` go to `$E2E_OUT` (default: a temp folder). Uses `/opt/pw-browsers/chromium-*` or `CHROMIUM_PATH`.
 * `npm run catalog` — regenerate `public/maps/catalog.json` / `zones.json`
+* `worker/` — the SURF relay (Cloudflare Worker); its unit tests run in `npm test` (`tests/relay_worker.test.ts`),
+  `cd worker && npm install && npx wrangler dev` runs it locally on :8787 (`?relay=http://localhost:8787`)
 * `docs/ARCHITECTURE.md` — module layout, contracts, the `window.__surf` debug API and the e2e scenarios
 
 ### URL parameters
@@ -103,6 +125,7 @@ is used.
 | `?map=surf_kitsune` | load a map at startup (built-in id or catalog name) |
 | `?builtin=surf_tutorial` | load a built-in map |
 | `?bsp=<url>` | play a `.bsp` / `.bsp.bz2` / `.rar` / `.zip` from a URL; in dev, files from `$SURF_TEST_MAPS` are served at `/__maps/<name>.bsp` |
+| `?relay=<url>` | use this SURF relay for the page load (`?relay=off`: none) instead of the build's `VITE_SURF_RELAY` |
 | `?autotest=1` | automation: no pointer lock required, never auto-pauses |
 
 `window.__surf` exposes a small scripting API (state snapshot, map loading, teleport, +commands, `runTicks`,
