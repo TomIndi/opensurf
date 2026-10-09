@@ -608,7 +608,7 @@ describe('KSF HTTP client', () => {
     const client = createHttpKsfClient(async (u) => {
       urls.push(u);
       return next();
-    });
+    }, null);
     next = () => response(JSON.stringify([{ rank: 1, name: 'a', time: 50 }]), { headers: { 'content-type': 'application/json' } });
     expect((await client.fetchRecords('surf_a', '100t'))[0].name).toBe('a');
     expect(urls[0]).toBe('./__ksf/records/surf_a?game=100t');
@@ -632,7 +632,7 @@ describe('KSF HTTP client', () => {
   it('a page without any server (fetch fails) is the same as no proxy', async () => {
     const client = createHttpKsfClient(async () => {
       throw new TypeError('Failed to fetch');
-    });
+    }, null);
     await expect(client.fetchRecords('surf_a', '66t')).rejects.toBeInstanceOf(KsfUnavailableError);
   });
 });

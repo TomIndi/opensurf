@@ -8,3 +8,4 @@ test-results/
 screenshots/
 tests/audit_*
 !tests/fixtures/**
+.wrangler/

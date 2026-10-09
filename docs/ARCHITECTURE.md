@@ -44,6 +44,7 @@ Run: `npm run dev`.
 | built-in maps | `src/map/builtin/**`, `tests/builtin.test.ts` | builtin-maps |
 | map catalog/downloads | `src/maps/**`, `scripts/build-catalog.mjs`, `public/maps/**` | coordinator |
 | KSF world records | `src/maps/{ksf,ksfproxy,ksfreplay}.ts`, `tests/ksf*.test.ts` | coordinator |
+| SURF relay (static hosting) | `worker/`, `src/maps/{drive,relay}.ts`, `tests/relay_*.test.ts` | coordinator |
 | bootstrap | `src/main.ts` | integration |
 
 ## Contracts (exact exported signatures)
@@ -190,6 +191,10 @@ export async function fetchCatalogMap(entry: CatalogEntry, onProgress?: (p: Load
 export async function extractMapArchive(data: ArrayBuffer, fileName: string): Promise<{ name: string; bsp: ArrayBuffer }>; // .bsp/.bz2/.rar/.zip
 export async function listCachedMaps(): Promise<string[]>;
 export async function deleteCachedMap(name: string): Promise<void>;
+export async function openDrive(driveId: string, opts?: { signal?; relay?: string | null; fetch? }): Promise<{ res: Response; source: 'local' | 'relay' | 'direct' }>;
+// maps/drive.ts — pure (no DOM / Node): DRIVE_ID_RE, isValidDriveId, driveDownloadUrl, driveProxyPath, parseDriveProxyPath,
+// DRIVE_PROXY_HEADER ('x-surf-drive-proxy'); shared by downloader.ts, vite.config.ts and the relay
+// maps/relay.ts — normalizeRelayBase, resolveRelayBase(build, location.search), getRelayBase(), relayUrl(base, './__…')
 // maps/zones.ts
 export async function getPresetZones(mapName: string): Promise<ZoneDef[] | null>;  // SurfTimer zone presets
 export function loadUserZones(mapName: string): ZoneDef[] | null;
@@ -371,10 +376,43 @@ unit-tested in `tests/ksf_proxy.test.ts` with an injected fetch; header `x-surf-
 silently answers with the 66 tick board) and `/__ksf/replay/<file>?game=...` → `https://ksf.surf/api/replays/<file>`.
 `parseKsfProxyRequest` validates map (`/^[a-z0-9][a-z0-9_.-]{0,63}$/i`, no `..`), file (`/^replay_[a-z0-9_]+\.rec$/i`)
 and board; only URLs built from them are fetched (GET / HEAD only, 10 / 15 s timeouts over the whole transfer, size
-caps, the upstream request aborted when the page goes away; the upstream status passes through). Without the proxy (static hosting)
-`KsfService` reports `unavailable` once per session: no WR anywhere, commands say "KSF world records need the local
-server (npm run dev / npm run preview)". Record lists are cached per map + board, parsed replays per file (memory).
+caps, the upstream request aborted when the page goes away; the upstream status passes through). On static hosting the
+client asks the SURF relay's identical routes instead (next section). Without either, `KsfService` reports
+`unavailable` once per session: no WR anywhere, commands say "KSF world records need the local server (npm run dev /
+npm run preview) or a SURF relay". Record lists are cached per map + board, parsed replays per file (memory).
 Built-in maps are never looked up; catalog maps and other `surf_*` maps are.
+
+## SURF relay: static hosting (`worker/`, `src/maps/relay.ts`, `src/maps/drive.ts`)
+
+GitHub Pages can't proxy, so a Cloudflare Worker (free plan) serves the dev server's three routes with CORS:
+`GET|HEAD /__drive/<id>`, `/__ksf/records/<map>?game=`, `/__ksf/replay/<file>?game=`. `worker/src/relay.ts`
+(`handleRequest`, unit-tested in `tests/relay_worker.test.ts` with a mocked global fetch; `index.ts` is only the module
+Worker's `export default { fetch }`) validates with the same pure helpers as the dev server (`parseDriveProxyPath`,
+`parseKsfProxyRequest`, so the upstream URLs and the 66t → `css` / 100t → `css100t` translation are identical) and
+fetches nothing else. Answers carry the marker header (`x-surf-drive-proxy` / `x-surf-ksf-proxy`, also on its own
+400 / 403 / 502 / 504), `Vary: Origin`, and for an Origin in `ALLOWED_ORIGINS` (wrangler var, comma-separated;
+default `https://tomindi.github.io,http://localhost:5173,http://localhost:4173`) `Access-Control-Allow-Origin: <origin>`
+plus `Access-Control-Expose-Headers: content-length, content-type, x-surf-drive-proxy, x-surf-ksf-proxy`; any other
+Origin gets 403 without an upstream request; no Origin (curl) is served without CORS headers. OPTIONS answers the
+preflight (204). Not GET / HEAD / OPTIONS: 405. Upstream status and type pass through, bodies stream; the upstream must
+start answering within 30 s (Drive) / 10 s / 15 s (KSF) (else 504; unreachable: 502); size caps 320 MB / 2 MB / 48 MB
+(a declared length over the cap: 502; an undeclared body is cut). HEAD fetches with GET and drops the body. Caching:
+Drive archives and replays are immutable — edge-cached a week in `caches.default` (only 200s that aren't Drive's HTML
+quota page; the Cache API is a no-op on `workers.dev` and works on a custom domain) and, for ksf.surf, also in the
+fetch subrequest cache (`cf.cacheTtlByStatus`: replays a week, record lists 5 min, errors never; not used for Drive,
+whose quota page is an HTML 200); browsers get `Cache-Control: public, max-age=86400, immutable` (archives, replays)
+/ `max-age=300` (records); errors `no-store`.
+
+Client: `getRelayBase()` = `?relay=<url>` (one page load; `off` disables) else the build's `VITE_SURF_RELAY`
+(`.github/workflows/deploy.yml` passes the repository variable `SURF_RELAY_URL`); only `https:` (or `http://localhost`)
+origins + path. `openDrive` (downloader.ts) and `createHttpKsfClient` (ksf.ts) try the page's own `./__drive/…` /
+`./__ksf/…` first (dev / preview: marker header present → used), then `<relay>/__…` (`mode: 'cors'`,
+`credentials: 'omit'`; marker required), then the old behaviour (Drive directly → the "run npm run dev / build with a
+relay / drop the file" message; KSF → `unavailable`). A relay that is down: a Drive error naming it; for KSF
+`unavailable` when it never answered, a retryable error once it had (the KSF client then skips the same-origin try).
+`.github/workflows/relay.yml` deploys `worker/` with `cloudflare/wrangler-action` when the secrets
+`CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` exist (otherwise a notice, no failure). `worker/` has its own
+`package.json` (wrangler) outside the root install; the root `tsc` includes `worker/src` (standard Fetch types only).
 
 Board: tickrate 100 → `100t`, anything else → `66t`; a map without records there falls back to the other board.
 
@@ -474,8 +512,8 @@ running on the tree (or the browser tests in `npm test`, which do the same) can'
 ## Data flow
 
 ```
-Drive (.rar) ─► dev/preview server /__drive/<id> (vite.config.ts) ─► maps/downloader (unrar wasm, IndexedDB cache) ─► bsp/loadmap ─► LoadedMap ─► game ─► renderer
-ksf.surf (records, .rec) ─► dev/preview server /__ksf/... ─► maps/ksf (+ksfreplay) ─► game (WR HUD/chat, replay bot, ghost) / ui map browser
+Drive (.rar) ─► dev/preview server or SURF relay /__drive/<id> ─► maps/downloader (unrar wasm, IndexedDB cache) ─► bsp/loadmap ─► LoadedMap ─► game ─► renderer
+ksf.surf (records, .rec) ─► dev/preview server or SURF relay /__ksf/... ─► maps/ksf (+ksfreplay) ─► game (WR HUD/chat, replay bot, ghost) / ui map browser
                                                                    ▲   ▲                               ▲
                                    maps/zones (SurfTimer presets) ─┘   │           built-in maps ──────┘
       player's CS:S / CS:GO VPKs ─► maps/gamecontent (stock textures) ─┘

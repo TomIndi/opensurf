@@ -464,10 +464,10 @@ describe('KSF world records in game', () => {
     t.ui.chats.length = 0;
     t.game.say('/wr');
     await flush();
-    expect(texts()).toEqual(['[Surf] KSF world records need the local server (npm run dev / npm run preview)', '[Surf] No times on surf_ksftest at 100 tick yet.']);
+    expect(texts()).toEqual(['[Surf] KSF world records need the local server (npm run dev / npm run preview) or a SURF relay', '[Surf] No times on surf_ksftest at 100 tick yet.']);
     t.game.say('/wrreplay');
     await flush();
-    expect(t.ui.lastText()).toBe('[Surf] KSF world records need the local server (npm run dev / npm run preview)');
+    expect(t.ui.lastText()).toBe('[Surf] KSF world records need the local server (npm run dev / npm run preview) or a SURF relay');
     expect(t.game.spectating).toBe(false);
     t.game.say('/wrghost');
     await flush();

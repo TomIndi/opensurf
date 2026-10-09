@@ -1,9 +1,10 @@
 // KSF world records (ksf.surf): the WR and top times of a map's main course, and the replay files of the records.
 //
 // The browser can't read ksf.surf (no CORS headers): everything goes through the local dev / preview server's
-// /__ksf/ routes (vite.config.ts, validated in maps/ksfproxy.ts). Without that server (static hosting) the client
-// sees no proxy header and the service reports 'unavailable' once for the whole session: no WR is shown, and the
-// commands explain that the local server is needed. Data is fetched on demand and kept in memory for the session
+// /__ksf/ routes (vite.config.ts, validated in maps/ksfproxy.ts) or, on static hosting, the same routes on the SURF
+// relay (worker/, src/maps/relay.ts) when the build names one. Without either the client sees no proxy header and
+// the service reports 'unavailable' once for the whole session: no WR is shown, and the commands explain what is
+// needed. Data is fetched on demand and kept in memory for the session
 // (record lists per map + board, a few parsed replays); nothing is re-hosted.
 //
 // Board: KSF runs CS:S 66 tick and 100 tick leaderboards. Our default tickrate (100) reads the 100 tick board, any
@@ -21,12 +22,13 @@ import {
   ksfReplayProxyPath,
 } from './ksfproxy';
 import { parseKsfReplay, type ParsedKsfReplay } from './ksfreplay';
+import { getRelayBase, relayUrl } from './relay';
 
 export type { KsfBoard } from './ksfproxy';
 export { KSF_BOARD_LABEL, KSF_TICK_INTERVAL } from './ksfproxy';
 
 /** What the game says when there is no local server to reach ksf.surf. */
-export const KSF_NEEDS_SERVER = 'KSF world records need the local server (npm run dev / npm run preview)';
+export const KSF_NEEDS_SERVER = 'KSF world records need the local server (npm run dev / npm run preview) or a SURF relay';
 
 /** One leaderboard entry. */
 export interface KsfRecord {
@@ -191,20 +193,49 @@ function hasProxy(res: Response): boolean {
   return res.headers.get(KSF_PROXY_HEADER) !== null;
 }
 
-/** The real client: the local server's /__ksf/ routes. */
-export function createHttpKsfClient(fetchFn: FetchFn = (i, init) => fetch(i, init)): KsfClient {
-  const open = async (url: string, timeoutMs: number): Promise<Response> => {
+/**
+ * The real client: the page's own server's /__ksf/ routes (dev / preview), else the relay's (`relay`, default
+ * getRelayBase()). Once the relay answered it is used directly for the rest of the session.
+ */
+export function createHttpKsfClient(fetchFn: FetchFn = (i, init) => fetch(i, init), relay: string | null | undefined = undefined): KsfClient {
+  const relayBase = relay === undefined ? getRelayBase() : relay;
+  // once the relay answered, the page's own server (a static host) isn't asked again
+  let route: 'relay' | null = null;
+  const attempt = async (url: string, init: RequestInit): Promise<Response | null> => {
+    try {
+      const res = await fetchFn(url, init);
+      if (hasProxy(res)) return res;
+      if (res.body) void res.body.cancel().catch(() => undefined);
+      return null;
+    } catch (e) {
+      if ((e as Error)?.name === 'AbortError') throw e;
+      // the server didn't answer at all (offline static page / relay down): no proxy there
+      return null;
+    }
+  };
+  const open = async (path: string, timeoutMs: number): Promise<Response> => {
     const ac = typeof AbortController !== 'undefined' ? new AbortController() : null;
     const timer = ac ? setTimeout(() => ac.abort(), timeoutMs) : null;
     try {
-      const res = await fetchFn(url, { signal: ac?.signal, credentials: 'same-origin' });
-      if (!hasProxy(res)) throw new KsfUnavailableError();
-      return res;
+      if (route !== 'relay') {
+        const res = await attempt(path, { signal: ac?.signal, credentials: 'same-origin' });
+        if (res) return res;
+      }
+      if (relayBase) {
+        const res = await attempt(relayUrl(relayBase, path), { signal: ac?.signal, mode: 'cors', credentials: 'omit' });
+        if (res) {
+          route = 'relay';
+          return res;
+        }
+        // a relay that answered once and fails now is down for a while: retried later, not given up for the session
+        if (route === 'relay') throw new Error('the KSF relay is not answering');
+        throw new KsfUnavailableError(`KSF world records: the relay (${relayBase}) is not answering`);
+      }
+      throw new KsfUnavailableError();
     } catch (e) {
       if (e instanceof KsfUnavailableError) throw e;
       if ((e as Error)?.name === 'AbortError') throw new Error('ksf.surf took too long to answer');
-      // the page's own server didn't answer at all (offline static page): no proxy either
-      throw new KsfUnavailableError();
+      throw e;
     } finally {
       if (timer) clearTimeout(timer);
     }

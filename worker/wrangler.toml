@@ -1,0 +1,12 @@
+# SURF relay (see README.md here). Deploy from this directory: npx wrangler login && npx wrangler deploy
+name = "opensurf-relay"
+main = "src/index.ts"
+compatibility_date = "2026-09-01"
+# The free plan's workers.dev subdomain: https://opensurf-relay.<your-subdomain>.workers.dev
+workers_dev = true
+
+[vars]
+# Web origins allowed to read the relay's answers (comma-separated, scheme://host[:port], no path).
+# A fork on GitHub Pages adds https://<user>.github.io here (or sets the SURF_RELAY_ALLOWED_ORIGINS repository
+# variable when deploying with .github/workflows/relay.yml).
+ALLOWED_ORIGINS = "https://tomindi.github.io,http://localhost:5173,http://localhost:4173"

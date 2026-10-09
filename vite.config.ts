@@ -2,6 +2,7 @@ import { createReadStream, existsSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { Readable } from 'node:stream';
 import { defineConfig, type Plugin } from 'vite';
+import { DRIVE_PROXY_HEADER, DRIVE_PROXY_PREFIX, driveDownloadUrl, isValidDriveId } from './src/maps/drive.js';
 import { createKsfProxyHandler } from './src/maps/ksfproxy.js';
 
 /**
@@ -43,13 +44,17 @@ function testMaps(): Plugin {
  */
 function driveProxy(): Plugin {
   const handler = async (req: { url?: string }, res: any, next: () => void) => {
-    const m = /\/__drive\/([A-Za-z0-9_-]{10,128})(?:[?#]|$)/.exec(req.url ?? '');
-    if (!m) return next();
-    res.setHeader('x-surf-drive-proxy', '1');
+    const url = req.url ?? '';
+    const at = url.indexOf(DRIVE_PROXY_PREFIX);
+    const pathEnd = url.search(/[?#]/);
+    if (at < 0 || (pathEnd >= 0 && at > pathEnd)) return next();
+    const id = url.slice(at + DRIVE_PROXY_PREFIX.length, pathEnd >= 0 ? pathEnd : undefined);
+    if (!isValidDriveId(id)) return next();
+    res.setHeader(DRIVE_PROXY_HEADER, '1');
     res.setHeader('Cache-Control', 'no-store');
     let up: Response;
     try {
-      up = await fetch(`https://drive.usercontent.google.com/download?id=${m[1]}&export=download&confirm=t`);
+      up = await fetch(driveDownloadUrl(id));
     } catch (e) {
       res.statusCode = 502;
       res.setHeader('Content-Type', 'text/plain; charset=utf-8');
