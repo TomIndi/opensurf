@@ -122,6 +122,28 @@ describe.skipIf(!chromiumPath)('renderer in a real browser', () => {
     );
   }
 
+  /** The whole canvas after a render at the current view (RGBA rows, bottom-up). */
+  function grabFrame(page: Page): Promise<number[]> {
+    return page.evaluate(() => {
+      const h = window.__renderHarness;
+      const gl = (h.renderer as unknown as { gl: WebGL2RenderingContext }).gl;
+      h.renderNow();
+      const px = new Uint8Array(gl.drawingBufferWidth * gl.drawingBufferHeight * 4);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.readPixels(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      return Array.from(px);
+    });
+  }
+
+  /** Pixels whose colour differs by more than `tol` in a channel. */
+  function differingPixels(a: number[], b: number[], tol = 2): number {
+    let n = 0;
+    for (let i = 0; i < a.length; i += 4) {
+      if (Math.abs(a[i] - b[i]) > tol || Math.abs(a[i + 1] - b[i + 1]) > tol || Math.abs(a[i + 2] - b[i + 2]) > tol) n++;
+    }
+    return n;
+  }
+
   async function fixtureChecks(page: Page): Promise<void> {
     // 2D skybox faces in Source orientation: rt = +X red, bk = +Y blue, lf = -X green, ft = -Y yellow
     near(await pixelAt(page, [0, 0, 200], [-40, 0]), [255, 0, 0], 2);
@@ -184,6 +206,74 @@ describe.skipIf(!chromiumPath)('renderer in a real browser', () => {
     expect(info.depth).toBe('reversed-float');
     expect(info.samples).toBeGreaterThan(0);
     expect(info.sky.sky3d).toBe(true);
+    await fixtureChecks(page);
+    expect(errors).toEqual([]);
+    await page.close();
+  }, 240000);
+
+  it('fixture map: a stencil only for the 3D skybox; without a multisampled one the 3D sky is drawn first (same image)', async () => {
+    const { page, errors } = await open('fixture=1&time=1');
+    const sky = () => page.evaluate(() => (window.__renderHarness.info() as unknown as { samples: number; sky: { sky3d: boolean; stencil: boolean } }));
+    expect((await sky()).sky).toMatchObject({ sky3d: true, stencil: true });
+    await page.evaluate(() => window.__renderHarness.renderer.setSettings({ drawSky3D: false }));
+    expect((await sky()).sky).toMatchObject({ sky3d: false, stencil: false });
+    await page.evaluate(() => window.__renderHarness.renderer.setSettings({ drawSky3D: true }));
+    expect((await sky()).sky).toMatchObject({ sky3d: true, stencil: true });
+    const views: [number[], number[]][] = [
+      [[0, 0, 200], [-89, 0]],
+      [[0, 0, 200], [-60, 45]],
+      [[0, 0, 200], [-40, 180]],
+      [[0, 0, 200], [-20, 300]],
+    ];
+    const grab = async () => {
+      const out: number[][] = [];
+      for (const [pos, ang] of views) {
+        await page.evaluate(([pos, ang]) => window.__renderHarness.setView(pos, ang), [pos, ang]);
+        out.push(await grabFrame(page));
+      }
+      return out;
+    };
+    const stencil = await grab();
+    // r_skystencil 0: the 3D skybox first, everywhere, without a stencil (the depth-only buffer)
+    await page.evaluate(() => window.__renderHarness.renderer.setSettings({ skyStencil: false }));
+    expect((await sky()).sky).toMatchObject({ sky3d: true, stencil: false });
+    const noStencil = await grab();
+    await page.evaluate(() => window.__renderHarness.renderer.setSettings({ skyStencil: true }));
+    expect((await sky()).sky).toMatchObject({ sky3d: true, stencil: true });
+    // a device that multisamples the depth/stencil format less than the depth-only one (or can't build it)
+    await page.evaluate(() => {
+      const h = window.__renderHarness;
+      (h.renderer as unknown as { sceneTarget: { stencilBroken: boolean } }).sceneTarget.stencilBroken = true;
+      h.renderNow();
+    });
+    const after = await sky();
+    expect(after.sky).toMatchObject({ sky3d: true, stencil: false });
+    expect(after.samples).toBe(4);
+    const first = await grab();
+    for (const other of [noStencil, first]) {
+      for (let v = 0; v < views.length; v++) expect(differingPixels(stencil[v], other[v]), `pixels that differ, view ${v}`).toBe(0);
+    }
+    await fixtureChecks(page);
+    expect(errors).toEqual([]);
+    await page.close();
+  }, 240000);
+
+  it('anti-aliasing switches live (mat_antialias): off, the supported counts, back on', async () => {
+    const { page, errors } = await open('fixture=1&time=1');
+    const info = () => page.evaluate(() => window.__renderHarness.info() as unknown as { samples: number; antialias: { requested: number; supported: number[] } });
+    const first = await info();
+    expect(first.samples).toBe(4);
+    expect(first.antialias.supported).toContain(4);
+    await page.evaluate(() => window.__renderHarness.renderer.setSettings({ antialias: 0 } as object));
+    expect((await info()).samples).toBe(0);
+    await fixtureChecks(page);
+    // a count the device lacks falls back to the nearest it has (SwiftShader: 4 only)
+    await page.evaluate(() => window.__renderHarness.renderer.setSettings({ antialias: 2 } as object));
+    const two = await info();
+    expect(two.antialias.requested).toBe(2);
+    expect(two.antialias.supported.includes(2) ? 2 : Math.min(...two.antialias.supported)).toBe(two.samples);
+    await page.evaluate(() => window.__renderHarness.renderer.setSettings({ antialias: 4 } as object));
+    expect((await info()).samples).toBe(4);
     await fixtureChecks(page);
     expect(errors).toEqual([]);
     await page.close();
@@ -266,7 +356,7 @@ describe.skipIf(!chromiumPath)('renderer in a real browser', () => {
     const after = await page.evaluate(() => window.__renderHarness.reload(20));
     expect(after.textures).toBe(first.textures);
     expect(after.geometries).toBe(first.geometries);
-    expect(after.programs).toBeLessThanOrEqual(first.programs + 2);
+    expect(after.programs, JSON.stringify({ first, after })).toBeLessThanOrEqual(first.programs + 2);
     await page.close();
   }, 240000);
 
@@ -286,6 +376,14 @@ describe.skipIf(!chromiumPath)('renderer in a real browser', () => {
       // not a black screen: the centre and the top (sky or walls) have colour
       const c = await page.evaluate(() => window.__renderHarness.readPixel(0.5, 0.7));
       expect(c[0] + c[1] + c[2]).toBeGreaterThan(15);
+      // the procedural sky is drawn after the world, only where it shows (stencil); the same image drawn first
+      expect((info.sky as { stencil?: boolean }).stencil).toBe(true);
+      await page.evaluate(() => window.__renderHarness.setView(null, [-20, 45]));
+      const after = await grabFrame(page);
+      await page.evaluate(() => window.__renderHarness.renderer.setSettings({ skyStencil: false }));
+      expect(((await page.evaluate(() => window.__renderHarness.info())).sky as { stencil?: boolean }).stencil).toBe(false);
+      const first = await grabFrame(page);
+      expect(differingPixels(after, first), `${m.id}: sky drawn after vs first`).toBe(0);
       expect(errors).toEqual([]);
       await page.close();
     }
@@ -329,6 +427,48 @@ describe.skipIf(!chromiumPath)('renderer in a real browser', () => {
         const again = await page.evaluate(() => window.__renderHarness.reload(2));
         expect(again.textures).toBe(first.textures);
         expect(again.geometries).toBe(first.geometries);
+        expect(errors).toEqual([]);
+        await page.close();
+      }, 300000);
+    }
+
+    for (const name of ['surf_beginner', 'surf_kitsune']) {
+      it(`${name}: visibility (PVS) culling hides meshes without changing the image`, async () => {
+        if (!existsSync(join(MAPS, `${name}.bsp`))) return;
+        const { page, errors } = await open(`bsp=/__maps/${name}.bsp&time=2`);
+        let culledSomewhere = 0;
+        for (const turn of [0, 90, 180, 270]) {
+          const r = await page.evaluate((turn) => {
+            const h = window.__renderHarness;
+            const R = h.renderer as unknown as {
+              setSettings: (s: object) => void;
+              debugInfo: () => { pvs: { cluster: number; culled: number; meshes: number } | null };
+              gl: WebGL2RenderingContext;
+            };
+            h.setView(null, [10, turn]);
+            const grab = (): Uint8Array => {
+              h.renderNow();
+              const gl = R.gl;
+              const px = new Uint8Array(gl.drawingBufferWidth * gl.drawingBufferHeight * 4);
+              gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+              gl.readPixels(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight, gl.RGBA, gl.UNSIGNED_BYTE, px);
+              return px;
+            };
+            R.setSettings({ novis: false });
+            const culled = grab();
+            const pvs = R.debugInfo().pvs;
+            R.setSettings({ novis: true });
+            const all = grab();
+            R.setSettings({ novis: false });
+            let diff = 0;
+            for (let i = 0; i < all.length; i++) if (all[i] !== culled[i]) diff++;
+            return { diff, pvs };
+          }, turn);
+          expect(r.pvs, 'the map has visibility data').toBeTruthy();
+          expect(r.diff, `pixels changed by PVS culling, view ${turn}`).toBe(0);
+          culledSomewhere = Math.max(culledSomewhere, r.pvs!.culled);
+        }
+        expect(culledSomewhere).toBeGreaterThan(0);
         expect(errors).toEqual([]);
         await page.close();
       }, 300000);

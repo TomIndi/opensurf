@@ -146,6 +146,7 @@ export class Ui implements UiApi {
       toast,
       confirm,
       rawInputStatus: () => this.rawInputStatus(),
+      graphicsInfo: () => this.game?.graphicsInfo?.() ?? null,
       importCfg: () => this.pickCfgFile(),
       execCfg: (name) => this.execLine(`exec ${name}`),
     });

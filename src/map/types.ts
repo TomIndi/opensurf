@@ -234,6 +234,25 @@ export interface MapRenderData {
   props?: RenderProp[];
   /** Optional: baked env_cubemaps for $envmap reflections (see MaterialEnvmap). */
   cubemaps?: CubemapDef[];
+  /** Optional: the BSP's potentially visible sets (vvis), for culling what the eye's cluster can't see. */
+  vis?: MapVisibility | null;
+}
+
+/**
+ * The world's visibility data (BSP LUMP_VISIBILITY + the world tree to find the eye's leaf): like the engine,
+ * the renderer draws only what can be seen from the cluster the eye is in.
+ */
+export interface MapVisibility {
+  numClusters: number;
+  /** Decompressed PVS: row c (rowBytes = ceil(numClusters / 8)) has bit k set when cluster k is visible from c. */
+  pvs: Uint8Array;
+  rowBytes: number;
+  /** World tree (model 0): root node, then per node its children (negative = -(leaf + 1)) and plane (nx, ny, nz, dist). */
+  headNode: number;
+  nodeChildren: Int32Array;
+  nodePlanes: Float32Array;
+  /** Cluster of every leaf (-1: solid / outside the visibility data). */
+  leafCluster: Int32Array;
 }
 
 export interface RenderProp {

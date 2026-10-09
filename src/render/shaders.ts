@@ -469,6 +469,24 @@ void main() {
 }
 `;
 
+/**
+ * Full-screen triangle at the far plane, depth only (FAR_Z: NDC depth of the far plane, 0 with reversed Z and
+ * clip control 0..1, 1 otherwise): resets the depth of the sky samples to the cleared value (see renderer.ts).
+ */
+export const FAR_QUAD_VERTEX = /* glsl */ `
+void main() {
+  gl_Position = vec4(position.xy, FAR_Z, 1.0);
+}
+`;
+
+export const FAR_QUAD_FRAGMENT = /* glsl */ `
+precision highp float;
+layout(location = 0) out vec4 fragColor;
+void main() {
+  fragColor = vec4(0.0);
+}
+`;
+
 // ------------------------------------------------------------------------------------------ sky box
 
 export const SKY_VERTEX = /* glsl */ `

@@ -1,7 +1,7 @@
 // Settings: Game / Mouse / Video / Audio / Crosshair / HUD / Binds. Every control is bound to a cvar
 // (read on build, set on input, refreshed through console_.onCvarChange) and changes are persisted.
 import { console_, execute } from '../core/cvars';
-import type { SoundApi } from '../game/api';
+import type { GraphicsInfo, SoundApi } from '../game/api';
 import {
   type GameContentStatus,
   getGameContentStatus,
@@ -17,6 +17,7 @@ import { BindsEditor } from './bindseditor';
 import { deleteCfg, listCfgs } from './cfgfiles';
 import { cvarGetter, cvarNum, cvarStr, customPhysicsActive, persistConfigSoon, PHYSICS_CVARS, setCvar } from './cvardefs';
 import { clear, h, storageGet, storageSet } from './dom';
+import { classifyGpu, gpuAdvice, gpuName } from './gpuhint';
 import { cmPer360, fmtNum } from './format';
 import { CROSSHAIR_PRESET_COLORS, CROSSHAIR_STYLE_NAMES, crosshairGeometry, drawCrosshair, exportCrosshairConfig, parseCrosshairConfig, readCrosshairParams } from './crosshair';
 import { encodeCrosshairShareCode, shareCodeErrorText, shareDataFromCvars } from './crosshaircode';
@@ -38,6 +39,8 @@ export interface SettingsDeps {
   importCfg?: () => void;
   /** Runs `exec <name>`. */
   execCfg?: (name: string) => void;
+  /** The renderer's GPU and framebuffer (Video → Graphics). */
+  graphicsInfo?: () => GraphicsInfo | null;
 }
 
 const RAW_INPUT_TEXT: Record<RawInputStatus, string> = {
@@ -72,6 +75,9 @@ export class Settings {
   private previewZoom = 1;
   private cfgList: HTMLElement | null = null;
   private rawStatusEl: HTMLElement | null = null;
+  private gpuNameEl: HTMLElement | null = null;
+  private gpuStatusEl: HTMLElement | null = null;
+  private aaStatusEl: HTMLElement | null = null;
 
   constructor(private readonly deps: SettingsDeps) {
     this.binds = new BindsEditor({ sound: deps.sound, toast: deps.toast, confirm: deps.confirm });
@@ -145,6 +151,7 @@ export class Settings {
     if (tab === 'binds') this.binds.refresh();
     if (tab === 'crosshair') requestAnimationFrame(() => this.drawPreview());
     if (tab === 'mouse') this.refreshRawInput();
+    if (tab === 'video') this.refreshGraphics();
     if (tab === 'game') this.refreshCfgs();
   }
 
@@ -411,6 +418,27 @@ export class Settings {
     );
   }
 
+  /** Updates the GPU line, its advice and the anti-aliasing status (Settings → Video). */
+  refreshGraphics(): void {
+    if (!this.gpuNameEl) return;
+    const info = this.deps.graphicsInfo?.() ?? null;
+    const cls = info ? classifyGpu(info.renderer) : 'unknown';
+    const size = info && info.renderSize[0] > 0 ? ` · 3D view ${info.renderSize[0]}×${info.renderSize[1]}` : '';
+    this.gpuNameEl.textContent = info ? `${info.renderer ? gpuName(info.renderer) : 'GPU name hidden by the browser'}${size}` : 'Unknown until the game starts';
+    const advice = gpuAdvice(cls);
+    if (this.gpuStatusEl) {
+      this.gpuStatusEl.textContent = advice ?? '';
+      this.gpuStatusEl.className = `set-status ${advice ? 'gpu-warn' : 'hidden'}`;
+    }
+    if (this.aaStatusEl) {
+      const want = cvarNum('mat_antialias');
+      const got = info?.samples ?? want;
+      const shown = info && want > 1 && got !== want;
+      this.aaStatusEl.textContent = shown ? (got > 0 ? `This GPU doesn’t support ${want}x: using ${got}x.` : 'This GPU doesn’t support multisampling here: off.') : '';
+      this.aaStatusEl.className = `set-status ${shown ? 'gpu-warn' : 'hidden'}`;
+    }
+  }
+
   /** Updates the raw input status line (Settings → Mouse). */
   refreshRawInput(): void {
     const el = this.rawStatusEl;
@@ -484,6 +512,10 @@ export class Settings {
       else void document.documentElement.requestFullscreen?.().catch(() => undefined);
     });
     this.row(d, 'Fullscreen', null, fs);
+    const gpuRow = this.row(d, 'Graphics', null, h('span'));
+    this.gpuNameEl = h('div.set-desc');
+    this.gpuStatusEl = h('div.set-status.hidden');
+    gpuRow.querySelector('.set-label')?.append(this.gpuNameEl, this.gpuStatusEl);
     this.row(
       d,
       'Render scale',
@@ -494,9 +526,9 @@ export class Settings {
     this.row(
       d,
       'FPS limit',
-      null,
+      'A browser shows at most one frame per monitor refresh, so the frame rate tops out at your refresh rate (60, 144, 240 Hz…).',
       this.select('fps_max', [
-        ['0', 'Unlimited'],
+        ['0', 'Monitor refresh rate'],
         ['60', '60'],
         ['120', '120'],
         ['144', '144'],
@@ -517,6 +549,24 @@ export class Settings {
       'cl_showfps',
     );
     const q = this.group(inner, 'Quality');
+    const aaRow = this.row(
+      q,
+      'Anti-aliasing',
+      'Multisampling (MSAA) smooths jagged edges. Each step costs GPU time at high resolutions: lower it for more FPS.',
+      this.select('mat_antialias', [
+        ['0', 'Off'],
+        ['2', '2x MSAA'],
+        ['4', '4x MSAA'],
+        ['8', '8x MSAA'],
+      ]),
+      'mat_antialias',
+    );
+    this.aaStatusEl = h('div.set-status');
+    aaRow.querySelector('.set-label')?.appendChild(this.aaStatusEl);
+    // after the game applied the change to the renderer
+    const refresh = () => (typeof requestAnimationFrame === 'function' ? requestAnimationFrame(() => this.refreshGraphics()) : setTimeout(() => this.refreshGraphics(), 0));
+    this.watch('mat_antialias', refresh);
+    this.watch('r_renderscale', refresh);
     this.row(
       q,
       'Texture filtering',

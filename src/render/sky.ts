@@ -1,13 +1,15 @@
-// The 2D skybox: a camera-centred cube drawn first (no depth test/write), sampling a cube map built from the
-// map's six sky faces (see skymath.ts for Source's face orientations), or a procedural sky (gradient, sun,
-// soft clouds, stars at night) for skies the map doesn't pack. Also derives the sun direction and the
-// synthetic lighting used by maps without lightmaps.
+// The 2D skybox: a camera-centred cube (no depth test/write) drawn first, or after the opaque world where the
+// stencil says the sky shows (3D skybox and procedural skies, see renderer.ts, stencil.ts), sampling a cube map
+// built from the map's six sky faces (see skymath.ts for Source's face orientations), or a procedural sky
+// (gradient, sun, soft clouds, stars at night) for skies the map doesn't pack. Also derives the sun direction and
+// the synthetic lighting used by maps without lightmaps.
 import { BackSide, BoxGeometry, GLSL3, Mesh, ShaderMaterial, Vector3, Vector4 } from 'three';
 import { angleVectors } from '../core/angles';
 import type { Vec3 } from '../core/vec3';
 import { isProceduralImage, stockSkyPalette } from '../bsp/materials';
 import type { FogDef, LoadedMap, SkyDef } from '../map/types';
 import { SKY_FRAGMENT, SKY_VERTEX } from './shaders';
+import { setStencilRole } from './stencil';
 import { buildGlCubeFaces, findSkySun, skyBandColor } from './skymath';
 import type { TextureCache } from './textures';
 import { SharedUniforms, U, srgbToLinearVec } from './worldmaterials';
@@ -138,6 +140,8 @@ export class SkyBox {
       depthTest: false,
       depthWrite: false,
     });
+    // drawn after the opaque world: only on the samples it left showing the sky (see stencil.ts)
+    setStencilRole(this.material, 'skyOnly');
     this.mesh = new Mesh(geo, this.material);
     this.mesh.name = 'skybox';
     this.mesh.frustumCulled = false;

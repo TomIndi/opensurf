@@ -126,8 +126,11 @@ export const CVAR_DEFS: readonly CvarDef[] = [
   { name: 'r_brightness', def: '1', flags: A, min: 0.25, max: 4, help: 'Brightness multiplier.' },
   { name: 'r_renderscale', def: '1', flags: A, min: 0.25, max: 1, help: 'Resolution scale.' },
   { name: 'r_anisotropy', def: '8', flags: A, min: 1, max: 16, help: 'Anisotropic texture filtering.' },
+  { name: 'mat_antialias', def: '4', flags: A, min: 0, max: 8, help: 'Multisample anti-aliasing: 0 off, 2, 4 or 8 samples (MSAA; limited to what the GPU supports).' },
   { name: 'fog_enable', def: '1', flags: A, min: 0, max: 1, help: 'Map fog.' },
   { name: 'r_3dsky', def: '1', flags: A, min: 0, max: 1, help: 'Draw the 3D skybox.' },
+  { name: 'r_novis', def: '0', flags: FCVAR_NONE, min: 0, max: 1, help: 'Draw the whole world instead of only what the map’s visibility data says can be seen (debug).' },
+  { name: 'r_skystencil', def: '1', flags: FCVAR_NONE, min: 0, max: 1, help: 'Draw an expensive sky (3D skybox, generated sky) after the world, only where it shows (stencil); 0 draws it first, everywhere (debug / performance comparison).' },
 
   // ---- surf / HUD
   { name: 'surf_hud_speed', def: '1', flags: A, min: 0, max: 1, help: 'Show the speedometer (!speed).' },

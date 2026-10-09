@@ -21,6 +21,7 @@ import type { Brush } from '../physics/types';
 import { CONTENTS_MONSTERCLIP, CONTENTS_PLAYERCLIP } from '../physics/types';
 import { FLAT_FRAGMENT, FLAT_VERTEX } from './shaders';
 import { srgbToLinear } from './worldmaterials';
+import { setStencilRole } from './stencil';
 
 export interface DebugBox {
   mins: Vec3;
@@ -87,6 +88,8 @@ export class DebugBoxes {
     this.behind.frustumCulled = false;
     this.front.renderOrder = 20;
     this.behind.renderOrder = 21;
+    // opaque lines drawn before the sky: they keep it from painting over them (see stencil.ts)
+    setStencilRole(this.matFront, 'occluder');
     this.root.add(this.front, this.behind);
     this.ensure(64);
   }
