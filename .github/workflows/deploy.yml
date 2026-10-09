@@ -37,8 +37,12 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    # Not the usual `github-pages` environment: enabling Pages created that one with a deployment branch rule
+    # allowing only the repository's default branch (`claude/base` here), which refuses every deploy from `main`.
+    # actions/deploy-pages accepts another environment name; this one has no branch rule (deploys only run on
+    # pushes to main / master and manual runs, see `on:` above).
     environment:
-      name: github-pages
+      name: pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
