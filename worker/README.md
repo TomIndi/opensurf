@@ -47,8 +47,9 @@ The workflow's log prints the Worker's URL.
 
 ## Point the site at the relay
 
-Add the repository **variable** `SURF_RELAY_URL` = the Worker's URL (Settings → Secrets and variables → Actions →
-Variables), then re-run "Deploy to GitHub Pages" (or push): the build gets it as `VITE_SURF_RELAY`. Locally:
+This repository's `.github/workflows/deploy.yml` uses `https://opensurf-relay.tomasindi360.workers.dev` unless the
+repository **variable** `SURF_RELAY_URL` names another relay (Settings → Secrets and variables → Actions →
+Variables); after changing either, re-run "Deploy to GitHub Pages" (or push): the build gets it as `VITE_SURF_RELAY`. Locally:
 `VITE_SURF_RELAY=https://opensurf-relay.<sub>.workers.dev npm run build`. To try a relay without rebuilding, open the
 site with `?relay=<url>` (`?relay=off` disables the built-in one for that page load).
 
