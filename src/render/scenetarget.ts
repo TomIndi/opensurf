@@ -4,7 +4,7 @@
 // three.js only gives a WebGLRenderTarget a 32-bit float depth buffer through a DepthTexture, which it then
 // allocates (single-sample, never sampled here) next to the multisampled renderbuffer, and it resolves the MSAA
 // buffer at the end of every render() call. This target owns its framebuffer instead: a DEPTH_COMPONENT32F
-// renderbuffer (reversed Z; DEPTH_COMPONENT24 with the logarithmic fallback), or DEPTH32F_STENCIL8 /
+// renderbuffer (reversed Z; DEPTH_COMPONENT24 with the standard or logarithmic fallback), or DEPTH32F_STENCIL8 /
 // DEPTH24_STENCIL8 when the renderer asks for a stencil (the sky drawn after the world, see stencil.ts), no depth
 // texture, and three.js draws into it through a proxy render target bound with setRenderTargetFramebuffer, which
 // never resolves. The renderer resolves once, after the last pass of the frame. Without MSAA the colour attachment

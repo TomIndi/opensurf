@@ -10,6 +10,7 @@
 //   zonestyle=floor|box      zone beams: floor outline (default) or the full box
 //   demo=1                   demo zones + a ghost (with trail) in front of the camera
 //   noext=EXT_a,EXT_b        pretend extensions are missing (fallback paths)
+//   logdepth=1               without EXT_clip_control: logarithmic instead of standard depth
 //   ds=auto|0|1              back-face culling of BSP surfaces (default auto: see auditFaceOrientation)
 //   hud=0                    hide the info overlay
 //   fly=1                    WASD + mouse (click to lock) fly camera; shift = fast
@@ -56,6 +57,7 @@ const noext = (params.get('noext') ?? '').split(',').filter(Boolean);
 const ds = params.get('ds');
 const renderer = new Renderer(canvas, {
   disableExtensions: noext,
+  logDepth: flag('logdepth', false),
   preserveDrawingBuffer: flag('preserve', false),
   doubleSided: ds === null || ds === 'auto' ? 'auto' : ds !== '0' && ds !== 'false',
 });

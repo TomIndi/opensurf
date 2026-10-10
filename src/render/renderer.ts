@@ -3,7 +3,9 @@
 //
 // Frame (all into the scene framebuffer, scenetarget.ts: MSAA colour (mat_antialias) + a 32-bit float depth
 // renderbuffer with reversed Z when the device has EXT_clip_control - no z-fighting across 32k-unit maps with a
-// 3-unit near plane; logarithmic depth otherwise):
+// 3-unit near plane; otherwise a standard 24-bit depth buffer like the Source engine's own - Firefox has no
+// EXT_clip_control, and the logarithmic alternative (opt-in: RendererOptions.logDepth) writes gl_FragDepth, which
+// turns off early depth rejection and shades every hidden fragment):
 //   1. clear
 //   2. the main view's opaque surfaces: (2D sky cube first, see below), sky faces as depth-only masks, the opaque
 //      world sorted by shader/material, brush entities, props, decals
@@ -70,6 +72,8 @@ export interface RendererOptions {
   preserveDrawingBuffer?: boolean;
   /** Near plane (default 3). */
   near?: number;
+  /** Without EXT_clip_control, logarithmic depth instead of a standard depth buffer (more precision, much slower). */
+  logDepth?: boolean;
   /** Back-face culling of BSP surfaces: 'auto' (default, see auditFaceOrientation), or forced on/off (debugging). */
   doubleSided?: boolean | 'auto';
 }
@@ -118,8 +122,11 @@ function hideExtensions(gl: WebGL2RenderingContext, names: string[]): void {
   (gl as unknown as { getSupportedExtensions: () => string[] | null }).getSupportedExtensions = () => (getSup() ?? []).filter((n) => !hidden.has(n));
 }
 
+/** Scene depth buffer: reversed-Z float (EXT_clip_control), standard 24-bit, or logarithmic (opt-in fallback). */
+export type DepthMode = 'reversed-float' | 'standard' | 'logarithmic';
+
 export interface RendererDebugInfo {
-  depth: 'reversed-float' | 'logarithmic';
+  depth: DepthMode;
   /** MSAA samples in use (0 = off), the count asked for (mat_antialias) and what the device supports. */
   samples: number;
   antialias: { requested: number; supported: number[] };
@@ -145,7 +152,7 @@ export interface RendererDebugInfo {
 export class Renderer implements RendererApi {
   readonly three: WebGLRenderer;
   readonly gl: WebGL2RenderingContext;
-  readonly depthMode: 'reversed-float' | 'logarithmic';
+  readonly depthMode: DepthMode;
   readonly camera: PerspectiveCamera;
   readonly settings: RenderSettings = { ...DEFAULT_SETTINGS };
 
@@ -215,16 +222,17 @@ export class Renderer implements RendererApi {
     this.gl = gl;
     const exts = new Set(gl.getSupportedExtensions() ?? []);
     const reversed = exts.has('EXT_clip_control');
+    const logDepth = !reversed && !!opts.logDepth;
     this.three = new WebGLRenderer({
       canvas,
       context: gl,
       antialias: false,
       powerPreference: 'high-performance',
       reversedDepthBuffer: reversed,
-      logarithmicDepthBuffer: !reversed,
+      logarithmicDepthBuffer: logDepth,
       preserveDrawingBuffer: !!opts.preserveDrawingBuffer,
     } as ConstructorParameters<typeof WebGLRenderer>[0]);
-    this.depthMode = reversed && this.three.capabilities.reversedDepthBuffer ? 'reversed-float' : 'logarithmic';
+    this.depthMode = reversed && this.three.capabilities.reversedDepthBuffer ? 'reversed-float' : logDepth ? 'logarithmic' : 'standard';
     this.three.outputColorSpace = SRGBColorSpace;
     this.three.toneMapping = NoToneMapping;
     this.three.autoClear = false;
