@@ -279,8 +279,17 @@ describe.skipIf(!chromiumPath)('renderer in a real browser', () => {
     await page.close();
   }, 240000);
 
-  it('falls back to a logarithmic depth buffer without EXT_clip_control (and copes without anisotropy / S3TC)', async () => {
+  it('falls back to a standard depth buffer without EXT_clip_control (and copes without anisotropy / S3TC)', async () => {
     const { page, errors } = await open('fixture=1&time=1&noext=EXT_clip_control,EXT_texture_filter_anisotropic,WEBGL_compressed_texture_s3tc,OES_texture_float_linear');
+    const info = await page.evaluate(() => window.__renderHarness.info());
+    expect(info.depth).toBe('standard');
+    await fixtureChecks(page);
+    expect(errors).toEqual([]);
+    await page.close();
+  }, 240000);
+
+  it('logarithmic depth stays available as an opt-in fallback', async () => {
+    const { page, errors } = await open('fixture=1&time=1&logdepth=1&noext=EXT_clip_control');
     const info = await page.evaluate(() => window.__renderHarness.info());
     expect(info.depth).toBe('logarithmic');
     await fixtureChecks(page);

@@ -163,7 +163,7 @@ if a map's audited face area is mostly inverted.
 Frame cost (what keeps it cheap; the header of `render/renderer.ts` has the full frame):
 * **Scene framebuffer** (`render/scenetarget.ts`): MSAA colour (`RenderSettings.antialias` ← `mat_antialias`, default
   4, rebuilt live, clamped to the counts the device supports; alpha-tested surfaces switch alpha to coverage with it)
-  and a DEPTH_COMPONENT32F renderbuffer (reversed Z; DEPTH_COMPONENT24 with the logarithmic fallback), no depth
+  and a DEPTH_COMPONENT32F renderbuffer (reversed Z; DEPTH_COMPONENT24 without EXT_clip_control, e.g. Firefox: standard depth like the Source engine, or logarithmic depth when RendererOptions.logDepth asks for it), no depth
   texture; DEPTH32F_STENCIL8 / DEPTH24_STENCIL8 only while the sky is drawn after the world (below), and only when
   that format multisamples like the depth-only one (`SceneTarget.stencilFor`; ANGLE's D3D11 backend, Chrome on Windows,
   backs DEPTH32F_STENCIL8 with the 64-bit D32_FLOAT_S8X24_UINT, twice D32_FLOAT). three.js draws into it through a
