@@ -18,6 +18,7 @@ import { cvarBool, cvarNum, ensureUiCvars, registerUiOwnedCvars } from './cvarde
 import { DevConsole } from './devconsole';
 import { keyBoundTo } from './conutil';
 import { h, isTextInput } from './dom';
+import { classifyGpu, gpuAdvice, gpuName } from './gpuhint';
 import { Hud } from './hud';
 import { icon } from './icons';
 import { codeToKeyName } from './keys';
@@ -204,6 +205,7 @@ export class Ui implements UiApi {
       // a new map starts with an empty chat feed (like the engine's HUD reset on level change); the map's
       // welcome lines follow this event
       this.chatBox.clear();
+      this.warnSlowGpu();
     });
     // new PBs show up in the map browser
     game.on('runfinished', () => void this.browser.refreshCached());
@@ -701,6 +703,22 @@ export class Ui implements UiApi {
     const v = typeof fromGame === 'boolean' ? fromGame : this.uiRawInput;
     return v === true ? 'active' : v === false ? 'unsupported' : 'unknown';
   }
+
+  /**
+   * Once per page: integrated or software graphics alone explain a low frame rate (a gaming laptop's browser runs
+   * on the integrated GPU unless Windows is told otherwise), so say so where it is seen, not only in Settings.
+   */
+  private warnSlowGpu(): void {
+    if (this.gpuWarned) return;
+    const info = this.game?.graphicsInfo?.() ?? null;
+    if (!info?.renderer) return;
+    const advice = gpuAdvice(classifyGpu(info.renderer));
+    if (!advice) return;
+    this.gpuWarned = true;
+    this.toast(`Running on ${gpuName(info.renderer)}. ${advice}`, 'error', 15);
+  }
+
+  private gpuWarned = false;
 
   toast(msg: string, kind: ToastKind = 'info', seconds = 4.5): void {
     const el = h(`div.toast.${kind}`, null, icon(kind === 'error' ? 'warning' : kind === 'success' ? 'check' : 'info'), h('span', { text: msg }));
