@@ -67,6 +67,18 @@ Start/end/stage/checkpoint/bonus zones come from SurfTimer's public zone databas
 `public/maps/ZONES_LICENSE.md`) for ~450 maps, from Momentum Mod timer entities when a map has them, or
 from your own zones (`!zones` / `zone_*` console commands).
 
+## Run it in Docker
+
+Plays the game locally, with the map downloads and KSF records working (no relay needed). With
+[Docker Desktop](https://www.docker.com/products/docker-desktop/) running, from the repository folder:
+
+```
+docker compose up -d --build
+```
+
+Then open http://localhost:4173. It only listens on this PC and starts again with Docker. After pulling new
+changes, run the same command to rebuild; `docker compose down` stops it.
+
 ## Controls (CS:GO defaults)
 
 | | |
